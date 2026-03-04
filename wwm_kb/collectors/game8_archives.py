@@ -15,11 +15,14 @@ SEED_URL = "https://game8.co/games/Where-Winds-Meet/"
 ARCHIVE_RE = re.compile(r"^/games/Where-Winds-Meet/archives/\d+$")
 SCOPE_RE = re.compile(r"^/games/Where-Winds-Meet/")
 
+
 def _is_same_scope(href: str) -> bool:
     return bool(SCOPE_RE.match(href))
 
+
 def _is_archive(href: str) -> bool:
     return bool(ARCHIVE_RE.match(href))
+
 
 def _clean_title(t: str | None) -> str | None:
     if not t:
@@ -29,8 +32,8 @@ def _clean_title(t: str | None) -> str | None:
         return None
     # часто бывает "Something | Game8"
     t = t.replace("| Game8", "").strip()
-    # иногда встречается "Where Winds Meet | Game8" как мусор — но оставим как fallback
     return t or None
+
 
 def _extract_title(soup: BeautifulSoup) -> str | None:
     # 1) h1
@@ -62,6 +65,8 @@ def _extract_title(soup: BeautifulSoup) -> str | None:
             return t
 
     return None
+
+
 def _is_noise_block(txt: str) -> bool:
     low = (txt or "").lower()
     noise_markers = (
@@ -75,6 +80,7 @@ def _is_noise_block(txt: str) -> bool:
         "learn more",
     )
     return any(m in low for m in noise_markers)
+
 
 def _extract_article_text(soup: BeautifulSoup) -> str:
     """
@@ -110,6 +116,7 @@ def _extract_article_text(soup: BeautifulSoup) -> str:
 
     return best
 
+
 class Game8ArchivesCollector(Collector):
     source = "game8"
     method = "html_archives"
@@ -139,19 +146,18 @@ class Game8ArchivesCollector(Collector):
         return found
 
     def _page_text_min(self, html: str) -> tuple[str | None, str]:
-    soup = BeautifulSoup(html, "lxml")
+        soup = BeautifulSoup(html, "lxml")
 
-    title = _extract_title(soup)
+        title = _extract_title(soup)
 
-    # ✅ берём именно тело статьи
-    article_text = _extract_article_text(soup)
-    if article_text:
-        return title, article_text
+        # берём именно тело статьи
+        article_text = _extract_article_text(soup)
+        if article_text:
+            return title, article_text
 
-    # fallback: если совсем ничего — как было (шумно, но хоть что-то)
-    body = soup.find("body") or soup
-    return title, body.get_text("\n", strip=True)
-
+        # fallback: если совсем ничего — как было (шумно, но хоть что-то)
+        body = soup.find("body") or soup
+        return title, body.get_text("\n", strip=True)
 
     async def collect(self):
         headers = {"User-Agent": "dis-bot/2.0 (WWM KB; Game8 daily sync)"}
@@ -187,7 +193,9 @@ class Game8ArchivesCollector(Collector):
                     "url": url,
                     "title": title,
                     "text": text,
-                    "html_sha256": hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest(),
+                    "html_sha256": hashlib.sha256(
+                        html.encode("utf-8", errors="ignore")
+                    ).hexdigest(),
                 }
                 payload_json = json.dumps(payload, ensure_ascii=False)
                 content_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
@@ -196,11 +204,11 @@ class Game8ArchivesCollector(Collector):
                     source=self.source,
                     method=self.method,
                     entity_type="game8_archive_article",
-                    external_id=url,   # уникальный ключ = URL
+                    external_id=url,  # уникальный ключ = URL
                     title=title,
                     url=url,
                     payload_json=payload_json,
-                    content_hash=content_hash
+                    content_hash=content_hash,
                 )
 
                 pages += 1
