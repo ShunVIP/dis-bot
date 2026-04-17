@@ -178,7 +178,7 @@ python main_file.py
 - `scripts/deploy.sh` — удалённый сценарий обновления
 - `scripts/bootstrap_vps.sh` — первичная настройка Ubuntu/Debian VPS
 - `deploy/systemd/vipik-discord-bot.service.template` — шаблон сервиса
-- `deploy/systemd/vipik-discord-bot-update.*.template` — таймер автообновления с сервера
+- `deploy/systemd/vipik-discord-bot-update.*.template` — опциональный таймер автообновления с сервера
 
 ### Как это работает
 
@@ -188,7 +188,7 @@ python main_file.py
 4. На VPS выполняется `scripts/deploy.sh`.
 5. Скрипт обновляет репозиторий, ставит зависимости и перезапускает `systemd`-сервис.
 
-Если не хочется настраивать GitHub Secrets, `bootstrap_vps.sh` также включает `systemd`-timer, который сам проверяет обновления из `main` раз в минуту и подтягивает их на сервер.
+Для приватного репозитория основной путь — GitHub Actions загружает код на VPS по SSH. Таймер автообновления с сервера имеет смысл только если у VPS уже есть отдельный доступ к репозиторию.
 
 ### Что нужно один раз сделать на VPS
 

@@ -29,19 +29,36 @@ jobs:
           PORT="${VPS_PORT:-22}"
           ssh-keyscan -p "$PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy on VPS
+      - name: Upload application files
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
+        run: |
+          PORT="${VPS_PORT:-22}"
+          APP_DIR="${VPS_APP_DIR:-/opt/dis-bot}"
+          tar \
+            --exclude=.git \
+            --exclude=.venv \
+            --exclude=__pycache__ \
+            --exclude=models \
+            --exclude=bot.log \
+            --exclude=KGTD.env \
+            --exclude='datebase/*.db' \
+            -czf - . | ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$VPS_USER@$VPS_HOST" \
+            "mkdir -p '$APP_DIR' && tar -xzf - -C '$APP_DIR'"
+
+      - name: Run deploy script on VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
           VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
           VPS_SERVICE_NAME: ${{ secrets.VPS_SERVICE_NAME }}
-          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
         run: |
           PORT="${VPS_PORT:-22}"
           APP_DIR="${VPS_APP_DIR:-/opt/dis-bot}"
           SERVICE_NAME="${VPS_SERVICE_NAME:-vipik-discord-bot}"
-
           ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$VPS_USER@$VPS_HOST" \
-            "export APP_DIR='$APP_DIR' BRANCH='main' REPO_URL='$REPO_URL' SERVICE_NAME='$SERVICE_NAME'; bash -s" \
-            < scripts/deploy.sh
+            "export APP_DIR='$APP_DIR' BRANCH='main' SERVICE_NAME='$SERVICE_NAME' SKIP_GIT_PULL='1'; bash '$APP_DIR/scripts/deploy.sh'"

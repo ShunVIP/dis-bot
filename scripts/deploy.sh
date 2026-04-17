@@ -6,6 +6,7 @@ BRANCH="${BRANCH:-main}"
 REPO_URL="${REPO_URL:-https://github.com/ShunVIP/dis-bot.git}"
 SERVICE_NAME="${SERVICE_NAME:-vipik-discord-bot}"
 UNIT_NAME="$SERVICE_NAME"
+SKIP_GIT_PULL="${SKIP_GIT_PULL:-0}"
 
 if [[ "$UNIT_NAME" != *.service ]]; then
   UNIT_NAME="${UNIT_NAME}.service"
@@ -35,17 +36,21 @@ fi
 
 mkdir -p "$APP_DIR"
 
-if [ ! -d "$APP_DIR/.git" ]; then
-  log "cloning repository into $APP_DIR"
-  git clone "$REPO_URL" "$APP_DIR"
-fi
-
 cd "$APP_DIR"
 
-log "fetching latest changes"
-git fetch origin "$BRANCH"
-git checkout "$BRANCH"
-git pull --ff-only origin "$BRANCH"
+if [ "$SKIP_GIT_PULL" != "1" ]; then
+  if [ ! -d "$APP_DIR/.git" ]; then
+    log "cloning repository into $APP_DIR"
+    git clone "$REPO_URL" "$APP_DIR"
+  fi
+
+  log "fetching latest changes"
+  git fetch origin "$BRANCH"
+  git checkout "$BRANCH"
+  git pull --ff-only origin "$BRANCH"
+else
+  log "skipping git pull; using files already present in $APP_DIR"
+fi
 
 if [ ! -d ".venv" ]; then
   log "creating virtual environment"

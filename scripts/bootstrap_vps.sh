@@ -6,6 +6,8 @@ REPO_URL="${REPO_URL:-https://github.com/ShunVIP/dis-bot.git}"
 RUN_USER="${RUN_USER:-bot}"
 SERVICE_NAME="${SERVICE_NAME:-vipik-discord-bot}"
 BRANCH="${BRANCH:-main}"
+SKIP_CLONE="${SKIP_CLONE:-0}"
+ENABLE_PULL_TIMER="${ENABLE_PULL_TIMER:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -51,16 +53,17 @@ if ! id "$RUN_USER" >/dev/null 2>&1; then
   run_root useradd --system --create-home --shell /bin/bash "$RUN_USER"
 fi
 
-if [ ! -d "$APP_DIR/.git" ]; then
+if [ "$SKIP_CLONE" != "1" ] && [ ! -d "$APP_DIR/.git" ]; then
   log "cloning repository into $APP_DIR"
   run_root mkdir -p "$(dirname "$APP_DIR")"
   run_root git clone "$REPO_URL" "$APP_DIR"
 fi
 
+run_root mkdir -p "$APP_DIR"
 run_root chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
 
 log "deploying latest code"
-run_as_user env APP_DIR="$APP_DIR" REPO_URL="$REPO_URL" BRANCH="$BRANCH" SERVICE_NAME="$SERVICE_NAME" bash "$APP_DIR/scripts/deploy.sh"
+run_as_user env APP_DIR="$APP_DIR" REPO_URL="$REPO_URL" BRANCH="$BRANCH" SERVICE_NAME="$SERVICE_NAME" SKIP_GIT_PULL="$SKIP_CLONE" bash "$APP_DIR/scripts/deploy.sh"
 
 if [ ! -f "$TEMPLATE_PATH" ] && [ -f "$APP_DIR/deploy/systemd/vipik-discord-bot.service.template" ]; then
   TEMPLATE_PATH="$APP_DIR/deploy/systemd/vipik-discord-bot.service.template"
@@ -102,7 +105,7 @@ fi
 run_root systemctl daemon-reload
 run_root systemctl enable "${SERVICE_NAME}.service"
 run_root systemctl restart "${SERVICE_NAME}.service"
-if [ -f "/etc/systemd/system/${SERVICE_NAME}-update.timer" ]; then
+if [ "$ENABLE_PULL_TIMER" = "1" ] && [ -f "/etc/systemd/system/${SERVICE_NAME}-update.timer" ]; then
   run_root systemctl enable "${SERVICE_NAME}-update.timer"
   run_root systemctl restart "${SERVICE_NAME}-update.timer"
 fi
