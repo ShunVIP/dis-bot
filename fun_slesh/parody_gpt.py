@@ -22,6 +22,8 @@ import math
 import random
 import sqlite3
 import asyncio
+import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from datetime import datetime, timezone
@@ -146,6 +148,63 @@ UTC = timezone.utc
 
 GPT_MODELS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "gpt"))
 
+try:
+    from config import REMOTE_MODEL_API_URL, REMOTE_MODEL_API_TOKEN
+except Exception:
+    REMOTE_MODEL_API_URL = os.environ.get("REMOTE_MODEL_API_URL", "").strip()
+    REMOTE_MODEL_API_TOKEN = os.environ.get("REMOTE_MODEL_API_TOKEN", "").strip()
+
+_REMOTE_EXISTS_CACHE: dict[int, tuple[bool, float]] = {}
+_REMOTE_EXISTS_TTL_SEC = 60.0
+
+def _remote_enabled() -> bool:
+    return bool(REMOTE_MODEL_API_URL and REMOTE_MODEL_API_TOKEN)
+
+def _remote_call(path: str, payload: dict, timeout: float = 8.0) -> dict | None:
+    if not _remote_enabled():
+        return None
+    try:
+        base = REMOTE_MODEL_API_URL.rstrip("/")
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}{path}",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Model-Token": REMOTE_MODEL_API_TOKEN,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
+        return None
+
+def remote_gpt_model_exists(user_id: int, use_cache: bool = True) -> bool:
+    if not _remote_enabled():
+        return False
+
+    now_ts = datetime.now(UTC).timestamp()
+    cached = _REMOTE_EXISTS_CACHE.get(user_id)
+    if use_cache and cached and now_ts - cached[1] < _REMOTE_EXISTS_TTL_SEC:
+        return cached[0]
+
+    result = _remote_call("/model_exists", {"user_id": user_id}, timeout=3.0)
+    ok = bool(result and result.get("ok") and result.get("exists"))
+    _REMOTE_EXISTS_CACHE[user_id] = (ok, now_ts)
+    return ok
+
+def remote_generate_neuro_phrase(user_id: int, max_new_tokens: int = 80) -> Optional[str]:
+    result = _remote_call(
+        "/generate_neuro_phrase",
+        {"user_id": user_id, "max_new_tokens": max_new_tokens},
+        timeout=30.0,
+    )
+    if not result or not result.get("ok"):
+        return None
+    phrase = (result.get("phrase") or "").strip()
+    return phrase or None
+
 # ─── Проверка зависимостей ────────────────────────────────────────────────────
 try:
     import torch
@@ -171,7 +230,8 @@ def _gpt_model_path(user_id: int) -> str:
 
 def gpt_model_exists(user_id: int) -> bool:
     path = _gpt_model_path(user_id)
-    return os.path.exists(path) and os.path.exists(os.path.join(path, "config.json"))
+    local_exists = os.path.exists(path) and os.path.exists(os.path.join(path, "config.json"))
+    return local_exists or remote_gpt_model_exists(user_id)
 
 # ─── TF-IDF: АВТОР ───────────────────────────────────────────────────────────
 def _tfidf_scores(user_id: int, all_user_ids: list[int]) -> dict[str, float]:
@@ -391,9 +451,13 @@ def generate_neuro_phrase(user_id: int, max_new_tokens: int = 80) -> Optional[st
     фразу которая СТИЛИСТИЧЕСКИ подходит пользователю,
     даже используя слова которых у него не было.
     """
+    local_exists = os.path.exists(_gpt_model_path(user_id)) and os.path.exists(os.path.join(_gpt_model_path(user_id), "config.json"))
+    if not local_exists and remote_gpt_model_exists(user_id):
+        return remote_generate_neuro_phrase(user_id, max_new_tokens=max_new_tokens)
+
     if not TRANSFORMERS_OK:
         return None
-    if not gpt_model_exists(user_id):
+    if not local_exists:
         return None
 
     persona = load_persona(user_id)

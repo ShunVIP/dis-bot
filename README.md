@@ -178,6 +178,8 @@ python main_file.py
 - `scripts/deploy.sh` — удалённый сценарий обновления
 - `scripts/bootstrap_vps.sh` — первичная настройка Ubuntu/Debian VPS
 - `scripts/sync_training_to_vps.ps1` — перенос обученных моделей и persona-баз на VPS без git
+- `scripts/model_bridge_server.py` — локальный API для тяжёлых моделей на ПК
+- `scripts/run_model_bridge.ps1` — запуск локального model bridge на Windows
 - `deploy/systemd/vipik-discord-bot.service.template` — шаблон сервиса
 - `deploy/systemd/vipik-discord-bot-update.*.template` — опциональный таймер автообновления с сервера
 
