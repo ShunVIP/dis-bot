@@ -6,3 +6,6 @@ TOKEN = os.getenv("tok")
 
 if not TOKEN:
     raise ValueError("❌ Переменная tok не найдена в файле KGTD")
+
+# Steam API (получить: https://steamcommunity.com/dev/apikey)
+STEAM_API_KEY = os.getenv("STEAM_API_KEY", "")

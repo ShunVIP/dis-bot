@@ -1,25 +1,77 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 # fun_slesh/games.py
-import os
-import sqlite3
-import random
+"""
+Игры сервера:
+  /кнб              — КНБ с ботом
+  /кнб_дуэль        — PvP КНБ
+  /кнб_ход          — ход в дуэли
+  /кнб_отмена       — отмена дуэли
+  /угадай           — угадай число
+  /виселица         — соло виселица против бота
+  /виселица_старт   — мультиплеер: загадать слово
+  /виселица_буква   — угадать букву в мульти-игре
+  /бж               — блэкджек против бота (со ставкой)
+  /бж_дуэль         — блэкджек PvP (оба против бота, кто ближе к 21)
+"""
+
+import os, sqlite3, random, asyncio
 from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import commands
 from discord import app_commands
 
-from core.economy import add_coins
+from core.economy import add_coins, get_balance
 from utils.events_bus import emit
 
+UTC     = timezone.utc
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 CHOICES = ("камень", "ножницы", "бумага")
 
-def _ensure_tables() -> None:
+# ── Слова для виселицы ────────────────────────────────────────────────────────
+HANGMAN_WORDS = [
+    "программист","дискорд","сервер","сообщество","администратор",
+    "разработчик","компьютер","клавиатура","мышеловка","операция",
+    "алгоритм","переменная","функция","библиотека","интерфейс",
+    "константа","оператор","компилятор","интерпретатор","процессор",
+    "принтер","монитор","наушники","микрофон","веб-камера",
+    "кофеварка","холодильник","телевизор","телефон","планшет",
+    "автомобиль","мотоцикл","велосипед","самолёт","вертолёт",
+    "шоколадка","мороженое","пельмени","борщ","пицца",
+    "кинотеатр","библиотека","стадион","аквариум","зоопарк",
+    "абракадабра","хулиганство","безобразие","вдохновение","загадочный",
+]
+
+# ── Колода карт ────────────────────────────────────────────────────────────────
+SUITS  = ["♠", "♥", "♦", "♣"]
+RANKS  = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
+VALUES = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"10":10,
+          "J":10,"Q":10,"K":10,"A":11}
+
+def _new_deck() -> list[str]:
+    deck = [f"{r}{s}" for s in SUITS for r in RANKS]
+    random.shuffle(deck)
+    return deck
+
+def _card_value(card: str) -> int:
+    rank = card[:-1]  # убираем масть
+    return VALUES.get(rank, 0)
+
+def _hand_total(hand: list[str]) -> int:
+    total = sum(_card_value(c) for c in hand)
+    aces  = sum(1 for c in hand if c[:-1] == "A")
+    while total > 21 and aces:
+        total -= 10
+        aces  -= 1
+    return total
+
+def _hand_str(hand: list[str]) -> str:
+    return " ".join(hand)
+
+# ── БД ────────────────────────────────────────────────────────────────────────
+def _ensure_tables():
     with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        # дуэли PvP
-        cur.execute("""
+        conn.executescript("""
             CREATE TABLE IF NOT EXISTS rps_duels (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id     INTEGER NOT NULL,
@@ -28,261 +80,768 @@ def _ensure_tables() -> None:
                 opponent_id  INTEGER NOT NULL,
                 init_choice  TEXT,
                 opp_choice   TEXT,
-                status       TEXT NOT NULL,      -- open|done|cancelled|expired
-                created_at   TEXT NOT NULL,      -- ISO UTC
-                expires_at   TEXT NOT NULL       -- ISO UTC
-            )
+                status       TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                expires_at   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rps_status  ON rps_duels(status);
+            CREATE INDEX IF NOT EXISTS idx_rps_channel ON rps_duels(channel_id);
+
+            -- Мультиплеер виселица
+            CREATE TABLE IF NOT EXISTS hangman_games (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    INTEGER NOT NULL,
+                channel_id  INTEGER NOT NULL,
+                host_id     INTEGER NOT NULL,
+                word        TEXT    NOT NULL,
+                guessed     TEXT    NOT NULL DEFAULT '',
+                wrong       TEXT    NOT NULL DEFAULT '',
+                status      TEXT    NOT NULL DEFAULT 'active',
+                created_at  TEXT    NOT NULL
+            );
         """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_rps_duels_status ON rps_duels(status)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_rps_duels_channel ON rps_duels(channel_id)")
-        conn.commit()
 
-def _rps_result(user: str, bot: str) -> int:
-    # 1 = win, 0 = draw, -1 = lose
-    if user == bot:
-        return 0
-    wins = {("камень", "ножницы"), ("ножницы", "бумага"), ("бумага", "камень")}
-    return 1 if (user, bot) in wins else -1
+# ── КНБ helpers ───────────────────────────────────────────────────────────────
+def _rps_result(user: str, bot_pick: str) -> int:
+    if user == bot_pick: return 0
+    return 1 if (user, bot_pick) in {("камень","ножницы"),
+                                      ("ножницы","бумага"),
+                                      ("бумага","камень")} else -1
 
+# ── Виселица helpers ──────────────────────────────────────────────────────────
+HANGMAN_STAGES = [
+    "```\n  +---+\n  |   |\n      |\n      |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n      |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n  |   |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n /|   |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n      |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n /    |\n      |\n=========```",
+    "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n / \\  |\n      |\n=========```",
+]
+MAX_WRONG = len(HANGMAN_STAGES) - 1
+
+def _mask_word(word: str, guessed: set[str]) -> str:
+    return " ".join(c if c in guessed or c == "-" else r"\_" for c in word)
+
+def _hangman_embed(word: str, guessed_str: str, wrong_str: str,
+                   status: str = "active") -> discord.Embed:
+    guessed = set(guessed_str)
+    wrong   = list(wrong_str)
+    stage   = HANGMAN_STAGES[min(len(wrong), MAX_WRONG)]
+    mask    = _mask_word(word, guessed)
+
+    if status == "win":
+        color, title = discord.Color.green(), "🎉 Слово угадано!"
+    elif status == "lose":
+        color, title = discord.Color.red(), "💀 Игра окончена"
+    else:
+        color, title = discord.Color.blurple(), "🪢 Виселица"
+
+    emb = discord.Embed(title=title, color=color)
+    emb.add_field(name="Виселица",    value=stage,  inline=False)
+    emb.add_field(name="Слово",       value=f"`{mask}`", inline=False)
+    if wrong:
+        emb.add_field(name=f"Ошибки ({len(wrong)}/{MAX_WRONG})",
+                      value=" ".join(wrong), inline=False)
+    if status == "lose":
+        emb.add_field(name="Загаданное слово", value=f"**{word}**", inline=False)
+    return emb
+
+
+# ── Cog ───────────────────────────────────────────────────────────────────────
 class Games(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         _ensure_tables()
+        # Активные соло-игры виселицы: user_id → {word, guessed, wrong}
+        self._solo_hangman: dict[int, dict] = {}
 
-    # ─────────────────────  КНБ с ботом  ─────────────────────
+    # ════════════════════════════════════════════════════════════
+    #  КНБ
+    # ════════════════════════════════════════════════════════════
     @app_commands.command(name="кнб", description="Камень-ножницы-бумага с ботом")
     @app_commands.describe(выбор="камень | ножницы | бумага")
+    @app_commands.choices(выбор=[
+        app_commands.Choice(name="камень",  value="камень"),
+        app_commands.Choice(name="ножницы", value="ножницы"),
+        app_commands.Choice(name="бумага",  value="бумага"),
+    ])
     async def кнб(self, interaction: discord.Interaction, выбор: str):
-        v = выбор.strip().lower()
-        if v not in CHOICES:
-            await interaction.response.send_message("❌ Варианты: камень | ножницы | бумага", ephemeral=True)
-            return
         bot_pick = random.choice(CHOICES)
-        res = _rps_result(v, bot_pick)
+        res = _rps_result(выбор, bot_pick)
         if res > 0:
-            delta = 10
-            new_bal = add_coins(interaction.user.id, delta, reason="rps_win", meta={"user": v, "bot": bot_pick})
+            new_bal = add_coins(interaction.user.id, 10, "game_win", {"game":"rps"})
             await emit("game_win", user_id=interaction.user.id, game="rps")
-            txt = f"✅ Ты победил! `{v}` против `{bot_pick}`\n+{delta} монет → баланс **{new_bal}**"
+            txt   = f"✅ Победа! `{выбор}` vs `{bot_pick}`\n+10 монет → **{new_bal}**"
             color = discord.Color.green()
         elif res == 0:
-            txt = f"🤝 Ничья! Оба выбрали `{v}`"
+            txt   = f"🤝 Ничья! Оба: `{выбор}`"
             color = discord.Color.blurple()
         else:
-            txt = f"❌ Проигрыш. `{v}` против `{bot_pick}`"
+            txt   = f"❌ Проигрыш. `{выбор}` vs `{bot_pick}`"
             color = discord.Color.red()
+        await interaction.response.send_message(
+            embed=discord.Embed(title="✊✌️🖐 КНБ", description=txt, color=color))
+        await emit("game_played", user_id=interaction.user.id,
+                   guild_id=interaction.guild.id, game="rps")
 
-        emb = discord.Embed(title="✊✌️🖐 КНБ", description=txt, color=color)
-        await interaction.response.send_message(embed=emb)
-
-    # ─────────────────────  Угадай число  ─────────────────────
-    @app_commands.command(name="угадай", description="Угадай число: если попадёшь — получишь монеты")
-    @app_commands.describe(число="Твоя попытка", до="Максимум (по умолчанию 10)")
-    async def угадай(self, interaction: discord.Interaction, число: app_commands.Range[int, 1, 10000], до: app_commands.Range[int, 2, 10000] = 10):
-        if число > до:
-            await interaction.response.send_message("❌ Число не может быть больше верхней границы.", ephemeral=True)
+    # ── КНБ дуэль ─────────────────────────────────────────────
+    @app_commands.command(name="кнб_дуэль", description="PvP дуэль КНБ")
+    @app_commands.describe(оппонент="Соперник", таймаут_мин="Минут до истечения (1-120)")
+    async def кнб_дуэль(self, interaction: discord.Interaction,
+                         оппонент: discord.Member,
+                         таймаут_мин: app_commands.Range[int, 1, 120] = 15):
+        if оппонент.bot or оппонент.id == interaction.user.id:
+            await interaction.response.send_message("❌ Неверный соперник.", ephemeral=True)
             return
-        target = random.randint(1, до)
-        if число == target:
-            base = 10
-            bonus = 0
-            if   до >= 1000: bonus = 40
-            elif до >= 200:  bonus = 20
-            elif до >= 50:   bonus = 10
-            delta = base + bonus
-            new_bal = add_coins(interaction.user.id, delta, reason="guess_win", meta={"max": до})
-            await emit("game_win", user_id=interaction.user.id, game="guess")
-            emb = discord.Embed(
-                title="🎯 Угадай число",
-                description=f"✅ Попал! Загаданное число: **{target}**\n+{delta} монет → баланс **{new_bal}**",
-                color=discord.Color.green()
-            )
-        else:
-            emb = discord.Embed(
-                title="🎯 Угадай число",
-                description=f"😬 Не угадал. Загаданное число было **{target}**.",
-                color=discord.Color.red()
-            )
-        await interaction.response.send_message(embed=emb)
-
-    # ======================= PvP: КНБ дуэли =======================
-
-    @app_commands.command(name="кнб_дуэль", description="Создать PvP-дуэль КНБ с участником")
-    @app_commands.describe(оппонент="Против кого играем", таймаут_мин="Через сколько минут дуэль истечёт (по умолчанию 15)")
-    async def кнб_дуэль(self, interaction: discord.Interaction, оппонент: discord.Member, таймаут_мин: app_commands.Range[int, 1, 120] = 15):
-        if оппонент.bot:
-            await interaction.response.send_message("🤖 Дуэль с ботами не поддерживается. Используй /кнб для игры с ботом.", ephemeral=True)
-            return
-        if оппонент.id == interaction.user.id:
-            await interaction.response.send_message("❌ Нельзя вызвать на дуэль самого себя.", ephemeral=True)
-            return
-
-        _ensure_tables()
-        now = datetime.now(timezone.utc)
-        exp = now + timedelta(minutes=int(таймаут_мин))
-
+        now = datetime.now(UTC)
+        exp = now + timedelta(minutes=таймаут_мин)
         with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO rps_duels (guild_id, channel_id, initiator_id, opponent_id, status, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (interaction.guild.id, interaction.channel.id, interaction.user.id, оппонент.id, "open", now.isoformat(), exp.isoformat())
+            cur = conn.execute(
+                "INSERT INTO rps_duels(guild_id,channel_id,initiator_id,opponent_id,"
+                "status,created_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+                (interaction.guild.id, interaction.channel.id,
+                 interaction.user.id, оппонент.id,
+                 "open", now.isoformat(), exp.isoformat())
             )
             duel_id = cur.lastrowid
-            conn.commit()
-
         emb = discord.Embed(
             title="⚔️ Дуэль КНБ создана",
-            description=(f"ID дуэли: **{duel_id}**\n"
-                         f"Участники: {interaction.user.mention} vs {оппонент.mention}\n\n"
-                         f"Сделайте ходы командой:\n"
-                         f"`/кнб_ход дуэль:{duel_id} выбор:<камень|ножницы|бумага>`\n\n"
-                         f"Ходы скрыты (ответы — приватные). Результат появится, когда оба сходят.\n"
+            description=(f"ID: **{duel_id}**\n"
+                         f"{interaction.user.mention} vs {оппонент.mention}\n\n"
+                         f"Сделайте ход: `/кнб_ход дуэль:{duel_id}`\n"
                          f"Истекает через {таймаут_мин} мин."),
             color=discord.Color.orange()
         )
-        await interaction.response.send_message(content=f"{оппонент.mention}", embed=emb)
+        await interaction.response.send_message(content=оппонент.mention, embed=emb)
 
-    @app_commands.command(name="кнб_ход", description="Сделать скрытый ход в PvP-дуэли КНБ")
-    @app_commands.describe(дуэль="ID дуэли", выбор="камень | ножницы | бумага")
-    async def кнб_ход(self, interaction: discord.Interaction, дуэль: int, выбор: str):
-        v = выбор.strip().lower()
-        if v not in CHOICES:
-            await interaction.response.send_message("❌ Варианты: камень | ножницы | бумага", ephemeral=True)
-            return
-
-        _ensure_tables()
-        now = datetime.now(timezone.utc)
-
+    @app_commands.command(name="кнб_ход", description="Сделать скрытый ход в PvP дуэли")
+    @app_commands.describe(дуэль="ID дуэли", выбор="Твой выбор")
+    @app_commands.choices(выбор=[
+        app_commands.Choice(name="камень",  value="камень"),
+        app_commands.Choice(name="ножницы", value="ножницы"),
+        app_commands.Choice(name="бумага",  value="бумага"),
+    ])
+    async def кнб_ход(self, interaction: discord.Interaction,
+                       дуэль: int, выбор: str):
+        now = datetime.now(UTC)
         with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT id, guild_id, channel_id, initiator_id, opponent_id, init_choice, opp_choice, status, created_at, expires_at FROM rps_duels WHERE id = ?", (дуэль,))
-            row = cur.fetchone()
-
-            if not row:
-                await interaction.response.send_message("❌ Дуэль не найдена.", ephemeral=True)
-                return
-
-            (_id, guild_id, channel_id, initiator_id, opponent_id, init_choice, opp_choice, status, created_at, expires_at) = row
-
-            if status != "open":
-                await interaction.response.send_message("⛔ Дуэль уже завершена или отменена.", ephemeral=True)
-                return
-
-            try:
-                exp = datetime.fromisoformat(expires_at)
-            except Exception:
-                exp = now - timedelta(seconds=1)
-
-            if now > exp:
-                # помечаем как просроченную
-                cur.execute("UPDATE rps_duels SET status = 'expired' WHERE id = ? AND status = 'open'", (_id,))
-                conn.commit()
-                await interaction.response.send_message("⌛ Время дуэли истекло.", ephemeral=True)
-                return
-
-            # кто делает ход?
-            if interaction.user.id not in (initiator_id, opponent_id):
-                await interaction.response.send_message("❌ Вы не участник этой дуэли.", ephemeral=True)
-                return
-
-            col = "init_choice" if interaction.user.id == initiator_id else "opp_choice"
-            already = init_choice if col == "init_choice" else opp_choice
-            if already:
-                await interaction.response.send_message("🔒 Ход уже зафиксирован.", ephemeral=True)
-                return
-
-            # записываем ход
-            cur.execute(f"UPDATE rps_duels SET {col} = ? WHERE id = ?", (v, _id))
-            conn.commit()
-
-            # перечитываем состояния
-            cur.execute("SELECT init_choice, opp_choice, status FROM rps_duels WHERE id = ?", (_id,))
-            c_init, c_opp, c_status = cur.fetchone()
-
-        # приватное подтверждение
-        await interaction.response.send_message(f"✅ Ход принят: **{v}**. Ожидаем соперника…", ephemeral=True)
-
-        # если оба сходили — считаем и публикуем в канал
-        if c_init and c_opp and c_status == "open":
+            row = conn.execute(
+                "SELECT id,guild_id,channel_id,initiator_id,opponent_id,"
+                "init_choice,opp_choice,status,expires_at FROM rps_duels WHERE id=?",
+                (дуэль,)
+            ).fetchone()
+        if not row:
+            await interaction.response.send_message("❌ Дуэль не найдена.", ephemeral=True)
+            return
+        _id,guild_id,ch_id,init_id,opp_id,init_ch,opp_ch,status,expires = row
+        if status != "open":
+            await interaction.response.send_message("⛔ Дуэль уже завершена.", ephemeral=True)
+            return
+        if datetime.fromisoformat(expires) < now:
             with sqlite3.connect(DB_PATH) as conn:
-                cur = conn.cursor()
-                # ещё раз проверим статус, чтобы не удвоить публикацию
-                cur.execute("SELECT status FROM rps_duels WHERE id = ?", (_id,))
-                st = cur.fetchone()
-                if not st or st[0] != "open":
-                    return
-                cur.execute("UPDATE rps_duels SET status = 'done' WHERE id = ? AND status = 'open'", (_id,))
-                conn.commit()
-
-            # вычисляем результат
+                conn.execute("UPDATE rps_duels SET status='expired' WHERE id=?", (_id,))
+            await interaction.response.send_message("⌛ Время истекло.", ephemeral=True)
+            return
+        if interaction.user.id not in (init_id, opp_id):
+            await interaction.response.send_message("❌ Ты не участник.", ephemeral=True)
+            return
+        col   = "init_choice" if interaction.user.id == init_id else "opp_choice"
+        cur_v = init_ch if col == "init_choice" else opp_ch
+        if cur_v:
+            await interaction.response.send_message("🔒 Ход уже сделан.", ephemeral=True)
+            return
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(f"UPDATE rps_duels SET {col}=? WHERE id=?", (выбор, _id))
+            row2 = conn.execute(
+                "SELECT init_choice,opp_choice,status FROM rps_duels WHERE id=?",(_id,)
+            ).fetchone()
+        c_init, c_opp, c_st = row2
+        await interaction.response.send_message(f"✅ Ход принят: **{выбор}**", ephemeral=True)
+        if c_init and c_opp and c_st == "open":
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    "UPDATE rps_duels SET status='done' WHERE id=? AND status='open'",(_id,))
             res = _rps_result(c_init, c_opp)
-            chan = self.bot.get_channel(int(channel_id))
-            if not chan:
-                # попытка восстановить канал
-                try:
-                    guild = await self.bot.fetch_guild(int(guild_id))
-                    chan = await guild.fetch_channel(int(channel_id))
-                except Exception:
-                    chan = None
-
-            winner_text = "🤝 Ничья!"
-            reward_text = ""
+            reward_txt = ""
             if res > 0:
-                # инициатор победил
-                delta = 15
-                new_bal = add_coins(int(initiator_id), delta, reason="rps_pvp_win", meta={"duel_id": _id})
-                await emit("game_win", user_id=int(initiator_id), game="rps")  # триггерим обычную ачивку
-                winner_text = f"🏆 Победитель: <@{initiator_id}>"
-                reward_text = f"\n+{delta} монет → теперь **{new_bal}**"
+                nb = add_coins(init_id, 20, "game_win", {"game":"rps_pvp"})
+                await emit("game_win", user_id=init_id, game="rps")
+                reward_txt = f"\n🏆 Победитель: <@{init_id}> +20 монет → **{nb}**"
             elif res < 0:
-                delta = 15
-                new_bal = add_coins(int(opponent_id), delta, reason="rps_pvp_win", meta={"duel_id": _id})
-                await emit("game_win", user_id=int(opponent_id), game="rps")
-                winner_text = f"🏆 Победитель: <@{opponent_id}>"
-                reward_text = f"\n+{delta} монет → теперь **{new_bal}**"
-
+                nb = add_coins(opp_id, 20, "game_win", {"game":"rps_pvp"})
+                await emit("game_win", user_id=opp_id, game="rps")
+                reward_txt = f"\n🏆 Победитель: <@{opp_id}> +20 монет → **{nb}**"
+            else:
+                reward_txt = "\n🤝 Ничья!"
             emb = discord.Embed(
-                title="⚔️ Итог дуэли КНБ",
-                description=(f"ID: **{_id}**\n"
-                             f"<@{initiator_id}> выбрал: **{c_init}**\n"
-                             f"<@{opponent_id}> выбрал: **{c_opp}**\n\n"
-                             f"{winner_text}{reward_text}"),
+                title="⚔️ Итог КНБ дуэли",
+                description=(f"<@{init_id}>: **{c_init}**\n"
+                              f"<@{opp_id}>: **{c_opp}**{reward_txt}"),
                 color=discord.Color.gold()
             )
-            if chan:
-                try:
-                    await chan.send(embed=emb)
-                except Exception:
-                    pass
+            ch = self.bot.get_channel(ch_id)
+            if ch:
+                await ch.send(embed=emb)
 
-    @app_commands.command(name="кнб_отмена", description="Отменить свою PvP-дуэль (пока не завершена)")
+    @app_commands.command(name="кнб_отмена", description="Отменить свою дуэль КНБ")
     @app_commands.describe(дуэль="ID дуэли")
     async def кнб_отмена(self, interaction: discord.Interaction, дуэль: int):
-        _ensure_tables()
         with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT id, initiator_id, status FROM rps_duels WHERE id = ?", (дуэль,))
-            row = cur.fetchone()
-            if not row:
-                await interaction.response.send_message("❌ Дуэль не найдена.", ephemeral=True)
-                return
-            _id, initiator_id, status = row
-            if status != "open":
-                await interaction.response.send_message("⛔ Дуэль уже завершена или отменена.", ephemeral=True)
-                return
-            if interaction.user.id != int(initiator_id):
-                await interaction.response.send_message("❌ Отменить может только создатель дуэли.", ephemeral=True)
-                return
-            cur.execute("UPDATE rps_duels SET status = 'cancelled' WHERE id = ? AND status = 'open'", (_id,))
-            conn.commit()
+            row = conn.execute(
+                "SELECT initiator_id, status FROM rps_duels WHERE id=?", (дуэль,)
+            ).fetchone()
+        if not row:
+            await interaction.response.send_message("❌ Не найдено.", ephemeral=True)
+            return
+        if row[1] != "open":
+            await interaction.response.send_message("⛔ Уже завершена.", ephemeral=True)
+            return
+        if row[0] != interaction.user.id:
+            await interaction.response.send_message("❌ Только создатель может отменить.", ephemeral=True)
+            return
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("UPDATE rps_duels SET status='cancelled' WHERE id=?", (дуэль,))
+        await interaction.response.send_message(f"🛑 Дуэль #{дуэль} отменена.")
 
-        emb = discord.Embed(
-            title="🛑 Дуэль отменена",
-            description=f"ID дуэли: **{дуэль}**",
-            color=discord.Color.red()
-        )
+    # ════════════════════════════════════════════════════════════
+    #  Угадай число
+    # ════════════════════════════════════════════════════════════
+    @app_commands.command(name="угадай", description="Угадай число — выиграй монеты")
+    @app_commands.describe(число="Твоя попытка", до="Максимальное число (по умолчанию 10)")
+    async def угадай(self, interaction: discord.Interaction,
+                      число: app_commands.Range[int, 1, 10000],
+                      до: app_commands.Range[int, 2, 10000] = 10):
+        if число > до:
+            await interaction.response.send_message("❌ Число больше максимума.", ephemeral=True)
+            return
+        target = random.randint(1, до)
+        if число == target:
+            bonus = 40 if до >= 1000 else (20 if до >= 200 else (10 if до >= 50 else 0))
+            delta = 10 + bonus
+            nb    = add_coins(interaction.user.id, delta, "game_win", {"game":"guess"})
+            await emit("game_win", user_id=interaction.user.id, game="guess")
+            emb = discord.Embed(
+                title="🎯 Угадал!",
+                description=f"Число было **{target}** — совпало!\n+{delta} монет → **{nb}**",
+                color=discord.Color.green())
+        else:
+            diff = abs(число - target)
+            hint = "🔥 Горячо!" if diff <= 2 else ("♨️ Тепло" if diff <= 5 else "🧊 Холодно")
+            emb = discord.Embed(
+                title="🎯 Не угадал",
+                description=f"Было **{target}**, ты назвал **{число}** — {hint}",
+                color=discord.Color.red())
         await interaction.response.send_message(embed=emb)
+        await emit("game_played", user_id=interaction.user.id,
+                   guild_id=interaction.guild.id, game="guess")
+
+    # ════════════════════════════════════════════════════════════
+    #  ВИСЕЛИЦА — СОЛО
+    # ════════════════════════════════════════════════════════════
+    @app_commands.command(name="виселица", description="Соло виселица против бота")
+    @app_commands.describe(слово="Оставь пустым — бот загадает сам")
+    async def виселица(self, interaction: discord.Interaction,
+                        слово: str = ""):
+        uid = interaction.user.id
+        if uid in self._solo_hangman:
+            await interaction.response.send_message(
+                "⚠️ У тебя уже есть активная игра! Заверши её или дождись конца.",
+                ephemeral=True)
+            return
+
+        word = слово.strip().lower() if слово.strip() else random.choice(HANGMAN_WORDS)
+        # Фильтруем — только кириллица и дефис
+        import re
+        if not re.match(r'^[а-яёa-z\-]+$', word):
+            await interaction.response.send_message(
+                "❌ Слово может содержать только буквы и дефис.", ephemeral=True)
+            return
+
+        self._solo_hangman[uid] = {"word": word, "guessed": set(), "wrong": []}
+
+        emb = _hangman_embed(word, "", "")
+        emb.set_footer(text="Нажимай кнопки чтобы угадывать буквы")
+
+        view = HangmanSoloView(self, uid)
+        await interaction.response.send_message(embed=emb, view=view)
+
+    # ════════════════════════════════════════════════════════════
+    #  ВИСЕЛИЦА — МУЛЬТИПЛЕЕР
+    # ════════════════════════════════════════════════════════════
+    @app_commands.command(name="виселица_старт",
+                          description="Мультиплеер виселица — загадать слово для сервера")
+    @app_commands.describe(слово="Слово которое угадывают другие")
+    async def виселица_старт(self, interaction: discord.Interaction, слово: str):
+        import re
+        word = слово.strip().lower()
+        if not re.match(r'^[а-яёa-z\-]{2,}$', word):
+            await interaction.response.send_message(
+                "❌ Слово: только буквы (2+ символа).", ephemeral=True)
+            return
+
+        # Закрываем старую игру в этом канале если есть
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "UPDATE hangman_games SET status='cancelled'"
+                " WHERE channel_id=? AND status='active'",
+                (interaction.channel.id,)
+            )
+            cur = conn.execute(
+                "INSERT INTO hangman_games(guild_id,channel_id,host_id,word,"
+                "guessed,wrong,status,created_at) VALUES(?,?,?,?,'','','active',?)",
+                (interaction.guild.id, interaction.channel.id,
+                 interaction.user.id, word, datetime.now(UTC).isoformat())
+            )
+            game_id = cur.lastrowid
+
+        await interaction.response.send_message(
+            f"✅ Слово загадано ({len(word)} букв). Игра #{game_id}",
+            ephemeral=True)
+
+        emb = _hangman_embed(word, "", "")
+        emb.title = f"🪢 Виселица — загадал {interaction.user.display_name}"
+        emb.set_footer(text=f"Угадывайте буквы: /виселица_буква буква:А  (игра #{game_id})")
+        await interaction.followup.send(embed=emb)
+
+    @app_commands.command(name="виселица_буква",
+                          description="Угадать букву в мультиплеер виселице")
+    @app_commands.describe(буква="Одна буква")
+    async def виселица_буква(self, interaction: discord.Interaction, буква: str):
+        letter = буква.strip().lower()
+        if len(letter) != 1:
+            await interaction.response.send_message("❌ Введи одну букву.", ephemeral=True)
+            return
+
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT id,host_id,word,guessed,wrong,status FROM hangman_games"
+                " WHERE channel_id=? AND status='active' ORDER BY id DESC LIMIT 1",
+                (interaction.channel.id,)
+            ).fetchone()
+
+        if not row:
+            await interaction.response.send_message(
+                "❌ Нет активной игры в этом канале.", ephemeral=True)
+            return
+
+        game_id, host_id, word, guessed_str, wrong_str, status = row
+        if interaction.user.id == host_id:
+            await interaction.response.send_message(
+                "❌ Загадавший не может угадывать.", ephemeral=True)
+            return
+
+        guessed = set(guessed_str)
+        wrong   = list(wrong_str)
+
+        if letter in guessed or letter in wrong:
+            await interaction.response.send_message(
+                f"⚠️ Буква `{letter.upper()}` уже была.", ephemeral=True)
+            return
+
+        if letter in word:
+            guessed.add(letter)
+            new_guessed = "".join(sorted(guessed))
+            # Проверяем победу
+            if all(c in guessed or c == "-" for c in word):
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute(
+                        "UPDATE hangman_games SET guessed=?,status='win' WHERE id=?",
+                        (new_guessed, game_id)
+                    )
+                reward = 30
+                nb = add_coins(interaction.user.id, reward, "game_win", {"game":"hangman"})
+                await emit("game_win", user_id=interaction.user.id, game="hangman")
+                emb = _hangman_embed(word, new_guessed, wrong_str, "win")
+                emb.add_field(
+                    name="🏆 Победитель",
+                    value=f"{interaction.user.mention} угадал последнюю букву!\n+{reward} монет → **{nb}**",
+                    inline=False)
+                await interaction.response.send_message(embed=emb)
+                return
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    "UPDATE hangman_games SET guessed=? WHERE id=?",
+                    (new_guessed, game_id)
+                )
+            emb = _hangman_embed(word, new_guessed, wrong_str)
+            emb.add_field(name="✅", value=f"{interaction.user.mention} угадал `{letter.upper()}`!")
+        else:
+            wrong.append(letter.upper())
+            new_wrong = "".join(wrong)
+            if len(wrong) >= MAX_WRONG:
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute(
+                        "UPDATE hangman_games SET wrong=?,status='lose' WHERE id=?",
+                        (new_wrong, game_id)
+                    )
+                emb = _hangman_embed(word, guessed_str, new_wrong, "lose")
+                await interaction.response.send_message(embed=emb)
+                return
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    "UPDATE hangman_games SET wrong=? WHERE id=?",
+                    (new_wrong, game_id)
+                )
+            emb = _hangman_embed(word, guessed_str, new_wrong)
+            emb.add_field(name="❌", value=f"{interaction.user.mention} ошибся: `{letter.upper()}`")
+
+        await interaction.response.send_message(embed=emb)
+
+    # ════════════════════════════════════════════════════════════
+    #  БЛЭКДЖЕК — соло против бота
+    # ════════════════════════════════════════════════════════════
+    @app_commands.command(name="бж", description="Блэкджек против бота со ставкой")
+    @app_commands.describe(ставка="Сколько монет поставить (минимум 5)")
+    async def бж(self, interaction: discord.Interaction,
+                  ставка: app_commands.Range[int, 5, 10_000]):
+        bal = get_balance(interaction.user.id)
+        if bal < ставка:
+            await interaction.response.send_message(
+                f"❌ Недостаточно монет. Баланс: **{bal}**", ephemeral=True)
+            return
+
+        deck       = _new_deck()
+        p_hand     = [deck.pop(), deck.pop()]
+        d_hand     = [deck.pop(), deck.pop()]
+        p_total    = _hand_total(p_hand)
+
+        # Блэкджек сразу
+        if p_total == 21:
+            d_total = _hand_total(d_hand)
+            if d_total == 21:
+                result_txt = "🤝 Оба с блэкджеком — ничья! Ставка возвращена."
+            else:
+                win = int(ставка * 1.5)
+                nb  = add_coins(interaction.user.id, win, "game_win", {"game":"bj"})
+                result_txt = f"🃏 Блэкджек! +{win} монет → **{nb}**"
+            emb = discord.Embed(title="🃏 Блэкджек", color=discord.Color.gold())
+            emb.add_field(name=f"Твои карты ({p_total})", value=_hand_str(p_hand))
+            emb.add_field(name=f"Карты бота ({d_total})", value=_hand_str(d_hand))
+            emb.add_field(name="Результат", value=result_txt, inline=False)
+            await interaction.response.send_message(embed=emb)
+            return
+
+        view = BlackjackView(
+            cog=self, user_id=interaction.user.id,
+            deck=deck, p_hand=p_hand, d_hand=d_hand, bet=ставка
+        )
+        emb = view.build_embed(show_dealer_hole=False)
+        await interaction.response.send_message(embed=emb, view=view)
+
+    # ════════════════════════════════════════════════════════════
+    #  БЛЭКДЖЕК — дуэль PvP (оба против бота, кто ближе к 21)
+    # ════════════════════════════════════════════════════════════
+    @app_commands.command(name="бж_дуэль",
+                          description="Блэкджек дуэль — оба против бота, ставка одинаковая")
+    @app_commands.describe(
+        соперник="Кого вызвать",
+        ставка="Ставка каждого (минимум 5)",
+    )
+    async def бж_дуэль(self, interaction: discord.Interaction,
+                        соперник: discord.Member,
+                        ставка: app_commands.Range[int, 5, 10_000]):
+        if соперник.bot or соперник.id == interaction.user.id:
+            await interaction.response.send_message("❌ Неверный соперник.", ephemeral=True)
+            return
+        for uid, name in [(interaction.user.id, interaction.user.display_name),
+                           (соперник.id, соперник.display_name)]:
+            if get_balance(uid) < ставка:
+                await interaction.response.send_message(
+                    f"❌ У {name} недостаточно монет (нужно {ставка}).", ephemeral=True)
+                return
+
+        view = BJDuelView(
+            cog=self,
+            p1=interaction.user, p2=соперник, bet=ставка,
+            channel=interaction.channel
+        )
+        emb = discord.Embed(
+            title="🃏 Блэкджек — дуэль",
+            description=(f"{interaction.user.mention} vs {соперник.mention}\n"
+                         f"Ставка: **{ставка}** монет каждый\n\n"
+                         f"{соперник.mention}, подтверди участие!"),
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(
+            content=соперник.mention, embed=emb, view=view)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  Views
+# ════════════════════════════════════════════════════════════════════════════════
+
+# ── Соло виселица кнопки ──────────────────────────────────────────────────────
+RU_ALPHABET = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+
+class HangmanSoloView(discord.ui.View):
+    def __init__(self, cog: Games, uid: int):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.uid = uid
+        self._build_buttons()
+
+    def _build_buttons(self):
+        self.clear_items()
+        state = self.cog._solo_hangman.get(self.uid)
+        if not state:
+            return
+        used = state["guessed"] | set(l.lower() for l in state["wrong"])
+        # Показываем только 25 кнопок (лимит Discord)
+        shown = 0
+        for ch in RU_ALPHABET:
+            if shown >= 25:
+                break
+            if ch in used:
+                continue
+            btn = discord.ui.Button(
+                label=ch.upper(),
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"hm_{self.uid}_{ch}",
+            )
+            btn.callback = self._make_cb(ch)
+            self.add_item(btn)
+            shown += 1
+
+    def _make_cb(self, letter: str):
+        async def cb(interaction: discord.Interaction):
+            if interaction.user.id != self.uid:
+                await interaction.response.send_message(
+                    "❌ Это не твоя игра.", ephemeral=True)
+                return
+            state = self.cog._solo_hangman.get(self.uid)
+            if not state:
+                await interaction.response.send_message(
+                    "❌ Игра не найдена.", ephemeral=True)
+                return
+            word    = state["word"]
+            guessed = state["guessed"]
+            wrong   = state["wrong"]
+
+            if letter in word:
+                guessed.add(letter)
+                if all(c in guessed or c == "-" for c in word):
+                    del self.cog._solo_hangman[self.uid]
+                    reward = max(10, 50 - len(wrong) * 8)
+                    nb = add_coins(self.uid, reward, "game_win", {"game":"hangman"})
+                    emb = _hangman_embed(word, "".join(sorted(guessed)), "".join(l.upper() for l in wrong), "win")
+                    emb.add_field(name="🏆 Победа!", value=f"+{reward} монет → **{nb}**")
+                    await interaction.response.edit_message(embed=emb, view=None)
+                    return
+            else:
+                wrong.append(letter.upper())
+                if len(wrong) >= MAX_WRONG:
+                    del self.cog._solo_hangman[self.uid]
+                    emb = _hangman_embed(word, "".join(sorted(guessed)), "".join(wrong), "lose")
+                    await interaction.response.edit_message(embed=emb, view=None)
+                    return
+
+            self._build_buttons()
+            emb = _hangman_embed(word, "".join(sorted(guessed)), "".join(wrong))
+            await interaction.response.edit_message(embed=emb, view=self)
+        return cb
+
+    async def on_timeout(self):
+        self.cog._solo_hangman.pop(self.uid, None)
+        self.stop()
+
+
+# ── Блэкджек соло view ────────────────────────────────────────────────────────
+class BlackjackView(discord.ui.View):
+    def __init__(self, cog: Games, user_id: int,
+                 deck: list, p_hand: list, d_hand: list, bet: int):
+        super().__init__(timeout=120)
+        self.cog     = cog
+        self.user_id = user_id
+        self.deck    = deck
+        self.p_hand  = p_hand
+        self.d_hand  = d_hand
+        self.bet     = bet
+        self.done    = False
+
+    def build_embed(self, show_dealer_hole: bool = False) -> discord.Embed:
+        p_total = _hand_total(self.p_hand)
+        if show_dealer_hole:
+            d_total = _hand_total(self.d_hand)
+            d_str   = _hand_str(self.d_hand)
+        else:
+            d_total = _card_value(self.d_hand[0])
+            d_str   = f"{self.d_hand[0]} 🂠"
+
+        emb = discord.Embed(title="🃏 Блэкджек", color=discord.Color.blurple())
+        emb.add_field(name=f"Твои карты ({p_total})",
+                      value=_hand_str(self.p_hand), inline=False)
+        emb.add_field(name=f"Карты бота ({'?' if not show_dealer_hole else d_total})",
+                      value=d_str, inline=False)
+        emb.set_footer(text=f"Ставка: {self.bet} монет")
+        return emb
+
+    async def _finish(self, interaction: discord.Interaction, reason: str = ""):
+        self.done = True
+        p_total = _hand_total(self.p_hand)
+        # Бот добирает до 17+
+        while _hand_total(self.d_hand) < 17:
+            self.d_hand.append(self.deck.pop())
+        d_total = _hand_total(self.d_hand)
+
+        if p_total > 21:
+            result = "bust"
+        elif d_total > 21 or p_total > d_total:
+            result = "win"
+        elif p_total == d_total:
+            result = "push"
+        else:
+            result = "lose"
+
+        if result == "win":
+            nb  = add_coins(self.user_id, self.bet, "game_win", {"game":"bj"})
+            txt = f"🏆 Победа! +{self.bet} монет → **{nb}**"
+            color = discord.Color.green()
+        elif result == "push":
+            txt   = "🤝 Ничья — ставка возвращена."
+            color = discord.Color.blurple()
+        else:
+            nb  = add_coins(self.user_id, -self.bet, "game_lose", {"game":"bj"})
+            txt = f"💸 Поражение. -{self.bet} монет → **{get_balance(self.user_id)}**"
+            color = discord.Color.red()
+            if result == "bust":
+                txt = "💥 Перебор! " + txt
+
+        emb = self.build_embed(show_dealer_hole=True)
+        emb.color = color
+        emb.add_field(name="Результат", value=txt, inline=False)
+        if reason:
+            emb.add_field(name="", value=reason, inline=False)
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=emb, view=self)
+        await emit("game_played", user_id=self.user_id,
+                   guild_id=interaction.guild.id, game="blackjack")
+        self.stop()
+
+    @discord.ui.button(label="Ещё", style=discord.ButtonStyle.primary, emoji="🃏")
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Не твоя игра.", ephemeral=True)
+            return
+        self.p_hand.append(self.deck.pop())
+        if _hand_total(self.p_hand) > 21:
+            await self._finish(interaction)
+            return
+        await interaction.response.edit_message(
+            embed=self.build_embed(show_dealer_hole=False), view=self)
+
+    @discord.ui.button(label="Хватит", style=discord.ButtonStyle.secondary, emoji="🛑")
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Не твоя игра.", ephemeral=True)
+            return
+        await self._finish(interaction)
+
+    @discord.ui.button(label="Удвоить", style=discord.ButtonStyle.danger, emoji="💰")
+    async def double_down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Не твоя игра.", ephemeral=True)
+            return
+        if len(self.p_hand) != 2:
+            await interaction.response.send_message(
+                "❌ Удвоить можно только на первых двух картах.", ephemeral=True)
+            return
+        if get_balance(self.user_id) < self.bet:
+            await interaction.response.send_message("❌ Недостаточно монет.", ephemeral=True)
+            return
+        self.bet *= 2
+        self.p_hand.append(self.deck.pop())
+        await self._finish(interaction, "💰 Ставка удвоена!")
+
+    async def on_timeout(self):
+        if not self.done:
+            add_coins(self.user_id, -self.bet, "game_lose", {"game":"bj","reason":"timeout"})
+        self.stop()
+
+
+# ── Блэкджек дуэль view ───────────────────────────────────────────────────────
+class BJDuelView(discord.ui.View):
+    def __init__(self, cog: Games,
+                 p1: discord.Member, p2: discord.Member,
+                 bet: int, channel):
+        super().__init__(timeout=60)
+        self.cog     = cog
+        self.p1      = p1
+        self.p2      = p2
+        self.bet     = bet
+        self.channel = channel
+        self.accepted = False
+
+    @discord.ui.button(label="Принять вызов", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.p2.id:
+            await interaction.response.send_message(
+                "❌ Вызов адресован не тебе.", ephemeral=True)
+            return
+        self.accepted = True
+        self.stop()
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        await self._run_duel(interaction)
+
+    @discord.ui.button(label="Отказаться", style=discord.ButtonStyle.danger, emoji="❌")
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id not in (self.p1.id, self.p2.id):
+            return
+        self.stop()
+        await interaction.response.edit_message(
+            content="❌ Дуэль отменена.", embed=None, view=None)
+
+    async def _run_duel(self, interaction: discord.Interaction):
+        deck   = _new_deck()
+        hands  = {
+            self.p1.id: [deck.pop(), deck.pop()],
+            self.p2.id: [deck.pop(), deck.pop()],
+        }
+        # Каждый добирает до 17 (автоматически)
+        for uid in (self.p1.id, self.p2.id):
+            while _hand_total(hands[uid]) < 17:
+                hands[uid].append(deck.pop())
+
+        t1 = _hand_total(hands[self.p1.id])
+        t2 = _hand_total(hands[self.p2.id])
+
+        def score(t):
+            return t if t <= 21 else 0  # перебор = 0
+
+        s1, s2 = score(t1), score(t2)
+        emb = discord.Embed(title="🃏 Итог блэкджек дуэли", color=discord.Color.gold())
+        emb.add_field(name=f"{self.p1.display_name} ({t1})",
+                      value=_hand_str(hands[self.p1.id]), inline=False)
+        emb.add_field(name=f"{self.p2.display_name} ({t2})",
+                      value=_hand_str(hands[self.p2.id]), inline=False)
+
+        if s1 > s2:
+            nb = add_coins(self.p1.id,  self.bet, "game_win",  {"game":"bj_duel"})
+            add_coins(self.p2.id, -self.bet, "game_lose", {"game":"bj_duel"})
+            emb.add_field(name="🏆 Победитель",
+                          value=f"{self.p1.mention} +{self.bet} монет → **{nb}**")
+        elif s2 > s1:
+            nb = add_coins(self.p2.id,  self.bet, "game_win",  {"game":"bj_duel"})
+            add_coins(self.p1.id, -self.bet, "game_lose", {"game":"bj_duel"})
+            emb.add_field(name="🏆 Победитель",
+                          value=f"{self.p2.mention} +{self.bet} монет → **{nb}**")
+        else:
+            emb.add_field(name="🤝 Ничья", value="Ставки возвращены.")
+
+        await self.channel.send(embed=emb)
+
+    async def on_timeout(self):
+        if not self.accepted:
+            try:
+                await self.channel.send(
+                    f"⌛ {self.p2.mention} не ответил — дуэль отменена.")
+            except Exception:
+                pass
+        self.stop()
+
 
 async def setup(bot):
     await bot.add_cog(Games(bot))

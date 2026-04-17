@@ -24,6 +24,7 @@ datebase/
 *.db
 *.sqlite
 *.sqlite3
+models/
 
 # --- OS / IDE ---
 .vscode/

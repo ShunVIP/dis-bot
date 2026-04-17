@@ -5,3 +5,9 @@ python-dotenv
 loguru
 beautifulsoup4
 lxml
+markovify
+
+# Продвинутые модели пародии (нейрослоп)
+transformers
+datasets
+torch

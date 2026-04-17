@@ -1,10 +1,12 @@
-﻿# fun_slesh/ai_tools.py
+# fun_slesh/ai_tools.py
 import asyncio
 import aiohttp
 import discord
 import urllib.parse
 from discord.ext import commands
 from discord import app_commands
+
+WIKI_HEADERS = {"User-Agent": "ViPikBot/1.0 (Discord bot; private server)"}
 
 RATE_LIMIT_MSG = "⚠️ Лимит бесплатных запросов исчерпан. Попробуй позже."
 SERVICE_DOWN_MSG = "⚠️ Сервис сейчас недоступен. Попробуй позже."
@@ -24,7 +26,7 @@ class AITools(commands.Cog):
 
         async def search_and_summary(lang: str, q: str, limit: int = 5):
             base = f"https://{lang}.wikipedia.org/w/rest.php/v1"
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), headers=WIKI_HEADERS) as session:
                 # Поиск нескольких кандидатов
                 async with session.get(f"{base}/search/page", params={"q": q, "limit": limit}) as r:
                     if r.status == 429: return None, RATE_LIMIT_MSG

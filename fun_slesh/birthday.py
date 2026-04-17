@@ -24,9 +24,6 @@ class Birthday(commands.Cog):
         self.bot = bot
         _ensure_table()  # <-- добавлено
 
-        print(f"📂 Путь к базе: {DB_PATH}")
-        print(f"📁 Папка существует? {os.path.exists(os.path.dirname(DB_PATH))}")
-        print(f"📄 База существует? {os.path.exists(DB_PATH)}")
 
     def set_birthday(self, user_id: int, date_str: str):
         with sqlite3.connect(DB_PATH) as conn:
@@ -89,11 +86,8 @@ class Birthday(commands.Cog):
 
         lines = []
         for user_id, birthday in rows:
-            try:
-                member = await interaction.guild.fetch_member(user_id)
-                name = member.display_name
-            except discord.NotFound:
-                name = f"ID {user_id} (не найден)"
+            member = interaction.guild.get_member(user_id)
+            name = member.display_name if member else f"<@{user_id}> (не на сервере)"
             lines.append(f"**{name}** — `{birthday}`")
 
         message = "\n".join(lines)

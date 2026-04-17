@@ -29,6 +29,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 from discord import app_commands
+from core.economy import add_coins, get_balance
 
 # === Путь к общей БД проекта ===
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
@@ -110,6 +111,38 @@ SCHEMA_SQL = [
         date     TEXT    NOT NULL,  -- YYYY-MM-DD (UTC)
         seconds  INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (user_id, guild_id, date)
+    )
+    """,
+    # Настройки пассивных наград за активность
+    """
+    CREATE TABLE IF NOT EXISTS activity_rewards_config (
+        guild_id          INTEGER PRIMARY KEY,
+        msg_enabled       INTEGER NOT NULL DEFAULT 0,
+        msg_per_n         INTEGER NOT NULL DEFAULT 10,
+        msg_coins         INTEGER NOT NULL DEFAULT 2,
+        msg_rep_per_n     INTEGER NOT NULL DEFAULT 50,
+        msg_rep           INTEGER NOT NULL DEFAULT 1,
+        voice_enabled     INTEGER NOT NULL DEFAULT 0,
+        voice_per_min     INTEGER NOT NULL DEFAULT 5,
+        voice_coins       INTEGER NOT NULL DEFAULT 1
+    )
+    """,
+    # Счётчик сообщений для пассивных наград (сбрасывается при начислении)
+    """
+    CREATE TABLE IF NOT EXISTS activity_msg_counter (
+        user_id   INTEGER NOT NULL,
+        guild_id  INTEGER NOT NULL,
+        count     INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, guild_id)
+    )
+    """,
+    # Накопленные минуты голоса для наград
+    """
+    CREATE TABLE IF NOT EXISTS activity_voice_counter (
+        user_id   INTEGER NOT NULL,
+        guild_id  INTEGER NOT NULL,
+        minutes   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, guild_id)
     )
     """,
 ]
@@ -387,6 +420,48 @@ class MessageAndVoiceStats(commands.Cog):
             embed=discord.Embed(title=f"😎 Топ эмодзи за {дней} дн.", description="\n".join(lines), color=discord.Color.orange()),
         )
 
+    # ========= ТЕКСТ: пассивные награды =========
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        guild_id = message.guild.id
+        user_id  = message.author.id
+
+        with sqlite3.connect(DB_PATH) as conn:
+            cfg = conn.execute(
+                "SELECT msg_enabled, msg_per_n, msg_coins, msg_rep_per_n, msg_rep"
+                " FROM activity_rewards_config WHERE guild_id=?", (guild_id,)
+            ).fetchone()
+            if not cfg or not cfg[0]:
+                return
+            _, per_n, coins, rep_per_n, rep = cfg
+
+            # Обновляем счётчик
+            conn.execute(
+                "INSERT INTO activity_msg_counter(user_id, guild_id, count) VALUES(?,?,1)"
+                " ON CONFLICT(user_id, guild_id) DO UPDATE SET count = count + 1",
+                (user_id, guild_id)
+            )
+            row = conn.execute(
+                "SELECT count FROM activity_msg_counter WHERE user_id=? AND guild_id=?",
+                (user_id, guild_id)
+            ).fetchone()
+            count = row[0] if row else 0
+
+            # Монеты за каждые per_n сообщений
+            if count % per_n == 0:
+                add_coins(user_id, coins, "msg_activity",
+                          {"guild": guild_id, "count": count})
+
+            # Репутация за каждые rep_per_n сообщений
+            if rep_per_n > 0 and count % rep_per_n == 0:
+                today = datetime.now(UTC).date().isoformat()
+                conn.execute(
+                    "INSERT INTO reputation(user_id, given_by, delta, date) VALUES(?,?,?,?)",
+                    (user_id, 0, rep, today)
+                )
+
     # ========= ВОЙС: онлайн‑трекер =========
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -411,6 +486,8 @@ class MessageAndVoiceStats(commands.Cog):
                         )
                         _accumulate_voice_row(cur, user_id=member.id, guild_id=guild_id, seconds=seconds)
                         conn.commit()
+                    # Пассивные награды за голос
+                    await self._award_voice(member.id, guild_id, seconds)
             return
 
         # вошёл в войс
@@ -471,6 +548,141 @@ class MessageAndVoiceStats(commands.Cog):
         total = int(row[0] or 0)
         h = total // 3600; m = (total % 3600) // 60
         await _safe_reply(interaction, content=f"За {дней} дн. ты провёл в войсе **{h}ч {m}м**", ephemeral=True)
+
+
+    async def _award_voice(self, user_id: int, guild_id: int, seconds: int):
+        """Начисляет монеты за голос."""
+        with sqlite3.connect(DB_PATH) as conn:
+            cfg = conn.execute(
+                "SELECT voice_enabled, voice_per_min, voice_coins"
+                " FROM activity_rewards_config WHERE guild_id=?", (guild_id,)
+            ).fetchone()
+            if not cfg or not cfg[0]:
+                return
+            _, per_min, coins = cfg
+
+            minutes = seconds // 60
+            if minutes < 1:
+                return
+
+            conn.execute(
+                "INSERT INTO activity_voice_counter(user_id, guild_id, minutes) VALUES(?,?,?)"
+                " ON CONFLICT(user_id, guild_id) DO UPDATE SET minutes = minutes + ?",
+                (user_id, guild_id, minutes, minutes)
+            )
+            row = conn.execute(
+                "SELECT minutes FROM activity_voice_counter WHERE user_id=? AND guild_id=?",
+                (user_id, guild_id)
+            ).fetchone()
+            total_min = row[0] if row else 0
+
+            # Начисляем за каждые per_min минут
+            earned = (total_min // per_min) * coins
+            already = ((total_min - minutes) // per_min) * coins
+            delta = earned - already
+            if delta > 0:
+                add_coins(user_id, delta, "voice_activity",
+                          {"guild": guild_id, "minutes": total_min})
+
+    # ── /награды_настроить ────────────────────────────────────────────────────
+    @app_commands.command(name="награды_настроить",
+                          description="(Админ) Настроить пассивные награды за активность")
+    @app_commands.describe(
+        монеты_за_сообщения="Включить монеты за сообщения",
+        монет_за_n_сообщений="Сколько монет за каждые N сообщений",
+        каждые_n_сообщений="Каждые сколько сообщений давать монеты",
+        репа_за_сообщения="Давать +1 репутации автоматически",
+        репа_каждые_n="Репа каждые N сообщений (0 = выключено)",
+        монеты_за_голос="Включить монеты за голос",
+        монет_за_минут="Монет за каждые N минут в голосе",
+        голос_каждые_мин="Каждые сколько минут давать монеты",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def награды_настроить(
+        self, interaction: discord.Interaction,
+        монеты_за_сообщения: bool = None,
+        монет_за_n_сообщений: app_commands.Range[int, 1, 100] = None,
+        каждые_n_сообщений: app_commands.Range[int, 1, 1000] = None,
+        репа_за_сообщения: app_commands.Range[int, 0, 5] = None,
+        репа_каждые_n: app_commands.Range[int, 0, 1000] = None,
+        монеты_за_голос: bool = None,
+        монет_за_минут: app_commands.Range[int, 1, 100] = None,
+        голос_каждые_мин: app_commands.Range[int, 1, 120] = None,
+    ):
+        guild_id = interaction.guild.id
+        with sqlite3.connect(DB_PATH) as conn:
+            # Гарантируем строку
+            conn.execute(
+                "INSERT OR IGNORE INTO activity_rewards_config(guild_id) VALUES(?)",
+                (guild_id,)
+            )
+            updates = []
+            vals    = []
+            mapping = {
+                "msg_enabled":   монеты_за_сообщения,
+                "msg_coins":     монет_за_n_сообщений,
+                "msg_per_n":     каждые_n_сообщений,
+                "msg_rep":       репа_за_сообщения,
+                "msg_rep_per_n": репа_каждые_n,
+                "voice_enabled": монеты_за_голос,
+                "voice_coins":   монет_за_минут,
+                "voice_per_min": голос_каждые_мин,
+            }
+            for col, val in mapping.items():
+                if val is not None:
+                    updates.append(f"{col}=?")
+                    vals.append(int(val) if isinstance(val, bool) else val)
+            if updates:
+                conn.execute(
+                    f"UPDATE activity_rewards_config SET {', '.join(updates)} WHERE guild_id=?",
+                    vals + [guild_id]
+                )
+            cfg = conn.execute(
+                "SELECT msg_enabled,msg_per_n,msg_coins,msg_rep_per_n,msg_rep,"
+                "voice_enabled,voice_per_min,voice_coins"
+                " FROM activity_rewards_config WHERE guild_id=?", (guild_id,)
+            ).fetchone()
+
+        me, mp, mc, mrp, mr, ve, vp, vc = cfg
+        emb = discord.Embed(title="⚙️ Пассивные награды", color=discord.Color.teal())
+        msg_st   = "✅ Включены" if me else "⛔ Выключены"
+        rep_line = f"+{mr} репа каждые {mrp} сообщений" if mrp else "Репа: выключена"
+        emb.add_field(
+            name="💬 Сообщения",
+            value=f"{msg_st}\n+{mc} монет каждые {mp} сообщений\n{rep_line}",
+            inline=False
+        )
+        voice_st = "✅ Включены" if ve else "⛔ Выключены"
+        emb.add_field(
+            name="🎙️ Голос",
+            value=f"{voice_st}\n+{vc} монет каждые {vp} минут",
+            inline=False
+        )
+        await interaction.response.send_message(embed=emb, ephemeral=True)
+
+    @app_commands.command(name="награды_статус",
+                          description="Текущие настройки пассивных наград")
+    async def награды_статус(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id
+        with sqlite3.connect(DB_PATH) as conn:
+            cfg = conn.execute(
+                "SELECT msg_enabled,msg_per_n,msg_coins,msg_rep_per_n,msg_rep,"
+                "voice_enabled,voice_per_min,voice_coins"
+                " FROM activity_rewards_config WHERE guild_id=?", (guild_id,)
+            ).fetchone()
+        if not cfg:
+            await interaction.response.send_message(
+                "⚙️ Пассивные награды не настроены. Используй `/награды_настроить`.",
+                ephemeral=True)
+            return
+        me, mp, mc, mrp, mr, ve, vp, vc = cfg
+        emb = discord.Embed(title="⚙️ Пассивные награды", color=discord.Color.teal())
+        msg_v = ("✅" if me else "⛔") + f"\n+{mc} монет / {mp} сообщений"
+        if mrp:
+            msg_v += f"\n+{mr} репа / {mrp} сообщений"
+        emb.add_field(name="💬 Сообщения", value=msg_v, inline=True)
+        voice_v = ("✅" if ve else "⛔") + f"\n+{vc} монет / {vp} минут"
+        emb.add_field(name="🎙️ Голос", value=voice_v, inline=True)
 
 
 async def setup(bot: commands.Bot):

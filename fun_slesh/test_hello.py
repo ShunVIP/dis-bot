@@ -318,7 +318,7 @@ class FunAndInfo(commands.Cog):
         embed.set_thumbnail(url=guild.icon.url if guild.icon else discord.Embed.Empty)
         embed.add_field(name="ID", value=guild.id, inline=True)
         embed.add_field(name="Владелец", value=owner.mention, inline=True)
-        embed.add_field(name="Создан", value=guild.created_at.strftime("%d.%m.%Y %H:%М"), inline=False)
+        embed.add_field(name="Создан", value=guild.created_at.strftime("%d.%m.%Y %H:%M"), inline=False)
         embed.add_field(name="Участников", value=guild.member_count, inline=True)
         embed.add_field(name="Каналов", value=len(guild.channels), inline=True)
 
@@ -335,9 +335,37 @@ class FunAndInfo(commands.Cog):
     @app_commands.describe(вопрос="Задай вопрос шару")
     async def шар(self, interaction: discord.Interaction, вопрос: str):
         ответы = [
-            "Без сомнений", "Определённо да", "Можешь на это рассчитывать", "Да",
-            "Пока не ясно", "Спроси позже", "Лучше не рассказывать",
-            "Не рассчитывай на это", "Мой ответ — нет", "Очень сомнительно"
+            # ✅ Позитивные
+            "Однозначно да, братуха",
+            "Спрашиваешь? Конечно да",
+            "Вселенная говорит ДА",
+            "Знаки указывают — всё будет",
+            "100% мой бро",
+            "Даже не сомневайся",
+            "Судьба уже решила — да",
+            # 🤔 Нейтральные
+            "Спроси ещё раз после кофе",
+            "Туман войны не рассеялся",
+            "Мб да, мб нет, жизнь покажет",
+            "Шар завис, перезагрузи реальность",
+            "Ответ скрыт за пределами видимого",
+            "Хороший вопрос, плохой тайминг",
+            "Звёзды молчат, и я тоже",
+            # ❌ Негативные
+            "Нет, и даже не надейся",
+            "Шар смеётся над этим вопросом",
+            "Это ловушка — ни в коем случае",
+            "Категорически нет, братан",
+            "Вселенная говорит — даже не думай",
+            "Лучше не надо, серьёзно",
+            # 😂 Мемные
+            "Ответ есть, но я его не скажу",
+            "404: ответ не найден",
+            "Это выше моего понимания",
+            "Наташ, мы всё уронили",
+            "По данным шара — скорее всего нет, но кто знает",
+            "Подожди 3-5 рабочих лет",
+            "Шар видит страдание в твоих глазах",
         ]
         embed = discord.Embed(title="🎱 Магический шар 8", color=discord.Color.purple())
         embed.add_field(name="Вопрос", value=вопрос, inline=False)
@@ -357,18 +385,54 @@ class FunAndInfo(commands.Cog):
     # 🧠 /анекдот
     @app_commands.command(name="анекдот", description="Рандомный анекдот с просторов интернета")
     async def анекдот(self, interaction: discord.Interaction):
-        url = "https://icanhazdadjoke.com/"
-        headers = {"Accept": "application/json"}
+        await interaction.response.defer()
+        joke = None
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    joke = data.get("joke", "Что-то пошло не так 😢")
-                else:
-                    joke = "❌ Не удалось получить анекдот. Попробуй позже."
+        # Источник 1: umnij.ru JSON API
+        try:
+            url = "https://www.anekdot.ru/rss/randomu.html"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    if r.status == 200:
+                        html = await r.text()
+                        import re as _re
+                        # Анекдоты в тегах <div class="text">...</div>
+                        matches = _re.findall(r'<div class="text">(.*?)</div>', html, _re.DOTALL)
+                        if matches:
+                            raw = random.choice(matches)
+                            joke = _re.sub(r'<[^>]+>', '', raw).strip().replace("&nbsp;", " ").replace("&amp;", "&")
+        except Exception:
+            pass
 
-        await interaction.response.send_message(f"🃏 {joke}")
+        # Источник 2: jokesrv.ru
+        if not joke:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get("https://jokesrv.rubedo.cloud/", timeout=aiohttp.ClientTimeout(total=8)) as r:
+                        if r.status == 200:
+                            data = await r.json(content_type=None)
+                            joke = data.get("content", "").strip()
+            except Exception:
+                pass
+
+        # Фолбэк — локальная подборка
+        if not joke:
+            FALLBACK = [
+                "— Мам, а почему у нас нет денег?\n— Потому что папа программист.\n— Но программисты много зарабатывают!\n— Он пишет на Python.",
+                "Оптимист: стакан наполовину полон.\nПессимист: стакан наполовину пуст.\nПрограммист: стакан в два раза больше, чем надо.",
+                "— Как дела?\n— Как у процессора: много задач, мало памяти, всё зависает.",
+                "В понедельник лучше не начинать ничего нового. В пятницу — ничего старого. В среду вообще непонятно что происходит.",
+                "Подходит мужик к другому:\n— Слушай, ты вчера что-то обещал?\n— Не помню.\n— Вот и хорошо, я тоже.",
+            ]
+            joke = random.choice(FALLBACK)
+
+        embed = discord.Embed(
+            title="🃏 Анекдот",
+            description=joke[:2000],
+            color=discord.Color.yellow()
+        )
+        await interaction.followup.send(embed=embed)
 
     # 🐱 /котик
     @app_commands.command(name="котик", description="Случайная картинка котика")
@@ -489,35 +553,57 @@ class FunAndInfo(commands.Cog):
             asyncio.create_task(close_later())
 
     # 😂 /мем — RU приоритет, EN падение
-    @app_commands.command(name="мем", description="Показать случайный мем (сначала русские, затем запасной англ.)")
+    @app_commands.command(name="мем", description="Показать случайный мем")
     async def мем(self, interaction: discord.Interaction):
-        RU_MEMES = [
-            "https://i.imgur.com/4p5mN2n.jpeg",
-            "https://i.imgur.com/5c9r1hU.jpeg",
-            "https://i.imgur.com/5m0y9mV.png",
-            "https://i.imgur.com/NsXb2zU.png",
-            "https://i.imgur.com/0b7Q3yП.jpeg".replace("П", "P"),  # на всякий случай
-        ]
-        random.shuffle(RU_MEMES)
-        for url in RU_MEMES:
-            if url:
-                await interaction.response.send_message(f"😂 {url}")
-                return
+        await interaction.response.defer()
 
-        api = "https://meme-api.com/gimme"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(api, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        fallback_url = data.get("url")
-                        if fallback_url:
-                            await interaction.response.send_message(f"😅 {fallback_url}")
-                            return
-        except Exception:
-            pass
+        # Русскоязычные subreddits через meme-api
+        RU_SUBS = ["Pikabu", "ru_memes", "PurpleOrangeMemes"]
+        random.shuffle(RU_SUBS)
 
-        await interaction.response.send_message("❌ Не удалось достать мем. Попробуй ещё раз позже.")
+        meme_url, meme_title = None, None
+
+        for sub in RU_SUBS:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"https://meme-api.com/gimme/{sub}",
+                        timeout=aiohttp.ClientTimeout(total=8)
+                    ) as r:
+                        if r.status == 200:
+                            data = await r.json()
+                            if not data.get("nsfw", True):
+                                meme_url   = data.get("url")
+                                meme_title = data.get("title", "")
+                                if meme_url:
+                                    break
+            except Exception:
+                continue
+
+        # Фолбэк — любой subreddit
+        if not meme_url:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://meme-api.com/gimme",
+                        timeout=aiohttp.ClientTimeout(total=8)
+                    ) as r:
+                        if r.status == 200:
+                            data = await r.json()
+                            meme_url   = data.get("url")
+                            meme_title = data.get("title", "")
+            except Exception:
+                pass
+
+        if meme_url:
+            embed = discord.Embed(
+                title=meme_title or "😂 Мем",
+                color=discord.Color.orange()
+            )
+            embed.set_image(url=meme_url)
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.followup.send("❌ Не удалось достать мем. Попробуй позже.")
 
 
 async def setup(bot):

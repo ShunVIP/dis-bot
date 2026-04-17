@@ -1,143 +1,361 @@
+# -*- coding: utf-8 -*-
 # fun_slesh/rep_and_mood.py
+"""
+/репа            — +1 репутация (раз в день)
+/антирепа        — -1 репутация (раз в день, не ниже 0)
+/топ_репа        — топ репутации
+/история_репы    — кто кому давал (своя история)
+/мое_настроение  — оценить настроение 1-10
+/настроение_сегодня — настроение сервера за сегодня
+"""
+
 import discord
 from discord.ext import commands
 from discord import app_commands
-import sqlite3
-import os
+import sqlite3, os
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from utils.events_bus import emit  # 👈 добавлено
+from core.economy import add_coins
+from utils.events_bus import emit
+# Импортируем assign_rep_role лениво чтобы избежать circular import
+def _try_assign_role(bot, guild_id, user_id):
+    import asyncio
+    try:
+        from fun_slesh.rep_roles import assign_rep_role
+        asyncio.create_task(assign_rep_role(bot, guild_id, user_id))
+    except Exception:
+        pass
 
-MSK = ZoneInfo("Europe/Moscow")
+MSK     = ZoneInfo("Europe/Moscow")
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+
+# Монет за полученную репу
+REP_REWARD   = 5
+# Монет штраф за антирепу (для получателя)
+ANTIREP_COST = 3
+
+
+def _ensure_tables():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS reputation (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id  INTEGER NOT NULL,
+                given_by INTEGER NOT NULL,
+                delta    INTEGER NOT NULL DEFAULT 1,
+                date     TEXT    NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS mood (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id  INTEGER NOT NULL,
+                mood     INTEGER NOT NULL,
+                date     TEXT    NOT NULL
+            );
+        """)
+        # Миграция: добавить колонку delta если нет
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(reputation)")}
+        if "delta" not in existing:
+            conn.execute("ALTER TABLE reputation ADD COLUMN delta INTEGER NOT NULL DEFAULT 1")
+        conn.commit()
+
+
+def _get_rep(user_id: int) -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT SUM(delta) FROM reputation WHERE user_id=?", (user_id,)
+        ).fetchone()
+    val = row[0] if row and row[0] is not None else 0
+    return max(0, val)   # не ниже 0 для отображения
+
 
 class RepAndMood(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._game_rep_cache: dict = {}
+        _ensure_tables()
+        # Подписываемся на game_played через events_bus
+        from utils.events_bus import subscribe
+        subscribe("game_played", self._on_game_played_handler)
 
-    # 🏆 /репа
-    @app_commands.command(name="репа", description="Дать репутацию участнику (раз в день)")
-    @app_commands.describe(пользователь="Пользователь, которому хотите дать репутацию")
-    async def репа(self, interaction: discord.Interaction, пользователь: discord.Member):
+    # ── /репа ─────────────────────────────────────────────────────────────────
+    @app_commands.command(name="репа", description="Дать +1 репутацию участнику (раз в день)")
+    @app_commands.describe(пользователь="Кому дать репутацию")
+    async def репа(self, interaction: discord.Interaction,
+                   пользователь: discord.Member):
         if пользователь.id == interaction.user.id:
-            await interaction.response.send_message("❌ Нельзя дать репутацию самому себе.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Нельзя давать репу самому себе.", ephemeral=True)
+            return
+        if пользователь.bot:
+            await interaction.response.send_message(
+                "❌ Боты не заслуживают репы.", ephemeral=True)
             return
 
         today = datetime.now(MSK).date().isoformat()
-
         with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("CREATE TABLE IF NOT EXISTS reputation (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, given_by INTEGER NOT NULL, date TEXT NOT NULL)")
-            conn.commit()
-
-            cur.execute("SELECT 1 FROM reputation WHERE given_by = ? AND date = ?", (interaction.user.id, today))
-            if cur.fetchone():
-                await interaction.response.send_message("❌ Вы уже давали репутацию сегодня.", ephemeral=True)
+            # Проверка: уже давал кому-либо сегодня? (один подарок в день)
+            given = conn.execute(
+                "SELECT COUNT(*) FROM reputation WHERE given_by=? AND date=? AND delta>0",
+                (interaction.user.id, today)
+            ).fetchone()[0]
+            if given:
+                await interaction.response.send_message(
+                    "❌ Ты уже давал репу сегодня. Возвращайся завтра.", ephemeral=True)
                 return
 
-            cur.execute(
-                "INSERT INTO reputation (user_id, given_by, date) VALUES (?, ?, ?)",
+            conn.execute(
+                "INSERT INTO reputation(user_id, given_by, delta, date) VALUES(?,?,1,?)",
                 (пользователь.id, interaction.user.id, today)
             )
-            conn.commit()
 
-        # 👉 событие для ачивок
-        await emit("rep_given", user_id=пользователь.id, given_by=interaction.user.id, date=today)
+        new_rep = _get_rep(пользователь.id)
+        # Награда в монетах получателю
+        new_bal = add_coins(пользователь.id, REP_REWARD, "rep",
+                            {"from": interaction.user.id, "type": "plus"})
 
-        await interaction.response.send_message(f"🏆 {interaction.user.mention} выдал +1 репутации {пользователь.mention}!")
+        await emit("rep_given", user_id=пользователь.id,
+                   given_by=interaction.user.id, date=today)
+        # Проверяем не пора ли выдать/обновить роль
+        _try_assign_role(self.bot, interaction.guild.id, пользователь.id)
 
-    # 🥇 /топ_репа
-    @app_commands.command(name="топ_репа", description="Показать топ по репутации на сервере")
-    async def топ_репа(self, interaction: discord.Interaction):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("CREATE TABLE IF NOT EXISTS reputation (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, given_by INTEGER NOT NULL, date TEXT NOT NULL)")
-            cur.execute("SELECT user_id, COUNT(*) as total FROM reputation GROUP BY user_id ORDER BY total DESC LIMIT 10")
-            rows = cur.fetchall()
+        emb = discord.Embed(
+            title="🏆 Репутация выдана!",
+            color=discord.Color.gold()
+        )
+        emb.add_field(name="Получатель", value=пользователь.mention, inline=True)
+        emb.add_field(name="Репутация",  value=f"**{new_rep}** ⭐",  inline=True)
+        emb.add_field(name="Бонус",
+                      value=f"+{REP_REWARD} монет (баланс: {new_bal})", inline=True)
+        await interaction.response.send_message(embed=emb)
 
-        if not rows:
-            await interaction.response.send_message("😶 Пока никто не получил репутации.")
+    # ── /антирепа ─────────────────────────────────────────────────────────────
+    @app_commands.command(name="антирепа",
+                          description="Дать -1 репутацию участнику (раз в день, не ниже 0)")
+    @app_commands.describe(
+        пользователь="Кому снизить репутацию",
+        причина="Причина (видна в истории)"
+    )
+    async def антирепа(self, interaction: discord.Interaction,
+                       пользователь: discord.Member,
+                       причина: str = ""):
+        if пользователь.id == interaction.user.id:
+            await interaction.response.send_message(
+                "❌ Нельзя снижать репу самому себе.", ephemeral=True)
+            return
+        if пользователь.bot:
+            await interaction.response.send_message(
+                "❌ Боты вне системы репутации.", ephemeral=True)
             return
 
-        lines = []
-        for i, (user_id, total) in enumerate(rows, start=1):
-            try:
-                member = await interaction.guild.fetch_member(user_id)
-                name = member.display_name
-            except discord.NotFound:
-                name = f"ID {user_id}"
-            lines.append(f"**{i}.** {name} — {total} реп.")
+        today = datetime.now(MSK).date().isoformat()
+        with sqlite3.connect(DB_PATH) as conn:
+            given = conn.execute(
+                "SELECT COUNT(*) FROM reputation WHERE given_by=? AND date=? AND delta<0",
+                (interaction.user.id, today)
+            ).fetchone()[0]
+            if given:
+                await interaction.response.send_message(
+                    "❌ Ты уже снижал репу сегодня.", ephemeral=True)
+                return
 
-        embed = discord.Embed(
-            title="🏆 Топ по репутации",
+            # Проверяем — уже на нуле?
+            current = _get_rep(пользователь.id)
+            if current <= 0:
+                await interaction.response.send_message(
+                    f"❌ У {пользователь.display_name} уже 0 репутации — ниже некуда.",
+                    ephemeral=True)
+                return
+
+            conn.execute(
+                "INSERT INTO reputation(user_id, given_by, delta, date) VALUES(?,?,-1,?)",
+                (пользователь.id, interaction.user.id, today)
+            )
+
+        new_rep = _get_rep(пользователь.id)
+        # Штраф в монетах получателю антирепы
+        if ANTIREP_COST > 0:
+            add_coins(пользователь.id, -min(ANTIREP_COST, max(0, new_rep)),
+                     "rep", {"from": interaction.user.id, "type": "minus"})
+
+        emb = discord.Embed(
+            title="👎 Антирепутация",
+            color=discord.Color.red()
+        )
+        emb.add_field(name="Получатель", value=пользователь.mention, inline=True)
+        emb.add_field(name="Репутация",  value=f"**{new_rep}** ⭐",  inline=True)
+        if причина:
+            emb.add_field(name="Причина", value=причина, inline=False)
+        await interaction.response.send_message(embed=emb)
+
+    # ── /топ_репа ─────────────────────────────────────────────────────────────
+    @app_commands.command(name="топ_репа", description="Топ репутации на сервере")
+    async def топ_репа(self, interaction: discord.Interaction):
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT user_id, SUM(delta) as total FROM reputation"
+                " GROUP BY user_id HAVING total > 0 ORDER BY total DESC LIMIT 50"
+            ).fetchall()
+
+        present = []
+        for user_id, total in rows:
+            m = interaction.guild.get_member(user_id)
+            if m:
+                present.append((int(total), m.display_name, m.mention))
+
+        if not present:
+            await interaction.response.send_message("😶 Ещё никто не получил репутации.")
+            return
+
+        present.sort(reverse=True)
+        medals = ["🥇", "🥈", "🥉"]
+        lines = [
+            f"{medals[i] if i < 3 else f'**{i+1}.**'} {name} — **{rep}** ⭐"
+            for i, (rep, name, _) in enumerate(present[:10])
+        ]
+        emb = discord.Embed(
+            title="⭐ Топ репутации",
             description="\n".join(lines),
             color=discord.Color.gold()
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=emb)
 
-    # 😄 /мое_настроение
-    @app_commands.command(name="мое_настроение", description="Оцените своё настроение от 1 до 10 (сохраняется на сегодня, МСК)")
-    @app_commands.describe(оценка="Настроение от 1 (ужас) до 10 (отлично)")
-    async def мое_настроение(self, interaction: discord.Interaction, оценка: app_commands.Range[int, 1, 10]):
-        today = datetime.now(MSK).date().isoformat()
-
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("CREATE TABLE IF NOT EXISTS mood (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, mood INTEGER NOT NULL, date TEXT NOT NULL)")
-            # Проверяем, есть ли уже запись на сегодня (МСК)
-            cur.execute("SELECT 1 FROM mood WHERE user_id = ? AND date = ?", (interaction.user.id, today))
-            if cur.fetchone():
-                await interaction.response.send_message("❌ Сегодня вы уже оценивали своё настроение.", ephemeral=True)
-                return
-
-            cur.execute(
-                "INSERT INTO mood (user_id, mood, date) VALUES (?, ?, ?)",
-                (interaction.user.id, оценка, today)
-            )
-            conn.commit()
-
-        await interaction.response.send_message(f"😄 Настроение сохранено: {оценка}/10 на {today} (МСК)")
-
-    # 📊 /настроение_сегодня
-    @app_commands.command(name="настроение_сегодня", description="Показать настроение участников сервера за сегодня (МСК)")
-    async def настроение_сегодня(self, interaction: discord.Interaction):
-        today = datetime.now(MSK).date().isoformat()
+    # ── /история_репы ─────────────────────────────────────────────────────────
+    @app_commands.command(name="история_репы",
+                          description="История репутации — кто и когда давал")
+    @app_commands.describe(
+        пользователь="Чью историю посмотреть (по умолчанию свою)",
+        тип="Показать полученные или отданные"
+    )
+    @app_commands.choices(тип=[
+        app_commands.Choice(name="Полученные", value="received"),
+        app_commands.Choice(name="Отданные",   value="given"),
+    ])
+    async def история_репы(self, interaction: discord.Interaction,
+                           пользователь: discord.Member | None = None,
+                           тип: str = "received"):
+        target = пользователь or interaction.user
 
         with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("CREATE TABLE IF NOT EXISTS mood (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, mood INTEGER NOT NULL, date TEXT NOT NULL)")
-            cur.execute("SELECT user_id, mood FROM mood WHERE date = ?", (today,))
-            rows = cur.fetchall()
+            if тип == "received":
+                rows = conn.execute(
+                    "SELECT given_by, delta, date FROM reputation"
+                    " WHERE user_id=? ORDER BY date DESC LIMIT 20",
+                    (target.id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT user_id, delta, date FROM reputation"
+                    " WHERE given_by=? ORDER BY date DESC LIMIT 20",
+                    (target.id,)
+                ).fetchall()
 
         if not rows:
-            await interaction.response.send_message("📭 Сегодня ещё никто не оставил оценку настроения.", ephemeral=True)
+            await interaction.response.send_message("📭 История пуста.", ephemeral=True)
             return
 
-        # Оставляем только тех, кто на этом сервере
+        lines = []
+        for other_id, delta, date in rows:
+            m    = interaction.guild.get_member(other_id)
+            name = m.display_name if m else f"<@{other_id}>"
+            sign = "⭐ +" if delta > 0 else "👎 "
+            lines.append(f"`{date}` {sign}{abs(delta)} — {name}")
+
+        total = _get_rep(target.id)
+        emb = discord.Embed(
+            title=f"📋 История репутации: {target.display_name}",
+            description="\n".join(lines),
+            color=discord.Color.blurple()
+        )
+        emb.set_footer(text=f"Текущая репутация: {total} ⭐")
+        await interaction.response.send_message(embed=emb, ephemeral=True)
+
+    # ── /мое_настроение ───────────────────────────────────────────────────────
+    @app_commands.command(name="мое_настроение",
+                          description="Оцени своё настроение от 1 до 10")
+    @app_commands.describe(оценка="Настроение: 1 — всё плохо, 10 — прекрасно")
+    async def мое_настроение(self, interaction: discord.Interaction,
+                              оценка: app_commands.Range[int, 1, 10]):
+        today = datetime.now(MSK).date().isoformat()
+        with sqlite3.connect(DB_PATH) as conn:
+            if conn.execute(
+                "SELECT 1 FROM mood WHERE user_id=? AND date=?",
+                (interaction.user.id, today)
+            ).fetchone():
+                await interaction.response.send_message(
+                    "❌ Настроение уже выставлено сегодня.", ephemeral=True)
+                return
+            conn.execute(
+                "INSERT INTO mood(user_id, mood, date) VALUES(?,?,?)",
+                (interaction.user.id, оценка, today)
+            )
+
+        emoji_map = {
+            1: "😭", 2: "😢", 3: "😕", 4: "😐",
+            5: "🙂", 6: "😊", 7: "😄", 8: "😁", 9: "🤩", 10: "🔥"
+        }
+        emb = discord.Embed(
+            title=f"{emoji_map.get(оценка, '😶')} Настроение сохранено",
+            description=f"Оценка: **{оценка}/10** на {today}",
+            color=discord.Color.from_rgb(
+                max(0, 255 - оценка * 20), min(255, оценка * 25), 100
+            )
+        )
+        await interaction.response.send_message(embed=emb)
+
+    # ── /настроение_сегодня ───────────────────────────────────────────────────
+    @app_commands.command(name="настроение_сегодня",
+                          description="Настроение участников сервера за сегодня")
+    async def настроение_сегодня(self, interaction: discord.Interaction):
+        today = datetime.now(MSK).date().isoformat()
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT user_id, mood FROM mood WHERE date=?", (today,)
+            ).fetchall()
+
         display = []
         for user_id, mood in rows:
-            try:
-                member = await interaction.guild.fetch_member(user_id)
-            except discord.NotFound:
-                continue
-            display.append((member.display_name, mood))
+            m = interaction.guild.get_member(user_id)
+            if m:
+                display.append((m.display_name, mood))
 
         if not display:
-            await interaction.response.send_message("📭 На сервере нет оценок за сегодня.", ephemeral=True)
+            await interaction.response.send_message(
+                "📭 Сегодня ещё никто не оставил оценку настроения.", ephemeral=True)
             return
 
-        # Сортировка по убыванию настроения
         display.sort(key=lambda x: x[1], reverse=True)
-
-        lines = [f"• **{name}** — {mood}/10" for name, mood in display[:25]]
+        emoji_map = {1:"😭",2:"😢",3:"😕",4:"😐",5:"🙂",
+                     6:"😊",7:"😄",8:"😁",9:"🤩",10:"🔥"}
+        lines = [
+            f"{emoji_map.get(m, '😶')} **{name}** — {m}/10"
+            for name, m in display[:25]
+        ]
         avg = sum(m for _, m in display) / len(display)
-        embed = discord.Embed(
-            title=f"🙂 Настроение сегодня — {today} (МСК)",
+        emb = discord.Embed(
+            title=f"😊 Настроение сегодня — {today}",
             description="\n".join(lines),
             color=discord.Color.green()
         )
-        embed.set_footer(text=f"Среднее по серверу: {avg:.2f}/10 • Голосов: {len(display)}")
-        await interaction.response.send_message(embed=embed)
+        emb.set_footer(text=f"Среднее: {avg:.1f}/10 · Голосов: {len(display)}")
+        await interaction.response.send_message(embed=emb)
+
+
+    # ── Репа за активность в играх ───────────────────────────────────────────
+    async def _on_game_played_handler(self, user_id: int, guild_id: int, game: str):
+        """Даёт +1 репу за факт участия в игре. Кулдаун 30 минут на игру."""
+        import time
+        key = (user_id, guild_id, game)
+        now = time.time()
+        if now - self._game_rep_cache.get(key, 0) < 1800:
+            return
+        self._game_rep_cache[key] = now
+        today = datetime.now(MSK).date().isoformat()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO reputation(user_id, given_by, delta, date) VALUES(?,?,1,?)",
+                (user_id, 0, today)
+            )
+        _try_assign_role(self.bot, guild_id, user_id)
 
 async def setup(bot):
     await bot.add_cog(RepAndMood(bot))
