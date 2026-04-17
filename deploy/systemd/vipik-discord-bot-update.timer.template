@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic update check for ViPik Discord Bot
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=vipik-discord-bot-update.service
+
+[Install]
+WantedBy=timers.target

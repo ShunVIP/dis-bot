@@ -1,0 +1,9 @@
+[Unit]
+Description=Update ViPik Discord Bot from Git
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/env APP_DIR=__APP_DIR__ BRANCH=main SERVICE_NAME=vipik-discord-bot /bin/bash __APP_DIR__/scripts/deploy.sh
