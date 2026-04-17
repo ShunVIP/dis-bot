@@ -116,6 +116,11 @@ async def _cleanup_role(guild: discord.Guild, channel: discord.VoiceChannel):
 
 
 class VoiceRoles(commands.Cog):
+    voice_roles_group = app_commands.Group(
+        name="войс_роли",
+        description="Авто-роли для голосовых каналов"
+    )
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         _ensure_tables()
@@ -161,8 +166,8 @@ class VoiceRoles(commands.Cog):
                     pass
 
     # ── /войс_роли_вкл ────────────────────────────────────────────────────────
-    @app_commands.command(name="войс_роли_вкл",
-                          description="(Админ) Включить/выключить авто-роли по голосовым каналам")
+    @voice_roles_group.command(name="вкл",
+                               description="(Админ) Включить/выключить авто-роли по голосовым каналам")
     @app_commands.describe(включить="Включить или выключить")
     @app_commands.checks.has_permissions(administrator=True)
     async def войс_роли_вкл(self, interaction: discord.Interaction, включить: bool):
@@ -177,8 +182,8 @@ class VoiceRoles(commands.Cog):
             f"{status} авто-роли по голосовым каналам.", ephemeral=True)
 
     # ── /войс_роли_статус ─────────────────────────────────────────────────────
-    @app_commands.command(name="войс_роли_статус",
-                          description="Текущие авто-роли по голосовым каналам")
+    @voice_roles_group.command(name="статус",
+                               description="Текущие авто-роли по голосовым каналам")
     async def войс_роли_статус(self, interaction: discord.Interaction):
         enabled = _is_enabled(interaction.guild.id)
         with sqlite3.connect(DB_PATH) as conn:

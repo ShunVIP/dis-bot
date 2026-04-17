@@ -277,6 +277,11 @@ async def _check_releases(bot: commands.Bot):
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class Steam(commands.Cog):
+    releases_group = app_commands.Group(
+        name="релизы",
+        description="Уведомления о релизах и скидках Steam"
+    )
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         _ensure_tables()
@@ -512,8 +517,8 @@ class Steam(commands.Cog):
         await interaction.followup.send(embed=emb)
 
     # ── /релизы_канал ─────────────────────────────────────────────────────────
-    @app_commands.command(name="релизы_канал",
-                          description="(Админ) Канал для уведомлений о релизах и скидках")
+    @releases_group.command(name="канал",
+                            description="(Админ) Канал для уведомлений о релизах и скидках")
     @app_commands.describe(
         канал="Куда постить уведомления",
         минимальная_скидка="Минимальная скидка для уведомления (%, по умолчанию 50)"
@@ -537,8 +542,8 @@ class Steam(commands.Cog):
             ephemeral=True)
 
     # ── /релизы_проверить ─────────────────────────────────────────────────────
-    @app_commands.command(name="релизы_проверить",
-                          description="(Админ) Проверить вишлисты прямо сейчас")
+    @releases_group.command(name="проверить",
+                            description="(Админ) Проверить вишлисты прямо сейчас")
     @app_commands.checks.has_permissions(administrator=True)
     async def релизы_проверить(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)

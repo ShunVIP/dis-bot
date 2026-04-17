@@ -210,6 +210,11 @@ def _build_troll_response(mention: str, count: int, level: int,
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class Toxicity(commands.Cog):
+    toxicity_group = app_commands.Group(
+        name="токсичность",
+        description="Детектор токсичности и его настройки"
+    )
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         _ensure_tables()
@@ -288,8 +293,8 @@ class Toxicity(commands.Cog):
             pass
 
     # ── /токсики ──────────────────────────────────────────────────────────────
-    @app_commands.command(name="токсики",
-                          description="Топ токсичных участников за неделю")
+    @toxicity_group.command(name="топ",
+                            description="Топ токсичных участников за неделю")
     @app_commands.describe(
         период="Неделя (по умолчанию текущая) или 'всё время'"
     )
@@ -338,8 +343,8 @@ class Toxicity(commands.Cog):
         await interaction.response.send_message(embed=emb)
 
     # ── /токсичность_вкл ──────────────────────────────────────────────────────
-    @app_commands.command(name="токсичность_вкл",
-                          description="(Админ) Включить/выключить детектор токсичности")
+    @toxicity_group.command(name="вкл",
+                            description="(Админ) Включить/выключить детектор токсичности")
     @app_commands.checks.has_permissions(administrator=True)
     async def токсичность_вкл(self, interaction: discord.Interaction,
                                 включить: bool):
@@ -354,8 +359,8 @@ class Toxicity(commands.Cog):
             f"{status} детектор токсичности.", ephemeral=True)
 
     # ── /токсичность_порог ────────────────────────────────────────────────────
-    @app_commands.command(name="токсичность_порог",
-                          description="(Админ) Уровень чувствительности (1=мягко, 3=только жёсткое)")
+    @toxicity_group.command(name="порог",
+                            description="(Админ) Уровень чувствительности (1=мягко, 3=только жёсткое)")
     @app_commands.describe(уровень="1 — любая грубость, 2 — оскорбления, 3 — только жёсткое")
     @app_commands.choices(уровень=[
         app_commands.Choice(name="1 — любая грубость",         value=1),
@@ -377,8 +382,8 @@ class Toxicity(commands.Cog):
             ephemeral=True)
 
     # ── /токсичность_канал ────────────────────────────────────────────────────
-    @app_commands.command(name="токсичность_канал",
-                          description="(Админ) Ограничить мониторинг каналами (пусто = все каналы)")
+    @toxicity_group.command(name="канал",
+                            description="(Админ) Ограничить мониторинг каналами (пусто = все каналы)")
     @app_commands.describe(
         канал="Добавить/убрать канал из мониторинга",
         действие="Добавить или убрать"

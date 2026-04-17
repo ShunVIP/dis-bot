@@ -177,6 +177,7 @@ python main_file.py
 - `.github/workflows/deploy.yml` — автодеплой по `push` в `main`
 - `scripts/deploy.sh` — удалённый сценарий обновления
 - `scripts/bootstrap_vps.sh` — первичная настройка Ubuntu/Debian VPS
+- `scripts/sync_training_to_vps.ps1` — перенос обученных моделей и persona-баз на VPS без git
 - `deploy/systemd/vipik-discord-bot.service.template` — шаблон сервиса
 - `deploy/systemd/vipik-discord-bot-update.*.template` — опциональный таймер автообновления с сервера
 

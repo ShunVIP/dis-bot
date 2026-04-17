@@ -208,6 +208,11 @@ def _countdown(dt_utc: datetime) -> str:
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class Tools(commands.Cog):
+    reminders_group = app_commands.Group(
+        name="напоминания",
+        description="Создание и управление напоминаниями"
+    )
+
     def __init__(self, bot):
         self.bot = bot
         _ensure_db()
@@ -312,7 +317,7 @@ class Tools(commands.Cog):
                                  (next_dt.isoformat(), rid))
 
     # ── /напомни ──────────────────────────────────────────────────────────────
-    @app_commands.command(name="напомни", description="Установить напоминание")
+    @reminders_group.command(name="создать", description="Установить напоминание")
     @app_commands.describe(
         текст          = "Текст напоминания",
         время          = "Время МСК: ЧЧ:ММ (например 21:00)",
@@ -426,7 +431,7 @@ class Tools(commands.Cog):
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     # ── /мои_напоминания ──────────────────────────────────────────────────────
-    @app_commands.command(name="мои_напоминания", description="Мои активные напоминания с обратным отсчётом")
+    @reminders_group.command(name="мои", description="Мои активные напоминания с обратным отсчётом")
     async def мои_напоминания(self, interaction: discord.Interaction):
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(
@@ -481,8 +486,8 @@ class Tools(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ── /удалить_напоминание ──────────────────────────────────────────────────
-    @app_commands.command(name="удалить_напоминание",
-                          description="Выбрать и удалить своё напоминание")
+    @reminders_group.command(name="удалить",
+                             description="Выбрать и удалить своё напоминание")
     async def удалить_напоминание(self, interaction: discord.Interaction):
         is_admin = interaction.user.guild_permissions.administrator
         with sqlite3.connect(DB_PATH) as conn:
