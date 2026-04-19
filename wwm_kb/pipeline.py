@@ -5,6 +5,8 @@ from typing import List
 
 from .db import connect, ensure_schema, now_iso
 from .collectors.base import Collector
+from .postprocess_v1 import postprocess_v1
+from .classify_and_snippet import main as build_entity_features
 
 # IMPORTANT:
 # This expects your project to expose an async events_bus emit function at:
@@ -51,14 +53,13 @@ async def run_collectors(collectors: List[Collector], *, run_id: str) -> dict:
 
 
 async def postprocess_after_refresh(run_id: str) -> dict:
-    """Postprocessing hook.
-
-    For now it's a placeholder. Later you can:
-      - normalize RAW into entities/aliases tables
-      - build search indexes
-      - kick off ML training/inference
-    """
-    return {"run_id": run_id, "status": "ok"}
+    """Normalize RAW records and refresh lightweight KB features."""
+    try:
+        postprocess_v1(run_id=run_id)
+        build_entity_features()
+        return {"run_id": run_id, "status": "ok"}
+    except Exception as e:
+        return {"run_id": run_id, "status": f"error: {e}"}
 
 
 async def daily_refresh(collectors: List[Collector]) -> None:
