@@ -13,3 +13,16 @@ STEAM_API_KEY = os.getenv("STEAM_API_KEY", "")
 # Remote heavy-model bridge (optional)
 REMOTE_MODEL_API_URL = os.getenv("REMOTE_MODEL_API_URL", "").strip()
 REMOTE_MODEL_API_TOKEN = os.getenv("REMOTE_MODEL_API_TOKEN", "").strip()
+
+# Server safety toggles
+BOT_SERVER_MODE = os.getenv("BOT_SERVER_MODE", "").strip()
+ALLOW_GPT_TRAINING_ON_SERVER = os.getenv("ALLOW_GPT_TRAINING_ON_SERVER", "").strip()
+ALLOW_FULL_MAINTENANCE_ON_SERVER = os.getenv("ALLOW_FULL_MAINTENANCE_ON_SERVER", "").strip()
+ALLOW_REMOTE_MODEL_INFERENCE = os.getenv("ALLOW_REMOTE_MODEL_INFERENCE", "").strip()
+
+# Optional browser admin panel
+WEB_ADMIN_ENABLED = os.getenv("WEB_ADMIN_ENABLED", "").strip()
+WEB_ADMIN_HOST = os.getenv("WEB_ADMIN_HOST", "").strip()
+WEB_ADMIN_PORT = os.getenv("WEB_ADMIN_PORT", "").strip()
+WEB_ADMIN_TOKEN = os.getenv("WEB_ADMIN_TOKEN", "").strip()
+WEB_ADMIN_TITLE = os.getenv("WEB_ADMIN_TITLE", "").strip()

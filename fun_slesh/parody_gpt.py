@@ -154,11 +154,21 @@ except Exception:
     REMOTE_MODEL_API_URL = os.environ.get("REMOTE_MODEL_API_URL", "").strip()
     REMOTE_MODEL_API_TOKEN = os.environ.get("REMOTE_MODEL_API_TOKEN", "").strip()
 
+try:
+    from core.runtime_policy import is_remote_model_inference_enabled
+except Exception:
+    def is_remote_model_inference_enabled() -> bool:
+        return True
+
 _REMOTE_EXISTS_CACHE: dict[int, tuple[bool, float]] = {}
 _REMOTE_EXISTS_TTL_SEC = 60.0
 
 def _remote_enabled() -> bool:
-    return bool(REMOTE_MODEL_API_URL and REMOTE_MODEL_API_TOKEN)
+    return bool(
+        REMOTE_MODEL_API_URL
+        and REMOTE_MODEL_API_TOKEN
+        and is_remote_model_inference_enabled()
+    )
 
 def _remote_call(path: str, payload: dict, timeout: float = 8.0) -> dict | None:
     if not _remote_enabled():

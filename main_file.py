@@ -5,6 +5,7 @@ import time
 import discord
 from discord.ext import commands
 from config import TOKEN
+from core.admin_panel import start_admin_panel
 
 # ─── Логгер ───────────────────────────────────────────────────────────────────
 from utils.logger import log as _base_log
@@ -79,6 +80,7 @@ async def load_slash_modules():
 async def setup_hook():
     _print_banner()
     await load_slash_modules()
+    await start_admin_panel(bot, log)
 
     log.bind(src="scheduler").info("Запуск планировщиков...")
     try:

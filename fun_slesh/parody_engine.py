@@ -50,6 +50,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from core.runtime_policy import (
+    IS_SERVER_RUNTIME,
+    is_full_maintenance_allowed,
+    is_gpt_training_allowed,
+)
 
 try:
     from fun_slesh.parody_engine_wakelock import prevent_sleep, allow_sleep
@@ -107,6 +112,14 @@ QUALITY_LEVELS = {
     "разум": {"state_size": 3, "emoji": "🧠", "desc": "максимум осознанности", "candidates": 30, "min_words": 5},
 }
 DEFAULT_MODEL = "мем"
+
+
+def _gpt_requested(mode: str) -> bool:
+    return mode in ("все", "gpt")
+
+
+def _server_training_guard_embed(title: str, description: str) -> discord.Embed:
+    return discord.Embed(title=title, description=description, color=discord.Color.orange())
 
 # Дубли аккаунтов — объединяются при старте
 KNOWN_DUPLICATES: dict[int, list[int]] = {
@@ -460,8 +473,10 @@ async def _do_full_retrain(guild: discord.Guild, collect: bool = False) -> dict:
     """
     stats = {"collected": 0, "markovify": 0, "persona": 0, "gpt": 0}
 
+    collect_allowed = collect and (not IS_SERVER_RUNTIME or is_full_maintenance_allowed())
+
     # 1. Сбор (если нужно)
-    if collect:
+    if collect_allowed:
         channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history]
         for ch in channels:
             stats["collected"] += await collect_channel(ch, guild.id)
@@ -479,7 +494,7 @@ async def _do_full_retrain(guild: discord.Guild, collect: bool = False) -> dict:
         stats["persona"] = len(personas)
 
     # 4. GPT
-    if GPT_OK:
+    if GPT_OK and is_gpt_training_allowed():
         def _collect_gpt():
             return [(uid, get_user_messages(uid)) for uid in get_all_user_ids()
                     if len(get_user_messages(uid)) >= 200]
@@ -546,7 +561,7 @@ class ParodyEngine(commands.Cog):
     async def _weekly_retrain(self):
         print("[parody] 🔄 Еженедельное дообучение...")
         for guild in self.bot.guilds:
-            stats = await _do_full_retrain(guild, collect=True)
+            stats = await _do_full_retrain(guild, collect=not IS_SERVER_RUNTIME or is_full_maintenance_allowed())
             print(f"[parody] {guild.name}: +{stats['collected']} сообщ | "
                   f"mk:{stats['markovify']} persona:{stats['persona']} gpt:{stats['gpt']}")
         print("[parody] ✅ Готово")
@@ -1085,6 +1100,19 @@ class ParodyEngine(commands.Cog):
         if только_markovify:
             модели = "markovify"
         await interaction.response.defer(thinking=True)
+
+        if _gpt_requested(модели) and not is_gpt_training_allowed():
+            emb = _server_training_guard_embed(
+                "🛡️ GPT-обучение на VPS заблокировано",
+                "На сервере отключено тяжёлое GPT-дообучение, чтобы не перегружать диск и память.\n\n"
+                "Что можно сделать:\n"
+                "1. В Discord выбрать `Только Markovify` или `Только Persona`.\n"
+                "2. Для GPT использовать локально `train_models.bat` на ПК.\n"
+                "3. Для генерации с ПК включать `enable_heavy_models.bat`.",
+            )
+            await interaction.followup.send(embed=emb, ephemeral=True)
+            return
+
         _prevent_sleep()  # ПК не спит пока идёт обучение
 
         if пользователь:
@@ -1099,7 +1127,7 @@ class ParodyEngine(commands.Cog):
                 profile = build_persona(пользователь.id, msgs)
                 save_persona(пользователь.id, пользователь.display_name, profile, len(msgs))
                 lines.append("📊 Persona: обновлена")
-            if GPT_OK and модели in ("все", "gpt") and len(msgs) >= 200:
+            if GPT_OK and модели in ("все", "gpt") and len(msgs) >= 200 and is_gpt_training_allowed():
                 await status.edit(content=f"⏳ GPT fine-tune для **{пользователь.display_name}**...")
                 ok = await fine_tune_user(пользователь.id, msgs, epochs=3)
                 lines.append(f"🤖 GPT: {'✅' if ok else '❌'}")
@@ -1128,7 +1156,7 @@ class ParodyEngine(commands.Cog):
                     lambda: build_all_personas(min_messages=50))
                 persona_count = len(personas)
 
-            if GPT_OK and модели in ("все", "gpt"):
+            if GPT_OK and модели in ("все", "gpt") and is_gpt_training_allowed():
                 loop = asyncio.get_event_loop()
                 gpt_pairs = await loop.run_in_executor(_MK_EXECUTOR,
                     lambda: [(uid, get_user_messages(uid)) for uid in get_all_user_ids()
@@ -1162,6 +1190,18 @@ class ParodyEngine(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def профилактика(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
+
+        if not is_full_maintenance_allowed():
+            emb = _server_training_guard_embed(
+                "🛡️ Профилактика на VPS заблокирована",
+                "Полная профилактика включает массовый сбор сообщений и GPT-дообучение, поэтому на сервере она выключена по умолчанию.\n\n"
+                "Безопасный путь:\n"
+                "1. Сбор и лёгкие модели держать на VPS.\n"
+                "2. GPT-обучение запускать локально через `train_models.bat`.\n"
+                "3. Для использования тяжёлой модели подключать ПК через `enable_heavy_models.bat`.",
+            )
+            await interaction.followup.send(embed=emb, ephemeral=True)
+            return
 
         # Блокируем сон Windows на время профилактики
         prevent_sleep()
@@ -1234,7 +1274,7 @@ class ParodyEngine(commands.Cog):
 
         # Шаг 4: GPT
         gpt_count = 0
-        if GPT_OK:
+        if GPT_OK and is_gpt_training_allowed():
             loop = asyncio.get_event_loop()
             gpt_pairs = await loop.run_in_executor(_MK_EXECUTOR,
                 lambda: [(uid, get_user_messages(uid)) for uid in get_all_user_ids()

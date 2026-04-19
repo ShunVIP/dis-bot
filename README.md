@@ -150,9 +150,56 @@ Where Winds Meet KB обновляется отдельной ежедневно
 ```env
 tok=YOUR_DISCORD_BOT_TOKEN
 STEAM_API_KEY=YOUR_STEAM_API_KEY
+BOT_SERVER_MODE=true
+ALLOW_GPT_TRAINING_ON_SERVER=false
+ALLOW_FULL_MAINTENANCE_ON_SERVER=false
+ALLOW_REMOTE_MODEL_INFERENCE=true
+WEB_ADMIN_ENABLED=false
+WEB_ADMIN_HOST=127.0.0.1
+WEB_ADMIN_PORT=8080
+WEB_ADMIN_TOKEN=CHANGE_ME
 ```
 
 В репозиторий этот файл коммитить не нужно.
+
+### Безопасный режим для VPS
+
+По умолчанию сервер должен жить в защитном режиме:
+- `ALLOW_GPT_TRAINING_ON_SERVER=false` блокирует `/дообучить` для GPT на VPS
+- `ALLOW_FULL_MAINTENANCE_ON_SERVER=false` блокирует `/профилактика` на VPS
+- `ALLOW_REMOTE_MODEL_INFERENCE=true` оставляет возможность использовать тяжёлую модель с твоего ПК, если включён bridge
+
+Это значит:
+- лёгкие модели `Markovify` и `Persona` можно держать на сервере
+- тяжёлое GPT-обучение делается локально на ПК через `train_models.bat`
+- VPS может только пользоваться тяжёлой моделью с ПК, когда ты сам это включил
+
+### Мини-панель в браузере
+
+В проект встроена опциональная HTML-панель управления:
+- она выключена по умолчанию
+- защищается токеном `WEB_ADMIN_TOKEN`
+- умеет показывать текущую политику безопасности и включать/выключать использование удалённой тяжёлой модели для текущего процесса
+
+Для включения:
+
+```env
+WEB_ADMIN_ENABLED=true
+WEB_ADMIN_HOST=127.0.0.1
+WEB_ADMIN_PORT=8080
+WEB_ADMIN_TOKEN=LONG_RANDOM_TOKEN
+```
+
+После запуска бот поднимет панель по адресу:
+
+```text
+http://IP_СЕРВЕРА:8080/?token=LONG_RANDOM_TOKEN
+```
+
+Для реальной безопасности лучше:
+- открывать панель только через Tailscale
+- или ограничить доступ firewall-правилом по твоему IP
+- не использовать короткий токен
 
 ## Локальный запуск
 
@@ -180,6 +227,9 @@ python main_file.py
 - `scripts/sync_training_to_vps.ps1` — перенос обученных моделей и persona-баз на VPS без git
 - `scripts/model_bridge_server.py` — локальный API для тяжёлых моделей на ПК
 - `scripts/run_model_bridge.ps1` — запуск локального model bridge на Windows
+- `train_models.bat` — локальное обучение моделей в пару кликов
+- `enable_heavy_models.bat` / `disable_heavy_models.bat` — включить/выключить тяжёлую модель с ПК для VPS
+- `core/admin_panel.py` — безопасная мини-панель управления через браузер
 - `deploy/systemd/vipik-discord-bot.service.template` — шаблон сервиса
 - `deploy/systemd/vipik-discord-bot-update.*.template` — опциональный таймер автообновления с сервера
 
