@@ -9,7 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from fun_slesh.parody_collector import get_all_user_ids, get_user_messages, get_user_stats
 from fun_slesh.parody_engine import train_user_all_qualities
-from fun_slesh.parody_persona import PERSONA_DB, PERSONA_OK, build_persona, save_persona
+from fun_slesh.parody_persona import PERSONA_DB, build_persona, save_persona
 from fun_slesh.parody_gpt import GPT_OK, fine_tune_user
 
 
@@ -29,13 +29,13 @@ async def train_one(user_id: int, modes: str) -> bool:
         ready = [name for name, ok in mk.items() if ok]
         print(f"[train] markovify: {', '.join(ready) if ready else 'none'}")
 
-    if modes in ("all", "persona"):
-        if PERSONA_OK:
+    if modes in ("all", "markovify", "persona"):
+        try:
             profile = build_persona(user_id, messages)
             save_persona(user_id, username, profile, count)
             print("[train] persona: ok")
-        else:
-            print("[train] persona: unavailable")
+        except Exception as exc:
+            print(f"[train] persona: failed ({exc})")
 
     if modes in ("all", "gpt"):
         if not GPT_OK:
