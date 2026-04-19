@@ -530,8 +530,10 @@ async def _do_safe_markov_refresh(guild: discord.Guild, collect: bool = True) ->
 # ─── Безопасная отправка (для долгих команд) ─────────────────────────────────
 async def _safe_send(interaction: discord.Interaction,
                      status_msg: discord.Message | None,
-                     embed: discord.Embed,
-                     channel: discord.TextChannel | None = None):
+                     embed: discord.Embed | None = None,
+                     channel: discord.TextChannel | None = None,
+                     content: str | None = None,
+                     view: discord.ui.View | None = None):
     """
     Пытается обновить статусное сообщение.
     Если webhook протух (>15 мин) — отправляет в канал напрямую.
@@ -539,14 +541,14 @@ async def _safe_send(interaction: discord.Interaction,
     # 1. Пробуем отредактировать статус
     if status_msg:
         try:
-            await status_msg.edit(content=None, embed=embed)
+            await status_msg.edit(content=content, embed=embed, view=view)
             return
         except Exception:
             pass
 
     # 2. Пробуем followup
     try:
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(content=content, embed=embed, view=view)
         return
     except Exception:
         pass
@@ -556,7 +558,8 @@ async def _safe_send(interaction: discord.Interaction,
         ch = channel or interaction.channel
         if ch:
             mention = interaction.user.mention if interaction.user else ""
-            await ch.send(content=mention, embed=embed)
+            channel_content = " ".join(part for part in [mention, content] if part).strip() or None
+            await ch.send(content=channel_content, embed=embed, view=view)
     except Exception as e:
         print(f"[parody] ❌ Не удалось отправить финальное сообщение: {e}")
 
@@ -636,52 +639,62 @@ class ParodyEngine(commands.Cog):
             await interaction.response.send_message("❌ Укажи пользователя через @ или ник_или_id.", ephemeral=True)
             return
 
-        # Для автор/нейро проверяем ДО defer
+        # Сразу подтверждаем interaction, чтобы медленные I/O и генерация не роняли slash-команду.
+        await interaction.response.defer(thinking=True)
+
+        status_msg = None
+        try:
+            status_msg = await interaction.original_response()
+        except Exception:
+            pass
+
+        # Для автор/нейро проверяем ПОСЛЕ defer
         if модель == "автор" and not PERSONA_OK:
-            await interaction.response.send_message("❌ Persona недоступна.", ephemeral=True)
+            await interaction.followup.send("❌ Persona недоступна.", ephemeral=True)
             return
         if модель == "нейро":
             if not GPT_OK:
-                await interaction.response.send_message("❌ ruGPT не установлен.", ephemeral=True)
+                await interaction.followup.send("❌ ruGPT не установлен.", ephemeral=True)
                 return
-            if not gpt_model_exists(target_id):
-                await interaction.response.send_message(
+            gpt_exists = await asyncio.to_thread(gpt_model_exists, target_id)
+            if not gpt_exists:
+                await interaction.followup.send(
                     f"😕 Нейро-модель для **{display_name}** не обучена.\n"
                     f"Запусти `/дообучить` сначала.", ephemeral=True)
                 return
 
-        # Для markovify проверяем ДО defer
-        if модель in QUALITY_LEVELS and not model_exists(target_id, модель):
-            msgs = get_user_messages(target_id)
+        # Для markovify проверяем ПОСЛЕ defer
+        if модель in QUALITY_LEVELS and not await asyncio.to_thread(model_exists, target_id, модель):
+            msgs = await asyncio.to_thread(get_user_messages, target_id)
             if len(msgs) < 50:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"😕 Мало данных для **{display_name}**: {len(msgs)} сообщ. (нужно ≥50).", ephemeral=True)
                 return
-
-        await interaction.response.defer(thinking=True)
 
         # Генерация
         phrase, color, icon, footer = None, discord.Color.purple(), "💬", ""
 
         if модель == "автор":
-            if not persona_exists(target_id):
-                msgs = get_user_messages(target_id)
-                profile = build_persona(target_id, msgs)
-                save_persona(target_id, get_user_stats(target_id).get("username", str(target_id)), profile, len(msgs))
-            phrase = generate_author_phrase(target_id)
+            if not await asyncio.to_thread(persona_exists, target_id):
+                msgs = await asyncio.to_thread(get_user_messages, target_id)
+                profile = await asyncio.to_thread(build_persona, target_id, msgs)
+                username = await asyncio.to_thread(lambda: get_user_stats(target_id).get("username", str(target_id)))
+                await asyncio.to_thread(save_persona, target_id, username, profile, len(msgs))
+            phrase = await asyncio.to_thread(generate_author_phrase, target_id)
             color, icon, footer = discord.Color.teal(), "📊", "Автор · TF-IDF шаблоны"
 
         elif модель == "нейро":
-            phrase = generate_neuro_phrase(target_id)
+            phrase = await asyncio.to_thread(generate_neuro_phrase, target_id)
             color, icon, footer = discord.Color.brand_red(), "🤖", "НЕЙРОслоп · ruGPT fine-tune"
 
         else:
-            if not model_exists(target_id, модель):
-                msgs = get_user_messages(target_id)
-                if not train_user(target_id, msgs, модель):
+            if not await asyncio.to_thread(model_exists, target_id, модель):
+                msgs = await asyncio.to_thread(get_user_messages, target_id)
+                trained = await asyncio.to_thread(train_user, target_id, msgs, модель)
+                if not trained:
                     await interaction.followup.send("❌ Не удалось обучить модель.")
                     return
-            phrase = generate_phrase(target_id, модель)
+            phrase = await asyncio.to_thread(generate_phrase, target_id, модель)
             q = QUALITY_LEVELS[модель]
             color, icon, footer = discord.Color.purple(), "💬", f"{q['emoji']} {модель.capitalize()} · {q['desc']}"
 
@@ -695,7 +708,12 @@ class ParodyEngine(commands.Cog):
         else:
             emb.set_author(name=f"{display_name} (пародия)")
         emb.set_footer(text=f"{footer} · Оцени фразу!")
-        await interaction.followup.send(embed=emb, view=RatingView(target_id, модель, phrase))
+        await _safe_send(
+            interaction,
+            status_msg,
+            embed=emb,
+            view=RatingView(target_id, модель, phrase),
+        )
 
     # ── /батл ─────────────────────────────────────────────────────────────────
     @app_commands.command(name="батл", description="Батл фраз между двумя пользователями — 7 раундов")
