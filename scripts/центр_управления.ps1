@@ -28,6 +28,38 @@ function Run-Cmd([scriptblock]$Action) {
     Pause-Continue
 }
 
+function Show-Bridge-Guide {
+    Clear-Host
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "         НАСТРОЙКА ТЯЖЕЛОГО BRIDGE        " -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Bridge нужен только если хочешь, чтобы VPS использовал"
+    Write-Host "тяжелую GPT-модель, которая физически лежит на твоем ПК."
+    Write-Host ""
+    Write-Host "Что должно быть готово:"
+    Write-Host "1. Тяжелая модель уже есть на ПК."
+    Write-Host "2. На ПК установлен Tailscale."
+    Write-Host "3. На VPS установлен Tailscale и сервер видит твой ПК."
+    Write-Host "4. ПК включен, когда нужен GPT-режим."
+    Write-Host ""
+    Write-Host "Как это включается:"
+    Write-Host "1. Узнай Tailscale IP своего ПК."
+    Write-Host "2. Придумай токен bridge."
+    Write-Host "3. В мастер-меню выбери включение тяжелых моделей."
+    Write-Host "4. Введи Tailscale IP и токен."
+    Write-Host ""
+    Write-Host "Как это выключается:"
+    Write-Host "- В мастер-меню выбери выключение тяжелых моделей."
+    Write-Host "- Или просто выключи ПК."
+    Write-Host ""
+    Write-Host "Важно:"
+    Write-Host "- Bridge не нужен для обычной работы бота."
+    Write-Host "- GPT-обучение делается локально на ПК."
+    Write-Host "- VPS хранит боевые базы и легкие модели."
+    Pause-Continue
+}
+
 function Show-Header {
     Clear-Host
     Write-Host "==========================================" -ForegroundColor Cyan
@@ -35,19 +67,29 @@ function Show-Header {
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host "Папка проекта: $projectRoot"
     Write-Host ""
+    Write-Host "Локальная работа:"
     Write-Host "1. Установить зависимости локально"
     Write-Host "2. Запустить бота локально"
     Write-Host "3. Синхронизировать messages.db с VPS"
     Write-Host "4. Обучить модели локально"
     Write-Host "5. Отправить легкие модели и базы на VPS"
-    Write-Host "6. Включить тяжелые модели с ПК для VPS"
-    Write-Host "7. Выключить тяжелые модели с ПК для VPS"
-    Write-Host "8. Показать git status"
-    Write-Host "9. Commit и push в Git"
-    Write-Host "10. Установить ежедневную синхронизацию messages.db на ПК"
-    Write-Host "11. Поставить бота на новый VPS с нуля"
-    Write-Host "12. Показать статус бота на VPS"
-    Write-Host "13. Открыть README"
+    Write-Host ""
+    Write-Host "Bridge тяжелой GPT-модели:"
+    Write-Host "6. Пошагово: как работает и как настроить bridge"
+    Write-Host "7. Запустить bridge только локально на ПК"
+    Write-Host "8. Остановить локальный bridge на ПК"
+    Write-Host "9. Включить тяжелые модели с ПК для VPS"
+    Write-Host "10. Выключить тяжелые модели с ПК для VPS"
+    Write-Host ""
+    Write-Host "Git и VPS:"
+    Write-Host "11. Показать git status"
+    Write-Host "12. Commit и push в Git"
+    Write-Host "13. Установить ежедневную синхронизацию messages.db на ПК"
+    Write-Host "14. Поставить бота на новый VPS с нуля"
+    Write-Host "15. Показать статус бота на VPS"
+    Write-Host ""
+    Write-Host "Справка:"
+    Write-Host "16. Открыть README"
     Write-Host "0. Выход"
     Write-Host ""
 }
@@ -96,6 +138,23 @@ while ($true) {
             }
         }
         "6" {
+            Show-Bridge-Guide
+        }
+        "7" {
+            Run-Cmd {
+                $token = Read-Host "Введи токен bridge"
+                if (-not $token) {
+                    throw "Нужен токен bridge."
+                }
+                powershell -ExecutionPolicy Bypass -File ".\scripts\start_model_bridge.ps1" -Token $token
+            }
+        }
+        "8" {
+            Run-Cmd {
+                powershell -ExecutionPolicy Bypass -File ".\scripts\stop_model_bridge.ps1"
+            }
+        }
+        "9" {
             Run-Cmd {
                 $ip = Read-Host "Введи Tailscale IP твоего ПК"
                 $token = Read-Host "Введи токен bridge"
@@ -105,17 +164,17 @@ while ($true) {
                 powershell -ExecutionPolicy Bypass -File ".\scripts\enable_remote_models.ps1" -TailscaleIp $ip -Token $token
             }
         }
-        "7" {
+        "10" {
             Run-Cmd {
                 powershell -ExecutionPolicy Bypass -File ".\scripts\disable_remote_models.ps1"
             }
         }
-        "8" {
+        "11" {
             Run-Cmd {
                 git status
             }
         }
-        "9" {
+        "12" {
             Run-Cmd {
                 git status
                 if (-not (Ask-YesNo "Добавить все изменения в git?" $true)) {
@@ -130,7 +189,7 @@ while ($true) {
                 git push origin main
             }
         }
-        "10" {
+        "13" {
             Run-Cmd {
                 $time = Read-Host "Во сколько ставить ежедневную синхронизацию? Формат HH:mm"
                 if ([string]::IsNullOrWhiteSpace($time)) {
@@ -139,7 +198,7 @@ while ($true) {
                 powershell -ExecutionPolicy Bypass -File ".\scripts\install_local_message_sync_task.ps1" -DailyAt $time
             }
         }
-        "11" {
+        "14" {
             Run-Cmd {
                 $host = Read-Host "IP нового VPS"
                 if ([string]::IsNullOrWhiteSpace($host)) {
@@ -156,12 +215,12 @@ while ($true) {
                 powershell -ExecutionPolicy Bypass -File ".\scripts\install_bot_on_vps.ps1" -Host $host -User $user -RemoteAppDir $appDir
             }
         }
-        "12" {
+        "15" {
             Run-Cmd {
                 ssh -i "$env:USERPROFILE\.ssh\disbot_vps_ed25519" root@206.245.134.221 "systemctl status vipik-discord-bot --no-pager -n 40"
             }
         }
-        "13" {
+        "16" {
             Run-Cmd {
                 Start-Process notepad.exe "$projectRoot\README.md"
             }
