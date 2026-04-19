@@ -90,6 +90,7 @@ WEB_ADMIN_ENABLED=false
 WEB_ADMIN_HOST=127.0.0.1
 WEB_ADMIN_PORT=8080
 WEB_ADMIN_TOKEN=
+WEB_ADMIN_ALLOWED_IPS=
 WEB_ADMIN_TITLE=ViPik Bot Control
 ```
 
@@ -103,6 +104,7 @@ WEB_ADMIN_TITLE=ViPik Bot Control
 - `ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER=true` — ежедневный добор новых сообщений перед Markov.
 - `DAILY_MARKOV_RETRAIN_HOUR` / `DAILY_MARKOV_RETRAIN_MINUTE` — время по МСК.
 - `WEB_ADMIN_ENABLED=true` — включает мини-панель в браузере.
+- `WEB_ADMIN_ALLOWED_IPS=` — список разрешённых IP или CIDR для веб-панели.
 
 ## Полный каталог команд
 
@@ -473,9 +475,10 @@ disable_heavy_models.bat
 
 ```env
 WEB_ADMIN_ENABLED=true
-WEB_ADMIN_HOST=127.0.0.1
+WEB_ADMIN_HOST=0.0.0.0
 WEB_ADMIN_PORT=8080
 WEB_ADMIN_TOKEN=LONG_RANDOM_TOKEN
+WEB_ADMIN_ALLOWED_IPS=100.69.97.40/32
 ```
 
 Рекомендация:
@@ -483,6 +486,7 @@ WEB_ADMIN_TOKEN=LONG_RANDOM_TOKEN
 - использовать только через Tailscale или firewall;
 - не открывать без токена;
 - не использовать короткий токен.
+- не использовать авторизацию через URL; входить только через форму логина.
 
 ## Русский центр управления
 

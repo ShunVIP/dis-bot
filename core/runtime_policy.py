@@ -26,6 +26,7 @@ WEB_ADMIN_HOST = os.getenv("WEB_ADMIN_HOST", "127.0.0.1").strip() or "127.0.0.1"
 WEB_ADMIN_PORT = int(os.getenv("WEB_ADMIN_PORT", "8080"))
 WEB_ADMIN_TOKEN = os.getenv("WEB_ADMIN_TOKEN", "").strip()
 WEB_ADMIN_TITLE = os.getenv("WEB_ADMIN_TITLE", "ViPik Bot Control").strip() or "ViPik Bot Control"
+WEB_ADMIN_ALLOWED_IPS = os.getenv("WEB_ADMIN_ALLOWED_IPS", "").strip()
 
 _runtime_state = {
     "remote_model_inference": ALLOW_REMOTE_MODEL_INFERENCE,
@@ -70,4 +71,5 @@ def policy_summary() -> dict:
         "web_admin_enabled": WEB_ADMIN_ENABLED,
         "web_admin_host": WEB_ADMIN_HOST,
         "web_admin_port": WEB_ADMIN_PORT,
+        "web_admin_allowed_ips": WEB_ADMIN_ALLOWED_IPS,
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+import ipaddress
 
 from aiohttp import web
 
@@ -11,6 +12,7 @@ from core.runtime_policy import (
     WEB_ADMIN_ENABLED,
     WEB_ADMIN_HOST,
     WEB_ADMIN_PORT,
+    WEB_ADMIN_ALLOWED_IPS,
     WEB_ADMIN_TITLE,
     WEB_ADMIN_TOKEN,
     is_daily_markov_collection_enabled,
@@ -23,14 +25,55 @@ from core.runtime_policy import (
 )
 
 
+def _client_ip(request: web.Request) -> str:
+    peer = request.remote or ""
+    if peer.startswith("::ffff:"):
+        peer = peer[7:]
+    return peer
+
+
+def _ip_matches_allowed(client_ip: str) -> bool:
+    allowed_raw = (WEB_ADMIN_ALLOWED_IPS or "").strip()
+    if not allowed_raw:
+        return True
+    if not client_ip:
+        return False
+
+    try:
+        ip_obj = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+
+    for chunk in allowed_raw.split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        try:
+            if "/" in item:
+                if ip_obj in ipaddress.ip_network(item, strict=False):
+                    return True
+            else:
+                if ip_obj == ipaddress.ip_address(item):
+                    return True
+        except ValueError:
+            continue
+
+    return False
+
+
+def _assert_ip_allowed(request: web.Request) -> None:
+    client_ip = _client_ip(request)
+    if not _ip_matches_allowed(client_ip):
+        raise web.HTTPForbidden(text="Your IP is not allowed for this admin panel")
+
+
 def _is_authorized(request: web.Request) -> bool:
     token = (
-        request.query.get("token")
-        or request.headers.get("X-Admin-Token")
+        request.headers.get("X-Admin-Token")
         or request.cookies.get("vipik_admin_token")
         or ""
     ).strip()
-    return bool(WEB_ADMIN_TOKEN and token == WEB_ADMIN_TOKEN)
+    return bool(WEB_ADMIN_TOKEN and token == WEB_ADMIN_TOKEN and _ip_matches_allowed(_client_ip(request)))
 
 
 def _status_chip(ok: bool, on_text: str = "ON", off_text: str = "OFF") -> str:
@@ -42,10 +85,14 @@ def _status_chip(ok: bool, on_text: str = "ON", off_text: str = "OFF") -> str:
     )
 
 
-def _render_page(bot, message: str = "") -> str:
+def _render_page(bot, request: web.Request | None = None, message: str = "") -> str:
     summary = policy_summary()
+    if request is not None:
+        summary["client_ip"] = _client_ip(request)
     remote_configured = bool(REMOTE_MODEL_API_URL and REMOTE_MODEL_API_TOKEN)
     bot_name = escape(str(bot.user) if bot.user else "bot not ready")
+    client_ip = escape(str(summary.get("client_ip", "")))
+    allowed_ips = escape(str(summary.get("web_admin_allowed_ips", "") or "not set"))
     notice = (
         f"<div style=\"padding:12px 16px;background:#eef6ff;border:1px solid #c7def8;"
         f"border-radius:12px;margin-bottom:16px;\">{escape(message)}</div>"
@@ -86,6 +133,8 @@ def _render_page(bot, message: str = "") -> str:
         <div class="item"><div class="label">Хост</div><div class="value">{escape(summary["hostname"])}</div></div>
         <div class="item"><div class="label">Режим сервера</div><div class="value">{_status_chip(summary["is_server_runtime"], "VPS", "Local")}</div></div>
         <div class="item"><div class="label">Удалённый bridge</div><div class="value">{_status_chip(remote_configured, "Configured", "Not set")}</div></div>
+        <div class="item"><div class="label">Твой IP</div><div class="value"><code>{client_ip or "-"}</code></div></div>
+        <div class="item"><div class="label">Разрешённые IP</div><div class="value"><code>{allowed_ips}</code></div></div>
       </div>
     </div>
 
@@ -124,6 +173,7 @@ def _render_page(bot, message: str = "") -> str:
 
 
 async def _index(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
     if not _is_authorized(request):
         return web.Response(
             text="""<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Admin Login</title></head>
@@ -137,12 +187,13 @@ async def _index(request: web.Request) -> web.Response:
             status=401,
             content_type="text/html",
         )
-    response = web.Response(text=_render_page(request.app["bot"]), content_type="text/html")
+    response = web.Response(text=_render_page(request.app["bot"], request=request), content_type="text/html")
     response.set_cookie("vipik_admin_token", WEB_ADMIN_TOKEN, httponly=True, samesite="Strict")
     return response
 
 
 async def _login(request: web.Request) -> web.StreamResponse:
+    _assert_ip_allowed(request)
     data = await request.post()
     token = (data.get("token") or "").strip()
     if not WEB_ADMIN_TOKEN or token != WEB_ADMIN_TOKEN:
@@ -153,6 +204,7 @@ async def _login(request: web.Request) -> web.StreamResponse:
 
 
 async def _remote_models(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
     if not _is_authorized(request):
         raise web.HTTPUnauthorized(text="Admin token required")
     data = await request.post()
@@ -165,7 +217,7 @@ async def _remote_models(request: web.Request) -> web.Response:
         message = "Удалённая тяжёлая модель отключена для текущего процесса бота."
     else:
         message = "Неизвестное действие."
-    return web.Response(text=_render_page(request.app["bot"], message=message), content_type="text/html")
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
 async def start_admin_panel(bot, log) -> None:
@@ -189,5 +241,5 @@ async def start_admin_panel(bot, log) -> None:
 
     bot.admin_panel_runner = runner
     log.bind(src="admin-web").info(
-        f"✅ admin panel: http://{WEB_ADMIN_HOST}:{WEB_ADMIN_PORT}/?token=***"
+        f"✅ admin panel: http://{WEB_ADMIN_HOST}:{WEB_ADMIN_PORT}/"
     )
