@@ -9,12 +9,14 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 
 $remoteScript = @"
-PYTHON_BIN=`$(command -v python3 || command -v python)
-if [ -z "`$PYTHON_BIN" ]; then
+if command -v python3 >/dev/null 2>&1; then
+python3 - <<'PY'
+elif command -v python >/dev/null 2>&1; then
+python - <<'PY'
+else
   echo "python is not installed on VPS" >&2
   exit 1
 fi
-"`$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 
 env_path = Path("$RemoteEnvPath")

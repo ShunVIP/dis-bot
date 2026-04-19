@@ -49,12 +49,14 @@ tar -xzf /tmp/dis-bot-install.tar.gz -C "$RemoteAppDir"
 rm -f /tmp/dis-bot-install.tar.gz
 chown -R "$RunUser:$RunUser" "$RemoteAppDir"
 
-PYTHON_BIN=`$(command -v python3 || command -v python)
-if [ -z "`$PYTHON_BIN" ]; then
+if command -v python3 >/dev/null 2>&1; then
+python3 - <<'PY'
+elif command -v python >/dev/null 2>&1; then
+python - <<'PY'
+else
   echo "python is not installed on VPS" >&2
   exit 1
 fi
-"`$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 app_dir = Path("$RemoteAppDir")
 template = app_dir / "deploy" / "systemd" / "vipik-discord-bot.service.template"
@@ -65,7 +67,7 @@ target.write_text(content, encoding="utf-8")
 print("written", target)
 PY
 
-runuser -u "$RunUser" -- "`$PYTHON_BIN" -m venv "$RemoteAppDir/.venv"
+runuser -u "$RunUser" -- python3 -m venv "$RemoteAppDir/.venv"
 "$RemoteAppDir/.venv/bin/pip" install --upgrade pip
 "$RemoteAppDir/.venv/bin/pip" install -r "$RemoteAppDir/requirements.txt"
 
