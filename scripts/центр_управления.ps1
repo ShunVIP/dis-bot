@@ -164,6 +164,7 @@ function Show-Quick-Scenarios {
     Write-Host "5. Если просто работаешь с кодом:"
     Write-Host "   11 -> посмотреть git status"
     Write-Host "   12 -> commit и push"
+    Write-Host "   18 -> обновить проект с GitHub"
     Write-Host ""
     Write-Host "6. Если хочешь читать подробную инструкцию:"
     Write-Host "   16 -> открыть README"
@@ -200,6 +201,7 @@ function Show-Header {
     Write-Host "13. Установить ежедневную синхронизацию messages.db на ПК"
     Write-Host "14. Поставить бота на новый VPS с нуля    - аварийное восстановление"
     Write-Host "15. Показать статус бота на VPS           - проверить сервер"
+    Write-Host "18. Обновить проект из GitHub             - подтянуть последние изменения"
     Write-Host ""
     Write-Host "Справка:"
     Write-Host "16. Открыть README                        - подробная инструкция"
@@ -342,6 +344,11 @@ while ($true) {
         }
         "17" {
             Show-Quick-Scenarios
+        }
+        "18" {
+            Run-Cmd {
+                git pull origin main
+            }
         }
         "0" {
             break
