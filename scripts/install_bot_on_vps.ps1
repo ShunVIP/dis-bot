@@ -29,6 +29,9 @@ tar -czf $bundlePath `
 
 Write-Host "[vps] загружаю пакет на сервер..."
 scp -i $KeyPath $bundlePath "${VpsUser}@${VpsHost}:/tmp/dis-bot-install.tar.gz"
+if ($LASTEXITCODE -ne 0) {
+    throw "Не удалось загрузить установочный пакет на VPS. Проверь SSH-доступ к $VpsUser@$VpsHost."
+}
 
 $remoteScript = @"
 set -e
@@ -46,7 +49,12 @@ tar -xzf /tmp/dis-bot-install.tar.gz -C "$RemoteAppDir"
 rm -f /tmp/dis-bot-install.tar.gz
 chown -R "$RunUser:$RunUser" "$RemoteAppDir"
 
-python3 - <<'PY'
+PYTHON_BIN=`$(command -v python3 || command -v python)
+if [ -z "`$PYTHON_BIN" ]; then
+  echo "python is not installed on VPS" >&2
+  exit 1
+fi
+"`$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 app_dir = Path("$RemoteAppDir")
 template = app_dir / "deploy" / "systemd" / "vipik-discord-bot.service.template"
@@ -57,7 +65,7 @@ target.write_text(content, encoding="utf-8")
 print("written", target)
 PY
 
-runuser -u "$RunUser" -- python3 -m venv "$RemoteAppDir/.venv"
+runuser -u "$RunUser" -- "`$PYTHON_BIN" -m venv "$RemoteAppDir/.venv"
 "$RemoteAppDir/.venv/bin/pip" install --upgrade pip
 "$RemoteAppDir/.venv/bin/pip" install -r "$RemoteAppDir/requirements.txt"
 
@@ -73,7 +81,10 @@ systemctl status "$ServiceName.service" --no-pager --lines=20 || true
 "@
 
 Write-Host "[vps] запускаю первичную установку..."
-$remoteScript | ssh -i $KeyPath "${VpsUser}@${VpsHost}" "bash -s"
+($remoteScript -replace "`r`n", "`n") | ssh -i $KeyPath "${VpsUser}@${VpsHost}" "bash -s"
+if ($LASTEXITCODE -ne 0) {
+    throw "Не удалось завершить установку на VPS. Проверь SSH-доступ к $VpsUser@$VpsHost."
+}
 
 Remove-Item -LiteralPath $bundlePath -Force
 Write-Host "[vps] готово. Заполни $RemoteAppDir/KGTD.env на сервере и перезапусти сервис."

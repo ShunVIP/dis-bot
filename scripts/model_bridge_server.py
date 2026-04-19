@@ -8,10 +8,22 @@ MODEL_PORT = int(os.environ.get("REMOTE_MODEL_API_PORT", "8787"))
 if not MODEL_TOKEN:
     raise RuntimeError("REMOTE_MODEL_API_TOKEN is required")
 
-from fun_slesh.parody_gpt import (
-    generate_neuro_phrase,
-    gpt_model_exists,
-)
+_gpt_model_exists = None
+_generate_neuro_phrase = None
+
+
+def _load_gpt_functions():
+    global _gpt_model_exists, _generate_neuro_phrase
+    if _gpt_model_exists is None or _generate_neuro_phrase is None:
+        from fun_slesh.parody_gpt import (
+            generate_neuro_phrase,
+            gpt_model_exists,
+        )
+
+        _gpt_model_exists = gpt_model_exists
+        _generate_neuro_phrase = generate_neuro_phrase
+
+    return _gpt_model_exists, _generate_neuro_phrase
 
 
 def _is_authorized(request: web.Request) -> bool:
@@ -28,6 +40,7 @@ async def model_exists(request: web.Request) -> web.Response:
 
     data = await request.json()
     user_id = int(data["user_id"])
+    gpt_model_exists, _ = _load_gpt_functions()
     return web.json_response({"ok": True, "exists": bool(gpt_model_exists(user_id))})
 
 
@@ -38,6 +51,7 @@ async def generate(request: web.Request) -> web.Response:
     data = await request.json()
     user_id = int(data["user_id"])
     max_new_tokens = int(data.get("max_new_tokens", 80))
+    _, generate_neuro_phrase = _load_gpt_functions()
     phrase = generate_neuro_phrase(user_id, max_new_tokens=max_new_tokens)
     return web.json_response({"ok": True, "phrase": phrase})
 

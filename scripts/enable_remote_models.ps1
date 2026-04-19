@@ -14,9 +14,25 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 
 & (Join-Path $projectRoot "scripts\start_model_bridge.ps1") -Token $Token
 
+Start-Sleep -Seconds 2
+try {
+    Invoke-WebRequest -UseBasicParsing "http://${TailscaleIp}:8787/health" | Out-Null
+    Write-Host "[bridge] Tailscale access check OK: http://${TailscaleIp}:8787/health"
+} catch {
+    Write-Warning "Bridge запущен локально, но по Tailscale IP пока недоступен."
+    Write-Warning "Скорее всего, Windows Firewall блокирует вход на порт 8787."
+    Write-Warning "Запусти PowerShell от имени администратора и выполни:"
+    Write-Warning "New-NetFirewallRule -DisplayName 'dis-bot model bridge 8787' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8787"
+}
+
 $remoteUrl = "http://${TailscaleIp}:8787"
 $remoteScript = @"
-python3 - <<'PY'
+PYTHON_BIN=`$(command -v python3 || command -v python)
+if [ -z "`$PYTHON_BIN" ]; then
+  echo "python is not installed on VPS" >&2
+  exit 1
+fi
+"`$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 
 env_path = Path("$RemoteEnvPath")
@@ -48,5 +64,8 @@ systemctl restart vipik-discord-bot
 systemctl is-active vipik-discord-bot
 "@
 
-$remoteScript | ssh -i $KeyPath "$VpsUser@$VpsHost" "bash -s"
+($remoteScript -replace "`r`n", "`n") | ssh -i $KeyPath "$VpsUser@$VpsHost" "bash -s"
+if ($LASTEXITCODE -ne 0) {
+    throw "Не удалось обновить настройки bridge на VPS. Проверь SSH-доступ к $VpsUser@$VpsHost."
+}
 Write-Host "[bridge] remote heavy models enabled on VPS"

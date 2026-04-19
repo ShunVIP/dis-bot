@@ -9,7 +9,12 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 
 $remoteScript = @"
-python3 - <<'PY'
+PYTHON_BIN=`$(command -v python3 || command -v python)
+if [ -z "`$PYTHON_BIN" ]; then
+  echo "python is not installed on VPS" >&2
+  exit 1
+fi
+"`$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 
 env_path = Path("$RemoteEnvPath")
@@ -41,6 +46,9 @@ systemctl restart vipik-discord-bot
 systemctl is-active vipik-discord-bot
 "@
 
-$remoteScript | ssh -i $KeyPath "$VpsUser@$VpsHost" "bash -s"
+($remoteScript -replace "`r`n", "`n") | ssh -i $KeyPath "$VpsUser@$VpsHost" "bash -s"
+if ($LASTEXITCODE -ne 0) {
+    throw "Не удалось отключить bridge на VPS. Проверь SSH-доступ к $VpsUser@$VpsHost."
+}
 & (Join-Path $projectRoot "scripts\stop_model_bridge.ps1")
 Write-Host "[bridge] remote heavy models disabled"

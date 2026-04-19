@@ -22,14 +22,26 @@ if (Test-Path $pidFile) {
     Remove-Item $pidFile -ErrorAction SilentlyContinue
 }
 
-$runScript = Join-Path $projectRoot "scripts\run_model_bridge.ps1"
-$proc = Start-Process powershell -ArgumentList @(
-    "-ExecutionPolicy", "Bypass",
-    "-File", $runScript,
-    "-Token", $Token,
-    "-BridgeHost", $BridgeHost,
-    "-BridgePort", $BridgePort
-) -PassThru -WindowStyle Normal
+$pythonExe = if (Test-Path (Join-Path $projectRoot ".venv\Scripts\python.exe")) {
+    (Join-Path $projectRoot ".venv\Scripts\python.exe")
+} else {
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $pythonCommand) {
+        throw "Python not found. Install dependencies first or create .venv."
+    }
+    $pythonCommand.Source
+}
+
+$env:REMOTE_MODEL_API_TOKEN = $Token
+$env:REMOTE_MODEL_API_HOST = $BridgeHost
+$env:REMOTE_MODEL_API_PORT = "$BridgePort"
+$env:PYTHONPATH = if ($env:PYTHONPATH) { "$projectRoot;$env:PYTHONPATH" } else { $projectRoot }
+
+$proc = Start-Process -FilePath $pythonExe `
+    -ArgumentList "scripts/model_bridge_server.py" `
+    -WorkingDirectory $projectRoot `
+    -PassThru `
+    -WindowStyle Hidden
 
 Set-Content -Path $pidFile -Value $proc.Id
 Write-Host "[bridge] started, PID $($proc.Id), host=$BridgeHost, port=$BridgePort"
