@@ -1,8 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Token,
-    [string]$Host = "0.0.0.0",
-    [int]$Port = 8787
+    [string]$BridgeHost = "0.0.0.0",
+    [int]$BridgePort = 8787
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,9 +27,9 @@ $proc = Start-Process powershell -ArgumentList @(
     "-ExecutionPolicy", "Bypass",
     "-File", $runScript,
     "-Token", $Token,
-    "-Host", $Host,
-    "-Port", $Port
+    "-BridgeHost", $BridgeHost,
+    "-BridgePort", $BridgePort
 ) -PassThru -WindowStyle Normal
 
 Set-Content -Path $pidFile -Value $proc.Id
-Write-Host "[bridge] started, PID $($proc.Id), host=$Host, port=$Port"
+Write-Host "[bridge] started, PID $($proc.Id), host=$BridgeHost, port=$BridgePort"

@@ -249,7 +249,7 @@ while ($true) {
                 if ([string]::IsNullOrWhiteSpace($appDir)) {
                     $appDir = "/opt/dis-bot"
                 }
-                powershell -ExecutionPolicy Bypass -File ".\scripts\install_bot_on_vps.ps1" -Host $host -User $user -RemoteAppDir $appDir
+                powershell -ExecutionPolicy Bypass -File ".\scripts\install_bot_on_vps.ps1" -VpsHost $host -VpsUser $user -RemoteAppDir $appDir
             }
         }
         "15" {

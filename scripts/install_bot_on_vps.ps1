@@ -1,6 +1,6 @@
 param(
-    [string]$Host = "206.245.134.221",
-    [string]$User = "root",
+    [string]$VpsHost = "206.245.134.221",
+    [string]$VpsUser = "root",
     [string]$KeyPath = "$env:USERPROFILE\.ssh\disbot_vps_ed25519",
     [string]$RemoteAppDir = "/opt/dis-bot",
     [string]$RunUser = "bot",
@@ -28,7 +28,7 @@ tar -czf $bundlePath `
     -C $projectRoot .
 
 Write-Host "[vps] загружаю пакет на сервер..."
-scp -i $KeyPath $bundlePath "${User}@${Host}:/tmp/dis-bot-install.tar.gz"
+scp -i $KeyPath $bundlePath "${VpsUser}@${VpsHost}:/tmp/dis-bot-install.tar.gz"
 
 $remoteScript = @"
 set -e
@@ -73,7 +73,7 @@ systemctl status "$ServiceName.service" --no-pager --lines=20 || true
 "@
 
 Write-Host "[vps] запускаю первичную установку..."
-$remoteScript | ssh -i $KeyPath "${User}@${Host}" "bash -s"
+$remoteScript | ssh -i $KeyPath "${VpsUser}@${VpsHost}" "bash -s"
 
 Remove-Item -LiteralPath $bundlePath -Force
 Write-Host "[vps] готово. Заполни $RemoteAppDir/KGTD.env на сервере и перезапусти сервис."
