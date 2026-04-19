@@ -12,15 +12,20 @@ if (-not $Token) {
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
+$runtimeConfigPath = Join-Path $projectRoot ".model_bridge.runtime.json"
 
 $pythonExe = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" } else { "python" }
 if (-not (Get-Command $pythonExe -ErrorAction SilentlyContinue) -and $pythonExe -eq "python") {
     throw "Python not found. Install dependencies first or create .venv."
 }
 
-$env:REMOTE_MODEL_API_TOKEN = $Token
-$env:REMOTE_MODEL_API_HOST = $BridgeHost
-$env:REMOTE_MODEL_API_PORT = "$BridgePort"
+$runtimeConfig = @{
+    token = $Token
+    host  = $BridgeHost
+    port  = $BridgePort
+} | ConvertTo-Json -Compress
+[System.IO.File]::WriteAllText($runtimeConfigPath, $runtimeConfig, (New-Object System.Text.UTF8Encoding($false)))
+
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$projectRoot;$env:PYTHONPATH" } else { $projectRoot }
 
 & $pythonExe "scripts/model_bridge_server.py"

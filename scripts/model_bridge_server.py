@@ -1,9 +1,25 @@
+import json
 import os
+from pathlib import Path
 from aiohttp import web
 
-MODEL_TOKEN = os.environ.get("REMOTE_MODEL_API_TOKEN", "").strip()
-MODEL_HOST = os.environ.get("REMOTE_MODEL_API_HOST", "127.0.0.1").strip() or "127.0.0.1"
-MODEL_PORT = int(os.environ.get("REMOTE_MODEL_API_PORT", "8787"))
+_RUNTIME_CONFIG_PATH = Path(__file__).resolve().parent.parent / ".model_bridge.runtime.json"
+
+
+def _load_runtime_config() -> dict:
+    if not _RUNTIME_CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(_RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+_runtime = _load_runtime_config()
+
+MODEL_TOKEN = (os.environ.get("REMOTE_MODEL_API_TOKEN") or _runtime.get("token") or "").strip()
+MODEL_HOST = (os.environ.get("REMOTE_MODEL_API_HOST") or _runtime.get("host") or "127.0.0.1").strip() or "127.0.0.1"
+MODEL_PORT = int(os.environ.get("REMOTE_MODEL_API_PORT") or _runtime.get("port") or "8787")
 
 if not MODEL_TOKEN:
     raise RuntimeError("REMOTE_MODEL_API_TOKEN is required")

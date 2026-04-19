@@ -38,6 +38,8 @@ build/
 *.zip
 .tar.gz
 .control_center.local.json
+.model_bridge.runtime.json
+.tmp_model_bridge_boot.ps1
 
 # Binaries
 *.exe

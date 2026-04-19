@@ -153,7 +153,8 @@ function Show-Quick-Scenarios {
     Write-Host ""
     Write-Host "3. Если хочешь включить тяжелую GPT с ПК для VPS:"
     Write-Host "   6 -> прочитать краткую справку по bridge"
-    Write-Host "   9 -> включить тяжелые модели с ПК для VPS"
+    Write-Host "   7 -> запустить bridge в этом окне и оставить его открытым"
+    Write-Host "   9 -> связать уже запущенный bridge с VPS"
     Write-Host "   10 -> выключить, когда больше не нужно"
     Write-Host ""
     Write-Host "4. Если VPS потерян и нужен новый:"
@@ -190,7 +191,7 @@ function Show-Header {
     Write-Host ""
     Write-Host "Bridge тяжелой GPT-модели:"
     Write-Host "6. Пошагово: как работает и как настроить bridge"
-    Write-Host "7. Запустить bridge только локально на ПК - просто поднять bridge"
+    Write-Host "7. Запустить bridge локально в этом окне  - оставить окно открытым"
     Write-Host "8. Остановить локальный bridge на ПК      - выключить bridge"
     Write-Host "9. Включить тяжелые модели с ПК для VPS   - связать VPS с ПК"
     Write-Host "10. Выключить тяжелые модели с ПК для VPS - разорвать связь"
@@ -261,7 +262,11 @@ while ($true) {
                 if (-not $token) {
                     throw "Нужен токен bridge."
                 }
-                powershell -ExecutionPolicy Bypass -File ".\scripts\start_model_bridge.ps1" -Token $token
+                Write-Host ""
+                Write-Host "Bridge будет работать в этом окне. Пока нужен GPT с ПК, не закрывай его." -ForegroundColor Yellow
+                Write-Host "Чтобы связать его с VPS, открой второй экземпляр центра управления и нажми 9." -ForegroundColor Yellow
+                Write-Host ""
+                powershell -ExecutionPolicy Bypass -File ".\scripts\run_model_bridge.ps1" -Token $token
             }
         }
         "8" {

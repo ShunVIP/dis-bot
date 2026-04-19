@@ -12,16 +12,22 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 
-& (Join-Path $projectRoot "scripts\stop_model_bridge.ps1")
-& (Join-Path $projectRoot "scripts\start_model_bridge.ps1") -Token $Token
-
-Start-Sleep -Seconds 2
-try {
-    Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8787/health" | Out-Null
-    Write-Host "[bridge] local health check OK: http://127.0.0.1:8787/health"
-} catch {
-    throw "Локальный bridge не отвечает на http://127.0.0.1:8787/health"
+Write-Host "[bridge] checking existing local bridge..."
+$healthOk = $false
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+        Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8787/health" | Out-Null
+        $healthOk = $true
+        break
+    } catch {
+        Start-Sleep -Seconds 1
+    }
 }
+
+if (-not $healthOk) {
+    throw "Локальный bridge не отвечает. Сначала запусти пункт 7 и оставь окно bridge открытым."
+}
+Write-Host "[bridge] local health check OK: http://127.0.0.1:8787/health"
 
 try {
     $probeBody = @{ user_id = 0 } | ConvertTo-Json -Compress
@@ -34,7 +40,7 @@ try {
         -Body $probeBody | Out-Null
     Write-Host "[bridge] local auth check OK"
 } catch {
-    throw "Локальный bridge не прошёл проверку токена на /model_exists"
+    throw "Локальный bridge не прошёл проверку токена на /model_exists. Запусти bridge заново через пункт 7 с тем же токеном."
 }
 
 $remoteUrl = "http://${TailscaleIp}:8787"
