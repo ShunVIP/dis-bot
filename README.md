@@ -238,6 +238,8 @@ python main_file.py
 - `scripts/run_model_bridge.ps1` — запуск локального model bridge на Windows
 - `train_models.bat` — локальное обучение моделей в пару кликов
 - `scripts/sync_messages_from_vps.ps1` — скачать актуальную `messages.db` с VPS на ПК перед локальным GPT-обучением
+- `sync_messages.bat` — быстро подтянуть свежую `messages.db` с VPS на ПК
+- `scripts/install_local_message_sync_task.ps1` — поставить ежедневную синхронизацию базы в Планировщик Windows
 - `enable_heavy_models.bat` / `disable_heavy_models.bat` — включить/выключить тяжёлую модель с ПК для VPS
 - `core/admin_panel.py` — безопасная мини-панель управления через браузер
 - `deploy/systemd/vipik-discord-bot.service.template` — шаблон сервиса
@@ -263,6 +265,32 @@ python main_file.py
 - при необходимости включать их для бота через `enable_heavy_models.bat`
 
 Скрипт `scripts/sync_training_to_vps.ps1` теперь по умолчанию отправляет только лёгкие артефакты и базы. GPT-модели он не включает, если ты явно не передашь `-IncludeGpt`.
+
+### Как держать базы актуальными и на VPS, и на ПК
+
+Рекомендуемая схема:
+- VPS — источник правды для `messages.db`
+- VPS каждый день сам добирает новые сообщения из Discord по чекпоинтам
+- ПК не собирает историю напрямую, а каждый день забирает свежую `messages.db` с VPS
+
+Так безопаснее и чище:
+- не нужно запускать второй сборщик Discord на ПК
+- нет гонок между двумя разными базами
+- GPT на ПК обучается по той же базе, что и VPS
+
+Для ручной синхронизации на ПК:
+
+```bat
+sync_messages.bat
+```
+
+Чтобы поставить ежедневную синхронизацию в Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_local_message_sync_task.ps1
+```
+
+По умолчанию задача ставится на `07:30` локального времени Windows, то есть уже после ежедневного безопасного цикла на VPS.
 
 ### Что нужно один раз сделать на VPS
 
