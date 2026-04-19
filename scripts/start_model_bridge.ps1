@@ -32,16 +32,22 @@ $pythonExe = if (Test-Path (Join-Path $projectRoot ".venv\Scripts\python.exe")) 
     $pythonCommand.Source
 }
 
-$env:REMOTE_MODEL_API_TOKEN = $Token
-$env:REMOTE_MODEL_API_HOST = $BridgeHost
-$env:REMOTE_MODEL_API_PORT = "$BridgePort"
-$env:PYTHONPATH = if ($env:PYTHONPATH) { "$projectRoot;$env:PYTHONPATH" } else { $projectRoot }
+$pythonPath = if ($env:PYTHONPATH) { "$projectRoot;$env:PYTHONPATH" } else { $projectRoot }
 
-$proc = Start-Process -FilePath $pythonExe `
-    -ArgumentList "scripts/model_bridge_server.py" `
-    -WorkingDirectory $projectRoot `
-    -PassThru `
-    -WindowStyle Hidden
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $pythonExe
+$psi.Arguments = "scripts/model_bridge_server.py"
+$psi.WorkingDirectory = $projectRoot
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.Environment["REMOTE_MODEL_API_TOKEN"] = $Token
+$psi.Environment["REMOTE_MODEL_API_HOST"] = $BridgeHost
+$psi.Environment["REMOTE_MODEL_API_PORT"] = "$BridgePort"
+$psi.Environment["PYTHONPATH"] = $pythonPath
+
+$proc = New-Object System.Diagnostics.Process
+$proc.StartInfo = $psi
+$null = $proc.Start()
 
 Set-Content -Path $pidFile -Value $proc.Id
 Write-Host "[bridge] started, PID $($proc.Id), host=$BridgeHost, port=$BridgePort"
