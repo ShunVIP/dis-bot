@@ -118,8 +118,13 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     .value {{ font-size:16px; font-weight:700; }}
     .help {{ color:#475569; line-height:1.5; }}
     button {{ border:0; border-radius:12px; padding:12px 16px; font-size:15px; font-weight:700; cursor:pointer; background:#1d4ed8; color:#fff; }}
+    .button-secondary {{ background:#475569; }}
+    .actions {{ display:flex; gap:12px; flex-wrap:wrap; }}
+    .actions form {{ margin:0; }}
+    .actions a {{ display:inline-block; text-decoration:none; border-radius:12px; padding:12px 16px; font-size:15px; font-weight:700; background:#475569; color:#fff; }}
     .muted {{ color:#64748b; }}
     code {{ background:#eef2ff; padding:2px 6px; border-radius:8px; }}
+    ul {{ margin:0; padding-left:20px; color:#475569; line-height:1.7; }}
   </style>
 </head>
 <body>
@@ -152,20 +157,49 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
 
     <div class="card">
       <h2>Быстрый переключатель</h2>
-      <form method="post" action="/remote-models">
-        <input type="hidden" name="action" value="{action}">
-        <button type="submit">{escape(action_label)}</button>
-      </form>
+      <div class="actions">
+        <form method="post" action="/remote-models">
+          <input type="hidden" name="action" value="{action}">
+          <button type="submit">{escape(action_label)}</button>
+        </form>
+        <a href="/">Обновить страницу</a>
+        <form method="post" action="/logout">
+          <button type="submit" class="button-secondary">Выйти</button>
+        </form>
+      </div>
       <p class="help" style="margin-top:12px;">Этот переключатель управляет только использованием уже подключённой удалённой модели. Он не запускает обучение и не меняет файлы на диске.</p>
     </div>
 
     <div class="card">
-      <h2>Что делать администратору</h2>
-      <p class="help">
-        Для локального обучения используй <code>train_models.bat</code> на ПК.<br>
-        Для раздачи тяжёлой модели с ПК на VPS используй <code>enable_heavy_models.bat</code> и <code>disable_heavy_models.bat</code>.<br>
-        Эту панель лучше открывать только по Tailscale или через firewall-ограничение IP.
+      <h2>Что можно делать здесь</h2>
+      <ul>
+        <li>Смотреть статус защиты, bridge и режима сервера.</li>
+        <li>Включать и выключать использование удалённой тяжёлой модели для текущего процесса бота.</li>
+        <li>Открывать панель только через Tailscale и токен администратора.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Что остаётся в Центре управления ботом</h2>
+      <ul>
+        <li>Локальное обучение моделей на ПК.</li>
+        <li>Синхронизация <code>messages.db</code> с VPS.</li>
+        <li>Отправка лёгких моделей и баз на VPS.</li>
+        <li>Git: <code>status</code>, <code>pull</code>, <code>commit</code>, <code>push</code>.</li>
+        <li>Установка нового VPS с нуля и локальная диагностика bridge.</li>
+      </ul>
+      <p class="help" style="margin-top:12px;">
+        Полный функционал центра нельзя безопасно перенести в эту веб-панель, потому что часть действий должна запускаться именно на твоём ПК, а не на VPS.
       </p>
+    </div>
+
+    <div class="card">
+      <h2>Быстрые подсказки</h2>
+      <ul>
+        <li>Если нужен локальный training: используй <code>Центр управления ботом.bat</code> -> пункт <code>4</code>.</li>
+        <li>Если нужен Git update на ПК: используй <code>Центр управления ботом.bat</code> -> пункт <code>18</code>.</li>
+        <li>Если нужно включить тяжёлую GPT с ПК для VPS: сначала включи bridge на ПК, потом используй переключатель на этой панели.</li>
+      </ul>
     </div>
   </div>
 </body>
@@ -220,6 +254,13 @@ async def _remote_models(request: web.Request) -> web.Response:
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
+async def _logout(request: web.Request) -> web.StreamResponse:
+    _assert_ip_allowed(request)
+    response = web.HTTPFound("/")
+    response.del_cookie("vipik_admin_token")
+    return response
+
+
 async def start_admin_panel(bot, log) -> None:
     if not WEB_ADMIN_ENABLED:
         log.bind(src="admin-web").info("Веб-панель отключена")
@@ -233,6 +274,7 @@ async def start_admin_panel(bot, log) -> None:
     app.router.add_get("/", _index)
     app.router.add_post("/login", _login)
     app.router.add_post("/remote-models", _remote_models)
+    app.router.add_post("/logout", _logout)
 
     runner = web.AppRunner(app)
     await runner.setup()

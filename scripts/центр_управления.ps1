@@ -238,7 +238,7 @@ while ($true) {
         }
         "4" {
             Run-Cmd {
-                cmd /c train_models.bat
+                powershell -ExecutionPolicy Bypass -File ".\scripts\train_models_menu.ps1"
             }
         }
         "5" {
