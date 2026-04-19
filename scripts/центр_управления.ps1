@@ -4,6 +4,82 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
+$localConfigPath = Join-Path $projectRoot ".control_center.local.json"
+
+function Get-LocalSettings {
+    if (-not (Test-Path $localConfigPath)) {
+        return @{}
+    }
+
+    try {
+        $raw = Get-Content -LiteralPath $localConfigPath -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return @{}
+        }
+
+        $data = ConvertFrom-Json $raw -AsHashtable
+        if ($null -eq $data) {
+            return @{}
+        }
+        return $data
+    }
+    catch {
+        return @{}
+    }
+}
+
+function Save-LocalSettings([hashtable]$Settings) {
+    $json = $Settings | ConvertTo-Json -Depth 5
+    Set-Content -LiteralPath $localConfigPath -Value $json -Encoding UTF8
+}
+
+function Get-SavedTailscaleIp {
+    $settings = Get-LocalSettings
+    $savedIp = ""
+    if ($settings.ContainsKey("tailscale_ip")) {
+        $savedIp = [string]$settings["tailscale_ip"]
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($savedIp)) {
+        return $savedIp.Trim()
+    }
+
+    $tailscaleCmd = Get-Command tailscale -ErrorAction SilentlyContinue
+    if (-not $tailscaleCmd) {
+        return ""
+    }
+
+    try {
+        $detectedIp = (& $tailscaleCmd.Source ip -4 2>$null | Select-Object -First 1).Trim()
+        return $detectedIp
+    }
+    catch {
+        return ""
+    }
+}
+
+function Save-TailscaleIp([string]$Ip) {
+    if ([string]::IsNullOrWhiteSpace($Ip)) {
+        return
+    }
+
+    $settings = Get-LocalSettings
+    $settings["tailscale_ip"] = $Ip.Trim()
+    Save-LocalSettings $settings
+}
+
+function Prompt-WithDefault([string]$Prompt, [string]$DefaultValue) {
+    if ([string]::IsNullOrWhiteSpace($DefaultValue)) {
+        return (Read-Host $Prompt)
+    }
+
+    $value = Read-Host "$Prompt [$DefaultValue]"
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $DefaultValue
+    }
+
+    return $value.Trim()
+}
 
 function Pause-Continue {
     Write-Host ""
@@ -193,11 +269,13 @@ while ($true) {
         }
         "9" {
             Run-Cmd {
-                $ip = Read-Host "Введи Tailscale IP твоего ПК"
+                $defaultIp = Get-SavedTailscaleIp
+                $ip = Prompt-WithDefault "Введи Tailscale IP твоего ПК" $defaultIp
                 $token = Read-Host "Введи токен bridge"
                 if (-not $ip -or -not $token) {
                     throw "Нужны и IP, и токен."
                 }
+                Save-TailscaleIp $ip
                 powershell -ExecutionPolicy Bypass -File ".\scripts\enable_remote_models.ps1" -TailscaleIp $ip -Token $token
             }
         }
