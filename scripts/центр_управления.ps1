@@ -60,6 +60,40 @@ function Show-Bridge-Guide {
     Pause-Continue
 }
 
+function Show-Quick-Scenarios {
+    Clear-Host
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "          ЧТО НАЖИМАТЬ И В КАКОМ ПОРЯДКЕ  " -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "1. Первый запуск на личном ПК:"
+    Write-Host "   1 -> установить зависимости"
+    Write-Host "   2 -> запустить бота локально"
+    Write-Host ""
+    Write-Host "2. Обычная локальная GPT-работа:"
+    Write-Host "   3 -> скачать свежую messages.db с VPS"
+    Write-Host "   4 -> обучить модели локально"
+    Write-Host "   5 -> отправить легкие модели и базы на VPS"
+    Write-Host ""
+    Write-Host "3. Если хочешь включить тяжелую GPT с ПК для VPS:"
+    Write-Host "   6 -> прочитать краткую справку по bridge"
+    Write-Host "   9 -> включить тяжелые модели с ПК для VPS"
+    Write-Host "   10 -> выключить, когда больше не нужно"
+    Write-Host ""
+    Write-Host "4. Если VPS потерян и нужен новый:"
+    Write-Host "   14 -> поставить бота на новый VPS с нуля"
+    Write-Host "   потом заполнить KGTD.env на сервере"
+    Write-Host "   потом 5 -> отправить легкие модели и базы"
+    Write-Host ""
+    Write-Host "5. Если просто работаешь с кодом:"
+    Write-Host "   11 -> посмотреть git status"
+    Write-Host "   12 -> commit и push"
+    Write-Host ""
+    Write-Host "6. Если хочешь читать подробную инструкцию:"
+    Write-Host "   16 -> открыть README"
+    Pause-Continue
+}
+
 function Show-Header {
     Clear-Host
     Write-Host "==========================================" -ForegroundColor Cyan
@@ -67,29 +101,32 @@ function Show-Header {
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host "Папка проекта: $projectRoot"
     Write-Host ""
+    Write-Host "Сначала обычно нажимают:"
+    Write-Host "17. Что нажимать по шагам"
+    Write-Host ""
     Write-Host "Локальная работа:"
-    Write-Host "1. Установить зависимости локально"
-    Write-Host "2. Запустить бота локально"
-    Write-Host "3. Синхронизировать messages.db с VPS"
-    Write-Host "4. Обучить модели локально"
-    Write-Host "5. Отправить легкие модели и базы на VPS"
+    Write-Host "1. Установить зависимости локально        - сделать первый запуск"
+    Write-Host "2. Запустить бота локально                - проверить, что бот стартует"
+    Write-Host "3. Синхронизировать messages.db с VPS     - забрать свежую базу сообщений"
+    Write-Host "4. Обучить модели локально                - train на ПК"
+    Write-Host "5. Отправить легкие модели и базы на VPS  - обновить сервер"
     Write-Host ""
     Write-Host "Bridge тяжелой GPT-модели:"
     Write-Host "6. Пошагово: как работает и как настроить bridge"
-    Write-Host "7. Запустить bridge только локально на ПК"
-    Write-Host "8. Остановить локальный bridge на ПК"
-    Write-Host "9. Включить тяжелые модели с ПК для VPS"
-    Write-Host "10. Выключить тяжелые модели с ПК для VPS"
+    Write-Host "7. Запустить bridge только локально на ПК - просто поднять bridge"
+    Write-Host "8. Остановить локальный bridge на ПК      - выключить bridge"
+    Write-Host "9. Включить тяжелые модели с ПК для VPS   - связать VPS с ПК"
+    Write-Host "10. Выключить тяжелые модели с ПК для VPS - разорвать связь"
     Write-Host ""
     Write-Host "Git и VPS:"
-    Write-Host "11. Показать git status"
-    Write-Host "12. Commit и push в Git"
+    Write-Host "11. Показать git status                   - посмотреть изменения"
+    Write-Host "12. Commit и push в Git                   - отправить код в GitHub"
     Write-Host "13. Установить ежедневную синхронизацию messages.db на ПК"
-    Write-Host "14. Поставить бота на новый VPS с нуля"
-    Write-Host "15. Показать статус бота на VPS"
+    Write-Host "14. Поставить бота на новый VPS с нуля    - аварийное восстановление"
+    Write-Host "15. Показать статус бота на VPS           - проверить сервер"
     Write-Host ""
     Write-Host "Справка:"
-    Write-Host "16. Открыть README"
+    Write-Host "16. Открыть README                        - подробная инструкция"
     Write-Host "0. Выход"
     Write-Host ""
 }
@@ -224,6 +261,9 @@ while ($true) {
             Run-Cmd {
                 Start-Process notepad.exe "$projectRoot\README.md"
             }
+        }
+        "17" {
+            Show-Quick-Scenarios
         }
         "0" {
             break
