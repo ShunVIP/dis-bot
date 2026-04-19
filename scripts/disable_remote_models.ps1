@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 
 $remoteScript = @"
+set -e
 python3 - <<'PY'
 from pathlib import Path
 
@@ -41,9 +42,22 @@ systemctl restart vipik-discord-bot
 systemctl is-active vipik-discord-bot
 "@
 
-($remoteScript -replace "`r`n", "`n") | ssh -i $KeyPath "$VpsUser@$VpsHost" "bash -s"
-if ($LASTEXITCODE -ne 0) {
-    throw "Не удалось отключить bridge на VPS. Проверь SSH-доступ к $VpsUser@$VpsHost."
+$remoteScriptPath = Join-Path $projectRoot ".tmp_disable_remote_models.sh"
+[System.IO.File]::WriteAllText($remoteScriptPath, ($remoteScript -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+try {
+    scp -i $KeyPath $remoteScriptPath "${VpsUser}@${VpsHost}:/tmp/dis-bot-disable-remote-models.sh"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Не удалось загрузить bridge-скрипт на VPS."
+    }
+
+    ssh -i $KeyPath "$VpsUser@$VpsHost" "bash /tmp/dis-bot-disable-remote-models.sh && rm -f /tmp/dis-bot-disable-remote-models.sh"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Не удалось отключить bridge на VPS. Проверь SSH-доступ к $VpsUser@$VpsHost."
+    }
+}
+finally {
+    Remove-Item -LiteralPath $remoteScriptPath -ErrorAction SilentlyContinue
 }
 & (Join-Path $projectRoot "scripts\stop_model_bridge.ps1")
 Write-Host "[bridge] remote heavy models disabled"

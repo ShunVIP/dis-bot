@@ -16,17 +16,15 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 
 Start-Sleep -Seconds 2
 try {
-    Invoke-WebRequest -UseBasicParsing "http://${TailscaleIp}:8787/health" | Out-Null
-    Write-Host "[bridge] Tailscale access check OK: http://${TailscaleIp}:8787/health"
+    Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8787/health" | Out-Null
+    Write-Host "[bridge] local health check OK: http://127.0.0.1:8787/health"
 } catch {
-    Write-Warning "Bridge запущен локально, но по Tailscale IP пока недоступен."
-    Write-Warning "Скорее всего, Windows Firewall блокирует вход на порт 8787."
-    Write-Warning "Запусти PowerShell от имени администратора и выполни:"
-    Write-Warning "New-NetFirewallRule -DisplayName 'dis-bot model bridge 8787' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8787"
+    throw "Локальный bridge не отвечает на http://127.0.0.1:8787/health"
 }
 
 $remoteUrl = "http://${TailscaleIp}:8787"
 $remoteScript = @"
+set -e
 python3 - <<'PY'
 from pathlib import Path
 
@@ -59,8 +57,21 @@ systemctl restart vipik-discord-bot
 systemctl is-active vipik-discord-bot
 "@
 
-($remoteScript -replace "`r`n", "`n") | ssh -i $KeyPath "$VpsUser@$VpsHost" "bash -s"
-if ($LASTEXITCODE -ne 0) {
-    throw "Не удалось обновить настройки bridge на VPS. Проверь SSH-доступ к $VpsUser@$VpsHost."
+$remoteScriptPath = Join-Path $projectRoot ".tmp_enable_remote_models.sh"
+[System.IO.File]::WriteAllText($remoteScriptPath, ($remoteScript -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+try {
+    scp -i $KeyPath $remoteScriptPath "${VpsUser}@${VpsHost}:/tmp/dis-bot-enable-remote-models.sh"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Не удалось загрузить bridge-скрипт на VPS."
+    }
+
+    ssh -i $KeyPath "$VpsUser@$VpsHost" "bash /tmp/dis-bot-enable-remote-models.sh && rm -f /tmp/dis-bot-enable-remote-models.sh"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Не удалось обновить настройки bridge на VPS. Проверь SSH-доступ к $VpsUser@$VpsHost."
+    }
+}
+finally {
+    Remove-Item -LiteralPath $remoteScriptPath -ErrorAction SilentlyContinue
 }
 Write-Host "[bridge] remote heavy models enabled on VPS"
