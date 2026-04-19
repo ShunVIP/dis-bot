@@ -51,7 +51,11 @@ from discord import app_commands
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from core.runtime_policy import (
+    DAILY_MARKOV_RETRAIN_HOUR,
+    DAILY_MARKOV_RETRAIN_MINUTE,
     IS_SERVER_RUNTIME,
+    is_daily_markov_collection_enabled,
+    is_daily_markov_retrain_enabled,
     is_full_maintenance_allowed,
     is_gpt_training_allowed,
 )
@@ -506,6 +510,23 @@ async def _do_full_retrain(guild: discord.Guild, collect: bool = False) -> dict:
 
     return stats
 
+
+async def _do_safe_markov_refresh(guild: discord.Guild, collect: bool = True) -> dict:
+    """
+    Безопасный ежедневный цикл для VPS:
+    [сбор новых сообщений по чекпоинтам] -> [дообучение только markovify]
+    """
+    stats = {"collected": 0, "markovify": 0}
+
+    if collect:
+        channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history]
+        for ch in channels:
+            stats["collected"] += await collect_channel(ch, guild.id)
+
+    mk_results = await train_all_users_async(min_messages=50)
+    stats["markovify"] = len(mk_results)
+    return stats
+
 # ─── Безопасная отправка (для долгих команд) ─────────────────────────────────
 async def _safe_send(interaction: discord.Interaction,
                      status_msg: discord.Message | None,
@@ -556,6 +577,13 @@ class ParodyEngine(commands.Cog):
         print("[parody] 💡 Режим 'не спать' активирован")
         self._scheduler = AsyncIOScheduler(timezone=MSK)
         self._scheduler.add_job(self._weekly_retrain, "cron", day_of_week="sun", hour=3, minute=0)
+        if is_daily_markov_retrain_enabled():
+            self._scheduler.add_job(
+                self._daily_safe_markov_retrain,
+                "cron",
+                hour=DAILY_MARKOV_RETRAIN_HOUR,
+                minute=DAILY_MARKOV_RETRAIN_MINUTE,
+            )
         self._scheduler.start()
 
     async def _weekly_retrain(self):
@@ -565,6 +593,16 @@ class ParodyEngine(commands.Cog):
             print(f"[parody] {guild.name}: +{stats['collected']} сообщ | "
                   f"mk:{stats['markovify']} persona:{stats['persona']} gpt:{stats['gpt']}")
         print("[parody] ✅ Готово")
+
+    async def _daily_safe_markov_retrain(self):
+        print("[parody] 🌙 Ежедневный безопасный цикл Markov...")
+        for guild in self.bot.guilds:
+            stats = await _do_safe_markov_refresh(guild, collect=is_daily_markov_collection_enabled())
+            print(
+                f"[parody] {guild.name}: safe daily | +{stats['collected']} сообщ | "
+                f"mk:{stats['markovify']}"
+            )
+        print("[parody] ✅ Safe daily Markov готово")
 
     # ── /пародия ──────────────────────────────────────────────────────────────
     @app_commands.command(name="пародия", description="Сгенерировать фразу в стиле пользователя")

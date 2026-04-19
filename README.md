@@ -154,6 +154,10 @@ BOT_SERVER_MODE=true
 ALLOW_GPT_TRAINING_ON_SERVER=false
 ALLOW_FULL_MAINTENANCE_ON_SERVER=false
 ALLOW_REMOTE_MODEL_INFERENCE=true
+ENABLE_DAILY_MARKOV_RETRAIN_ON_SERVER=false
+ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER=true
+DAILY_MARKOV_RETRAIN_HOUR=3
+DAILY_MARKOV_RETRAIN_MINUTE=15
 WEB_ADMIN_ENABLED=false
 WEB_ADMIN_HOST=127.0.0.1
 WEB_ADMIN_PORT=8080
@@ -173,6 +177,11 @@ WEB_ADMIN_TOKEN=CHANGE_ME
 - лёгкие модели `Markovify` и `Persona` можно держать на сервере
 - тяжёлое GPT-обучение делается локально на ПК через `train_models.bat`
 - VPS может только пользоваться тяжёлой моделью с ПК, когда ты сам это включил
+
+Для ежедневного безопасного цикла на VPS:
+- `ENABLE_DAILY_MARKOV_RETRAIN_ON_SERVER=true` включает ежедневное дообучение только `Markovify`
+- `ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER=true` перед этим добирает новые сообщения по чекпоинтам
+- `DAILY_MARKOV_RETRAIN_HOUR` и `DAILY_MARKOV_RETRAIN_MINUTE` задают время по МСК
 
 ### Мини-панель в браузере
 
@@ -228,6 +237,7 @@ python main_file.py
 - `scripts/model_bridge_server.py` — локальный API для тяжёлых моделей на ПК
 - `scripts/run_model_bridge.ps1` — запуск локального model bridge на Windows
 - `train_models.bat` — локальное обучение моделей в пару кликов
+- `scripts/sync_messages_from_vps.ps1` — скачать актуальную `messages.db` с VPS на ПК перед локальным GPT-обучением
 - `enable_heavy_models.bat` / `disable_heavy_models.bat` — включить/выключить тяжёлую модель с ПК для VPS
 - `core/admin_panel.py` — безопасная мини-панель управления через браузер
 - `deploy/systemd/vipik-discord-bot.service.template` — шаблон сервиса

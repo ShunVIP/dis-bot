@@ -2,6 +2,14 @@
 setlocal
 cd /d "%~dp0"
 
+echo Sync latest messages.db from VPS first? 
+echo 1. Yes
+echo 2. No
+set /p syncmode=Choose option ^(1/2^): 
+if "%syncmode%"=="1" (
+  powershell -ExecutionPolicy Bypass -File ".\scripts\sync_messages_from_vps.ps1"
+)
+
 echo 1. Train all users
 echo 2. Train one user
 set /p mode=Choose option ^(1/2^): 
