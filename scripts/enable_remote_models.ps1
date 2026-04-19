@@ -12,6 +12,7 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 
+& (Join-Path $projectRoot "scripts\stop_model_bridge.ps1")
 & (Join-Path $projectRoot "scripts\start_model_bridge.ps1") -Token $Token
 
 Start-Sleep -Seconds 2
@@ -20,6 +21,20 @@ try {
     Write-Host "[bridge] local health check OK: http://127.0.0.1:8787/health"
 } catch {
     throw "Локальный bridge не отвечает на http://127.0.0.1:8787/health"
+}
+
+try {
+    $probeBody = @{ user_id = 0 } | ConvertTo-Json -Compress
+    Invoke-WebRequest `
+        -UseBasicParsing `
+        -Method Post `
+        -Uri "http://127.0.0.1:8787/model_exists" `
+        -Headers @{ "X-Model-Token" = $Token } `
+        -ContentType "application/json" `
+        -Body $probeBody | Out-Null
+    Write-Host "[bridge] local auth check OK"
+} catch {
+    throw "Локальный bridge не прошёл проверку токена на /model_exists"
 }
 
 $remoteUrl = "http://${TailscaleIp}:8787"
