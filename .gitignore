@@ -36,6 +36,7 @@ Thumbs.db
 dist/
 build/
 *.zip
+.tar.gz
 .control_center.local.json
 
 # Binaries
