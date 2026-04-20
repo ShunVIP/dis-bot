@@ -1163,8 +1163,8 @@ class ParodyEngine(commands.Cog):
                 "На сервере отключено тяжёлое GPT-дообучение, чтобы не перегружать диск и память.\n\n"
                 "Что можно сделать:\n"
                 "1. В Discord выбрать `Только Markovify` или `Только Persona`.\n"
-                "2. Для GPT использовать локально `train_models.bat` на ПК.\n"
-                "3. Для генерации с ПК включать `enable_heavy_models.bat`.",
+                "2. Для GPT использовать локально GUI `ViPikBotControl.exe` или `train_models.bat` на ПК.\n"
+                "3. Для генерации с ПК подключать bridge через GUI или центр управления.",
             )
             await interaction.followup.send(embed=emb, ephemeral=True)
             return
@@ -1253,8 +1253,8 @@ class ParodyEngine(commands.Cog):
                 "Полная профилактика включает массовый сбор сообщений и GPT-дообучение, поэтому на сервере она выключена по умолчанию.\n\n"
                 "Безопасный путь:\n"
                 "1. Сбор и лёгкие модели держать на VPS.\n"
-                "2. GPT-обучение запускать локально через `train_models.bat`.\n"
-                "3. Для использования тяжёлой модели подключать ПК через `enable_heavy_models.bat`.",
+                "2. GPT-обучение запускать локально через GUI `ViPikBotControl.exe` или `train_models.bat`.\n"
+                "3. Для использования тяжёлой модели подключать ПК через GUI или центр управления.",
             )
             await interaction.followup.send(embed=emb, ephemeral=True)
             return

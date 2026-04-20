@@ -34,6 +34,7 @@ Thumbs.db
 
 # --- Builds / temp ---
 dist/
+dist_build/
 build/
 *.zip
 .tar.gz
@@ -43,6 +44,7 @@ build/
 .model_bridge.pid
 .bridge-launch.ps1
 .bridge-visible.ps1
+ViPikBotControl.spec
 
 # Binaries
 *.exe

@@ -100,6 +100,8 @@
 Использовать:
 
 - `Центр управления ботом.bat`
+- `ViPik Bot Control GUI.bat`
+- `dist/ViPikBotControl.exe`
 
 Актуальные пункты:
 

@@ -1,9 +1,12 @@
 import json
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 import tkinter as tk
@@ -27,115 +30,264 @@ def resolve_root() -> Path:
 ROOT = resolve_root()
 SETTINGS_PATH = ROOT / ".control_center.local.json"
 README_PATH = ROOT / "README.md"
+ENV_PATH = ROOT / "KGTD.env"
 PS = "powershell.exe"
-VPS_ADMIN_URL = "http://100.90.24.117:8080/"
+DEFAULTS = {
+    "tailscale_ip": "",
+    "bridge_token": "secretkeyvipik",
+    "vps_host": "206.245.134.221",
+    "vps_user": "root",
+    "ssh_key": str(Path(os.environ.get("USERPROFILE", "")) / ".ssh" / "disbot_vps_ed25519"),
+    "admin_url": "http://100.90.24.117:8080/",
+}
+
+
+class StatusCard(ttk.Frame):
+    def __init__(self, master, title: str):
+        super().__init__(master, padding=10)
+        self.columnconfigure(0, weight=1)
+        ttk.Label(self, text=title, font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        self.value = ttk.Label(self, text="Неизвестно", font=("Segoe UI", 11))
+        self.value.grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+    def set(self, text: str):
+        self.value.configure(text=text)
 
 
 class BotControlApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("ViPik Bot Control")
-        self.root.geometry("1100x760")
-        self.root.minsize(980, 680)
+        self.root.geometry("1180x820")
+        self.root.minsize(1080, 720)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.bridge_process: subprocess.Popen | None = None
-        self._bridge_reader_threads: list[threading.Thread] = []
 
         self.settings = self._load_settings()
 
-        self.tailscale_ip_var = tk.StringVar(value=self.settings.get("tailscale_ip", self._detect_tailscale_ip()))
-        self.bridge_token_var = tk.StringVar(value=self.settings.get("bridge_token", "secretkeyvipik"))
+        self.tailscale_ip_var = tk.StringVar(value=self.settings.get("tailscale_ip") or self._detect_tailscale_ip())
+        self.bridge_token_var = tk.StringVar(value=self.settings.get("bridge_token", DEFAULTS["bridge_token"]))
+        self.vps_host_var = tk.StringVar(value=self.settings.get("vps_host", DEFAULTS["vps_host"]))
+        self.vps_user_var = tk.StringVar(value=self.settings.get("vps_user", DEFAULTS["vps_user"]))
+        self.ssh_key_var = tk.StringVar(value=self.settings.get("ssh_key", DEFAULTS["ssh_key"]))
+        self.admin_url_var = tk.StringVar(value=self.settings.get("admin_url", DEFAULTS["admin_url"]))
         self.status_var = tk.StringVar(value="Готово.")
 
         self._build_ui()
         self._start_log_pump()
-        self._log("GUI запущен. Можно работать в одном окне.")
+        self.refresh_statuses()
+        self._log("GUI запущен. Теперь это основной однооконный интерфейс.")
 
     def _build_ui(self):
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(2, weight=1)
+        self.root.rowconfigure(1, weight=1)
 
-        header = ttk.Frame(self.root, padding=12)
+        style = ttk.Style()
+        try:
+            style.theme_use("vista")
+        except Exception:
+            pass
+
+        header = ttk.Frame(self.root, padding=(16, 14))
         header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(1, weight=1)
+        header.columnconfigure(0, weight=1)
 
-        ttk.Label(header, text="ViPik Bot Control", font=("Segoe UI", 20, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="ViPik Bot Control", font=("Segoe UI", 22, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(
             header,
-            text="Одно окно для bridge, VPS и частых действий по проекту",
+            text="Одно окно для bridge, VPS, обучения и обслуживания проекта",
             font=("Segoe UI", 10),
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(header, textvariable=self.status_var, foreground="#1f6f43").grid(row=0, column=1, rowspan=2, sticky="e")
+        ttk.Label(header, textvariable=self.status_var, foreground="#136f2d").grid(row=0, column=1, rowspan=2, sticky="e")
 
-        settings = ttk.LabelFrame(self.root, text="Настройки", padding=12)
-        settings.grid(row=1, column=0, sticky="ew", padx=12)
-        settings.columnconfigure(1, weight=1)
-        settings.columnconfigure(3, weight=1)
+        notebook = ttk.Notebook(self.root)
+        notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
 
-        ttk.Label(settings, text="Tailscale IP ПК").grid(row=0, column=0, sticky="w")
-        ttk.Entry(settings, textvariable=self.tailscale_ip_var).grid(row=0, column=1, sticky="ew", padx=(8, 16))
+        self.dashboard_tab = ttk.Frame(notebook, padding=14)
+        self.control_tab = ttk.Frame(notebook, padding=14)
+        self.settings_tab = ttk.Frame(notebook, padding=14)
+        self.env_tab = ttk.Frame(notebook, padding=14)
+        self.log_tab = ttk.Frame(notebook, padding=14)
 
-        ttk.Label(settings, text="Токен bridge").grid(row=0, column=2, sticky="w")
-        ttk.Entry(settings, textvariable=self.bridge_token_var, show="*").grid(row=0, column=3, sticky="ew", padx=(8, 0))
+        notebook.add(self.dashboard_tab, text="Обзор")
+        notebook.add(self.control_tab, text="Управление")
+        notebook.add(self.settings_tab, text="Настройки")
+        notebook.add(self.env_tab, text="KGTD.env")
+        notebook.add(self.log_tab, text="Лог")
 
-        ttk.Button(settings, text="Сохранить настройки", command=self.save_settings).grid(row=0, column=4, padx=(12, 0))
-        ttk.Button(settings, text="Определить IP", command=self.detect_ip_to_field).grid(row=0, column=5, padx=(8, 0))
+        self._build_dashboard_tab()
+        self._build_control_tab()
+        self._build_settings_tab()
+        self._build_env_tab()
+        self._build_log_tab()
 
-        actions = ttk.Frame(self.root, padding=(12, 10))
-        actions.grid(row=2, column=0, sticky="nsew")
-        actions.columnconfigure(0, weight=1)
-        actions.columnconfigure(1, weight=1)
-        actions.rowconfigure(1, weight=1)
+    def _build_dashboard_tab(self):
+        self.dashboard_tab.columnconfigure((0, 1, 2), weight=1)
+        for idx in range(3):
+            self.dashboard_tab.rowconfigure(idx, weight=0)
 
-        bridge_box = ttk.LabelFrame(actions, text="Bridge и VPS", padding=12)
-        bridge_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.bridge_card = StatusCard(self.dashboard_tab, "Bridge")
+        self.bridge_card.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+        self.vps_card = StatusCard(self.dashboard_tab, "VPS")
+        self.vps_card.grid(row=0, column=1, sticky="nsew", padx=6, pady=6)
+
+        self.tailnet_card = StatusCard(self.dashboard_tab, "Tailscale")
+        self.tailnet_card.grid(row=0, column=2, sticky="nsew", padx=6, pady=6)
+
+        quick = ttk.LabelFrame(self.dashboard_tab, text="Быстрые действия", padding=12)
+        quick.grid(row=1, column=0, columnspan=3, sticky="ew", padx=6, pady=6)
+        for col in range(4):
+            quick.columnconfigure(col, weight=1)
+
+        ttk.Button(quick, text="Запустить bridge", command=self.start_bridge).grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        ttk.Button(quick, text="Связать VPS с ПК", command=self.link_vps).grid(row=0, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Button(quick, text="Запустить комплект", command=self.start_full_kit).grid(row=0, column=2, sticky="ew", padx=4, pady=4)
+        ttk.Button(quick, text="Обновить статусы", command=self.refresh_statuses).grid(row=0, column=3, sticky="ew", padx=4, pady=4)
+
+        help_box = ttk.LabelFrame(self.dashboard_tab, text="Как пользоваться", padding=12)
+        help_box.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=6, pady=6)
+        help_text = (
+            "Обычная схема:\n"
+            "1. Нажми «Запустить bridge».\n"
+            "2. Нажми «Связать VPS с ПК».\n"
+            "3. Пользуйся /пародия -> нейро в Discord.\n"
+            "4. Когда больше не нужно — «Отключить тяжёлые модели на VPS» и «Остановить bridge».\n\n"
+            "Если нужно обучение:\n"
+            "1. Скачай свежую messages.db.\n"
+            "2. Открой обучение моделей.\n"
+            "3. Выбери только GPT или нужный режим."
+        )
+        ttk.Label(help_box, text=help_text, justify="left").grid(row=0, column=0, sticky="w")
+
+    def _build_control_tab(self):
+        self.control_tab.columnconfigure(0, weight=1)
+        self.control_tab.columnconfigure(1, weight=1)
+
+        bridge_box = ttk.LabelFrame(self.control_tab, text="Bridge и VPS", padding=12)
+        bridge_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         bridge_box.columnconfigure(0, weight=1)
 
-        ttk.Button(bridge_box, text="Запустить bridge", command=self.start_bridge).grid(row=0, column=0, sticky="ew", pady=4)
-        ttk.Button(bridge_box, text="Остановить bridge", command=self.stop_bridge).grid(row=1, column=0, sticky="ew", pady=4)
-        ttk.Button(bridge_box, text="Связать VPS с ПК", command=self.link_vps).grid(row=2, column=0, sticky="ew", pady=4)
-        ttk.Button(bridge_box, text="Отключить тяжёлые модели на VPS", command=self.disable_remote_models).grid(row=3, column=0, sticky="ew", pady=4)
-        ttk.Button(bridge_box, text="Запустить комплект", command=self.start_full_kit).grid(row=4, column=0, sticky="ew", pady=4)
-        ttk.Button(bridge_box, text="Статус VPS", command=self.show_vps_status).grid(row=5, column=0, sticky="ew", pady=4)
-        ttk.Button(bridge_box, text="Открыть веб-панель", command=self.open_admin_panel).grid(row=6, column=0, sticky="ew", pady=4)
+        for idx, (text, command) in enumerate([
+            ("Запустить bridge", self.start_bridge),
+            ("Остановить bridge", self.stop_bridge),
+            ("Связать VPS с ПК", self.link_vps),
+            ("Отключить тяжёлые модели на VPS", self.disable_remote_models),
+            ("Запустить комплект", self.start_full_kit),
+            ("Статус VPS", self.show_vps_status),
+            ("Открыть веб-панель", self.open_admin_panel),
+            ("Обновить статусы", self.refresh_statuses),
+        ]):
+            ttk.Button(bridge_box, text=text, command=command).grid(row=idx, column=0, sticky="ew", pady=4)
 
-        project_box = ttk.LabelFrame(actions, text="Проект", padding=12)
-        project_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        project_box = ttk.LabelFrame(self.control_tab, text="Проект", padding=12)
+        project_box.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         project_box.columnconfigure(0, weight=1)
 
-        ttk.Button(project_box, text="Git pull", command=self.git_pull).grid(row=0, column=0, sticky="ew", pady=4)
-        ttk.Button(project_box, text="Скачать messages.db с VPS", command=self.sync_messages).grid(row=1, column=0, sticky="ew", pady=4)
-        ttk.Button(project_box, text="Отправить лёгкие модели и базы на VPS", command=self.sync_training).grid(row=2, column=0, sticky="ew", pady=4)
-        ttk.Button(project_box, text="Открыть обучение моделей", command=self.open_training_menu).grid(row=3, column=0, sticky="ew", pady=4)
-        ttk.Button(project_box, text="Открыть README", command=self.open_readme).grid(row=4, column=0, sticky="ew", pady=4)
-        ttk.Button(project_box, text="Очистить лог", command=self.clear_log).grid(row=5, column=0, sticky="ew", pady=4)
+        for idx, (text, command) in enumerate([
+            ("Git pull", self.git_pull),
+            ("Скачать messages.db с VPS", self.sync_messages),
+            ("Отправить лёгкие модели и базы на VPS", self.sync_training),
+            ("Открыть обучение моделей", self.open_training_menu),
+            ("Открыть README", self.open_readme),
+            ("Очистить лог", self.clear_log),
+        ]):
+            ttk.Button(project_box, text=text, command=command).grid(row=idx, column=0, sticky="ew", pady=4)
 
-        log_box = ttk.LabelFrame(actions, text="Лог", padding=12)
-        log_box.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
-        log_box.columnconfigure(0, weight=1)
-        log_box.rowconfigure(0, weight=1)
+    def _build_settings_tab(self):
+        self.settings_tab.columnconfigure(1, weight=1)
+        self.settings_tab.columnconfigure(3, weight=1)
 
-        self.log_text = tk.Text(log_box, wrap="word", font=("Consolas", 10))
+        ttk.Label(self.settings_tab, text="Tailscale IP ПК").grid(row=0, column=0, sticky="w", pady=6)
+        ttk.Entry(self.settings_tab, textvariable=self.tailscale_ip_var).grid(row=0, column=1, sticky="ew", padx=(8, 16), pady=6)
+        ttk.Button(self.settings_tab, text="Определить IP", command=self.detect_ip_to_field).grid(row=0, column=2, columnspan=2, sticky="ew", pady=6)
+
+        ttk.Label(self.settings_tab, text="Токен bridge").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Entry(self.settings_tab, textvariable=self.bridge_token_var, show="*").grid(row=1, column=1, sticky="ew", padx=(8, 16), pady=6)
+
+        ttk.Label(self.settings_tab, text="VPS host").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Entry(self.settings_tab, textvariable=self.vps_host_var).grid(row=2, column=1, sticky="ew", padx=(8, 16), pady=6)
+
+        ttk.Label(self.settings_tab, text="VPS user").grid(row=2, column=2, sticky="w", pady=6)
+        ttk.Entry(self.settings_tab, textvariable=self.vps_user_var).grid(row=2, column=3, sticky="ew", pady=6)
+
+        ttk.Label(self.settings_tab, text="SSH key").grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Entry(self.settings_tab, textvariable=self.ssh_key_var).grid(row=3, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=6)
+
+        ttk.Label(self.settings_tab, text="URL веб-панели").grid(row=4, column=0, sticky="w", pady=6)
+        ttk.Entry(self.settings_tab, textvariable=self.admin_url_var).grid(row=4, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=6)
+
+        ttk.Button(self.settings_tab, text="Сохранить настройки", command=self.save_settings).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 8))
+
+        note = (
+            "Эти настройки сохраняются локально в .control_center.local.json.\n"
+            "Секреты бота в KGTD.env здесь не редактируются автоматически, чтобы не сломать прод."
+        )
+        ttk.Label(self.settings_tab, text=note, justify="left").grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+    def _build_log_tab(self):
+        self.log_tab.columnconfigure(0, weight=1)
+        self.log_tab.rowconfigure(0, weight=1)
+
+        self.log_text = tk.Text(self.log_tab, wrap="word", font=("Consolas", 10))
         self.log_text.grid(row=0, column=0, sticky="nsew")
         self.log_text.configure(state="disabled")
 
-        scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.log_text.yview)
+        scroll = ttk.Scrollbar(self.log_tab, orient="vertical", command=self.log_text.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scroll.set)
 
+    def _build_env_tab(self):
+        self.env_tab.columnconfigure(0, weight=1)
+        self.env_tab.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(self.env_tab)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            top,
+            text="Локальный KGTD.env. Это не меняет продовый env на VPS автоматически.",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(top, text="Загрузить KGTD.env", command=self.load_env_file).grid(row=0, column=1, padx=4)
+        ttk.Button(top, text="Сохранить KGTD.env", command=self.save_env_file).grid(row=0, column=2, padx=4)
+
+        env_wrap = ttk.Frame(self.env_tab)
+        env_wrap.grid(row=1, column=0, sticky="nsew")
+        env_wrap.columnconfigure(0, weight=1)
+        env_wrap.rowconfigure(0, weight=1)
+
+        self.env_text = tk.Text(env_wrap, wrap="none", font=("Consolas", 10))
+        self.env_text.grid(row=0, column=0, sticky="nsew")
+
+        env_scroll_y = ttk.Scrollbar(env_wrap, orient="vertical", command=self.env_text.yview)
+        env_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.env_text.configure(yscrollcommand=env_scroll_y.set)
+
+        env_scroll_x = ttk.Scrollbar(env_wrap, orient="horizontal", command=self.env_text.xview)
+        env_scroll_x.grid(row=1, column=0, sticky="ew")
+        self.env_text.configure(xscrollcommand=env_scroll_x.set)
+
+        self.load_env_file()
+
     def _load_settings(self) -> dict:
-        if not SETTINGS_PATH.exists():
-            return {}
-        try:
-            return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        data = dict(DEFAULTS)
+        if SETTINGS_PATH.exists():
+            try:
+                data.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
+            except Exception:
+                pass
+        return data
 
     def save_settings(self):
         payload = {
             "tailscale_ip": self.tailscale_ip_var.get().strip(),
             "bridge_token": self.bridge_token_var.get().strip(),
+            "vps_host": self.vps_host_var.get().strip(),
+            "vps_user": self.vps_user_var.get().strip(),
+            "ssh_key": self.ssh_key_var.get().strip(),
+            "admin_url": self.admin_url_var.get().strip(),
         }
         SETTINGS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         self.status_var.set("Настройки сохранены.")
@@ -191,6 +343,21 @@ class BotControlApp:
         self.log_text.configure(state="disabled")
         self._log("Лог очищен.")
 
+    def load_env_file(self):
+        self.env_text.delete("1.0", "end")
+        if ENV_PATH.exists():
+            self.env_text.insert("1.0", ENV_PATH.read_text(encoding="utf-8"))
+            self._log("Загружен локальный KGTD.env.")
+        else:
+            self.env_text.insert("1.0", "# Локальный KGTD.env не найден\n")
+            self._log("Локальный KGTD.env не найден.")
+
+    def save_env_file(self):
+        content = self.env_text.get("1.0", "end-1c")
+        ENV_PATH.write_text(content + ("\n" if content and not content.endswith("\n") else ""), encoding="utf-8")
+        self.status_var.set("KGTD.env сохранён.")
+        self._log("Локальный KGTD.env сохранён.")
+
     def _powershell_args(self, script_name: str, *extra_args: str):
         return [
             PS,
@@ -242,6 +409,45 @@ class BotControlApp:
         finally:
             pipe.close()
 
+    def _check_tcp(self, host: str, port: int, timeout: float = 1.5) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    def refresh_statuses(self):
+        bridge_up = self._check_tcp("127.0.0.1", 8787)
+        self.bridge_card.set("Работает" if bridge_up else "Выключен")
+
+        tail_ip = self.tailscale_ip_var.get().strip()
+        self.tailnet_card.set(tail_ip or "IP не задан")
+
+        def worker():
+            args = [
+                "ssh",
+                "-i",
+                self.ssh_key_var.get().strip(),
+                f"{self.vps_user_var.get().strip()}@{self.vps_host_var.get().strip()}",
+                "systemctl is-active vipik-discord-bot",
+            ]
+            try:
+                proc = subprocess.run(
+                    args,
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    timeout=20,
+                )
+                value = proc.stdout.strip() or proc.stderr.strip() or "unknown"
+                self.root.after(0, lambda: self.vps_card.set(value))
+            except Exception:
+                self.root.after(0, lambda: self.vps_card.set("Недоступен"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def start_bridge(self):
         token = self.bridge_token_var.get().strip()
         if not token:
@@ -273,9 +479,9 @@ class BotControlApp:
             daemon=True,
         )
         reader.start()
-        self._bridge_reader_threads = [reader]
         self.status_var.set("Bridge запускается...")
-        self._log(f"Bridge запущен в фоне через GUI, PID {self.bridge_process.pid}.")
+        self._log(f"Bridge запущен, PID {self.bridge_process.pid}.")
+        self.root.after(4000, self.refresh_statuses)
 
     def stop_bridge(self, silent: bool = False):
         if self.bridge_process and self.bridge_process.poll() is None:
@@ -287,6 +493,7 @@ class BotControlApp:
         self._run_background_command(
             "Остановка bridge",
             self._powershell_args("stop_model_bridge.ps1"),
+            on_success=self.refresh_statuses,
         )
         if not silent:
             self.status_var.set("Bridge остановлен.")
@@ -301,19 +508,21 @@ class BotControlApp:
         self._run_background_command(
             "Связка VPS с bridge",
             self._powershell_args("enable_remote_models.ps1", "-TailscaleIp", ip, "-Token", token),
+            on_success=self.refresh_statuses,
         )
 
     def disable_remote_models(self):
         self._run_background_command(
             "Отключение тяжёлых моделей на VPS",
             self._powershell_args("disable_remote_models.ps1"),
+            on_success=self.refresh_statuses,
         )
 
     def start_full_kit(self):
         self.start_bridge()
 
         def delayed_link():
-            self.root.after(4000, self.link_vps)
+            self.root.after(4500, self.link_vps)
 
         delayed_link()
         self._log("Запущен комплект: сначала bridge, затем привязка VPS.")
@@ -337,8 +546,8 @@ class BotControlApp:
         args = [
             "ssh",
             "-i",
-            str(Path(os.environ["USERPROFILE"]) / ".ssh" / "disbot_vps_ed25519"),
-            "root@206.245.134.221",
+            self.ssh_key_var.get().strip(),
+            f"{self.vps_user_var.get().strip()}@{self.vps_host_var.get().strip()}",
             "systemctl status vipik-discord-bot --no-pager -n 40",
         ]
         self._run_background_command("Статус VPS", args)
@@ -360,8 +569,12 @@ class BotControlApp:
             self._log(f"[exception] Не удалось открыть README: {exc}")
 
     def open_admin_panel(self):
-        webbrowser.open(VPS_ADMIN_URL)
-        self._log(f"Открыта веб-панель: {VPS_ADMIN_URL}")
+        url = self.admin_url_var.get().strip()
+        if not url:
+            messagebox.showwarning("Веб-панель", "URL веб-панели не задан.")
+            return
+        webbrowser.open(url)
+        self._log(f"Открыта веб-панель: {url}")
 
 
 def main():
