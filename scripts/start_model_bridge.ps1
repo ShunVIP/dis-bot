@@ -9,6 +9,8 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pidFile = Join-Path $projectRoot ".model_bridge.pid"
+$portPattern = ":{0}" -f $BridgePort
+$runtimeConfigPath = Join-Path $projectRoot ".model_bridge.runtime.json"
 
 if (Test-Path $pidFile) {
     $existingPid = (Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
@@ -22,32 +24,44 @@ if (Test-Path $pidFile) {
     Remove-Item $pidFile -ErrorAction SilentlyContinue
 }
 
-$pythonExe = if (Test-Path (Join-Path $projectRoot ".venv\Scripts\python.exe")) {
-    (Join-Path $projectRoot ".venv\Scripts\python.exe")
-} else {
-    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $pythonCommand) {
-        throw "Python not found. Install dependencies first or create .venv."
+$portOwner = netstat -ano | Select-String $portPattern | Select-String "LISTENING" | Select-Object -First 1
+if ($portOwner) {
+    $existingPid = (($portOwner.ToString() -split '\s+') | Select-Object -Last 1).Trim()
+    if ($existingPid) {
+        $proc = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
+        if ($proc) {
+            Write-Host "[bridge] port $BridgePort already used by PID $existingPid, stopping stale process"
+            Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+        }
     }
-    $pythonCommand.Source
 }
 
-$pythonPath = if ($env:PYTHONPATH) { "$projectRoot;$env:PYTHONPATH" } else { $projectRoot }
+$runScript = Join-Path $projectRoot "scripts\run_model_bridge.ps1"
+$runtimeConfig = @{
+    token = $Token
+    host  = $BridgeHost
+    port  = $BridgePort
+} | ConvertTo-Json -Compress
+[System.IO.File]::WriteAllText($runtimeConfigPath, $runtimeConfig, (New-Object System.Text.UTF8Encoding($false)))
 
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = $pythonExe
-$psi.Arguments = "scripts/model_bridge_server.py"
-$psi.WorkingDirectory = $projectRoot
-$psi.UseShellExecute = $false
-$psi.CreateNoWindow = $true
-$psi.Environment["REMOTE_MODEL_API_TOKEN"] = $Token
-$psi.Environment["REMOTE_MODEL_API_HOST"] = $BridgeHost
-$psi.Environment["REMOTE_MODEL_API_PORT"] = "$BridgePort"
-$psi.Environment["PYTHONPATH"] = $pythonPath
-
-$proc = New-Object System.Diagnostics.Process
-$proc.StartInfo = $psi
-$null = $proc.Start()
+$proc = Start-Process -FilePath "powershell.exe" `
+    -ArgumentList @(
+        "-NoExit",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        $runScript,
+        "-Token",
+        $Token,
+        "-BridgeHost",
+        $BridgeHost,
+        "-BridgePort",
+        "$BridgePort"
+    ) `
+    -WorkingDirectory $projectRoot `
+    -PassThru
 
 Set-Content -Path $pidFile -Value $proc.Id
-Write-Host "[bridge] started, PID $($proc.Id), host=$BridgeHost, port=$BridgePort"
+Write-Host "[bridge] launched in a new window, PID $($proc.Id), host=$BridgeHost, port=$BridgePort"
