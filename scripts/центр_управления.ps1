@@ -86,6 +86,10 @@ function Pause-Continue {
     Read-Host "Нажми Enter чтобы вернуться в меню"
 }
 
+function Escape-ForCmd([string]$Value) {
+    return $Value.Replace('"', '""')
+}
+
 function Ask-YesNo([string]$Prompt, [bool]$DefaultYes = $true) {
     $hint = if ($DefaultYes) { "[Y/n]" } else { "[y/N]" }
     $raw = Read-Host "$Prompt $hint"
@@ -153,8 +157,9 @@ function Show-Quick-Scenarios {
     Write-Host ""
     Write-Host "3. Если хочешь включить тяжелую GPT с ПК для VPS:"
     Write-Host "   6 -> прочитать краткую справку по bridge"
-    Write-Host "   7 -> запустить bridge в этом окне и оставить его открытым"
+    Write-Host "   7 -> запустить bridge в фоне на ПК"
     Write-Host "   9 -> связать уже запущенный bridge с VPS"
+    Write-Host "   19 -> рекомендуемый запуск комплектом из 2 окон"
     Write-Host "   10 -> выключить, когда больше не нужно"
     Write-Host ""
     Write-Host "4. Если VPS потерян и нужен новый:"
@@ -191,10 +196,11 @@ function Show-Header {
     Write-Host ""
     Write-Host "Bridge тяжелой GPT-модели:"
     Write-Host "6. Пошагово: как работает и как настроить bridge"
-    Write-Host "7. Запустить bridge локально в этом окне  - оставить окно открытым"
+    Write-Host "7. Запустить bridge локально в фоне       - без открытого окна"
     Write-Host "8. Остановить локальный bridge на ПК      - выключить bridge"
     Write-Host "9. Включить тяжелые модели с ПК для VPS   - связать VPS с ПК"
     Write-Host "10. Выключить тяжелые модели с ПК для VPS - разорвать связь"
+    Write-Host "19. Запустить комплект из 2 окон          - bridge + привязка VPS"
     Write-Host ""
     Write-Host "Git и VPS:"
     Write-Host "11. Показать git status                   - посмотреть изменения"
@@ -262,11 +268,7 @@ while ($true) {
                 if (-not $token) {
                     throw "Нужен токен bridge."
                 }
-                Write-Host ""
-                Write-Host "Bridge будет работать в этом окне. Пока нужен GPT с ПК, не закрывай его." -ForegroundColor Yellow
-                Write-Host "Чтобы связать его с VPS, открой второй экземпляр центра управления и нажми 9." -ForegroundColor Yellow
-                Write-Host ""
-                powershell -ExecutionPolicy Bypass -File ".\scripts\run_model_bridge.ps1" -Token $token
+                powershell -ExecutionPolicy Bypass -File ".\scripts\start_model_bridge.ps1" -Token $token
             }
         }
         "8" {
@@ -289,6 +291,36 @@ while ($true) {
         "10" {
             Run-Cmd {
                 powershell -ExecutionPolicy Bypass -File ".\scripts\disable_remote_models.ps1"
+            }
+        }
+        "19" {
+            Run-Cmd {
+                $defaultIp = Get-SavedTailscaleIp
+                $ip = Prompt-WithDefault "Введи Tailscale IP твоего ПК" $defaultIp
+                $token = Read-Host "Введи токен bridge"
+                if (-not $ip -or -not $token) {
+                    throw "Нужны и IP, и токен."
+                }
+
+                Save-TailscaleIp $ip
+
+                $escapedRoot = Escape-ForCmd $projectRoot
+                $escapedToken = Escape-ForCmd $token
+                $escapedIp = Escape-ForCmd $ip
+
+                $bridgeCmd = "title ViPik Bridge && cd /d ""$escapedRoot"" && powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "".\scripts\run_model_bridge.ps1"" -Token ""$escapedToken"""
+                $linkCmd = "title ViPik Bridge Link && cd /d ""$escapedRoot"" && timeout /t 4 >nul && powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "".\scripts\enable_remote_models.ps1"" -TailscaleIp ""$escapedIp"" -Token ""$escapedToken"""
+
+                Start-Process cmd.exe -ArgumentList @("/k", $bridgeCmd) | Out-Null
+                Start-Sleep -Seconds 1
+                Start-Process cmd.exe -ArgumentList @("/k", $linkCmd) | Out-Null
+
+                Write-Host ""
+                Write-Host "Открыты 2 окна:" -ForegroundColor Green
+                Write-Host "1. ViPik Bridge - держит локальный bridge."
+                Write-Host "2. ViPik Bridge Link - связывает VPS с уже поднятым bridge."
+                Write-Host ""
+                Write-Host "Когда тяжелая GPT больше не нужна, нажми 10 в центре управления." -ForegroundColor Yellow
             }
         }
         "11" {
