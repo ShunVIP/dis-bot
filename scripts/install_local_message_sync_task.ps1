@@ -6,14 +6,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$batPath = Join-Path $projectRoot "sync_messages.bat"
+$syncScriptPath = Join-Path $projectRoot "scripts\sync_messages_from_vps.ps1"
 
-if (-not (Test-Path $batPath)) {
-    throw "sync_messages.bat not found: $batPath"
+if (-not (Test-Path $syncScriptPath)) {
+    throw "sync_messages_from_vps.ps1 not found: $syncScriptPath"
 }
 
 $time = [datetime]::ParseExact($DailyAt, "HH:mm", $null)
-$action = New-ScheduledTaskAction -Execute $batPath
+$action = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$syncScriptPath`""
 $trigger = New-ScheduledTaskTrigger -Daily -At $time
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
 

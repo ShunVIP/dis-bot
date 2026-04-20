@@ -180,7 +180,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     </div>
 
     <div class="card">
-      <h2>Что остаётся в Центре управления ботом</h2>
+      <h2>Что остаётся в локальном GUI на ПК</h2>
       <ul>
         <li>Локальное обучение моделей на ПК.</li>
         <li>Синхронизация <code>messages.db</code> с VPS.</li>
@@ -196,9 +196,9 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     <div class="card">
       <h2>Быстрые подсказки</h2>
       <ul>
-        <li>Если нужен локальный training: используй <code>Центр управления ботом.bat</code> -> пункт <code>4</code>.</li>
-        <li>Если нужен Git update на ПК: используй <code>Центр управления ботом.bat</code> -> пункт <code>18</code>.</li>
-        <li>Если нужно включить тяжёлую GPT с ПК для VPS: сначала включи bridge на ПК, потом используй переключатель на этой панели.</li>
+        <li>Если нужен локальный training: используй <code>ViPikBotControl.exe</code> и кнопку обучения.</li>
+        <li>Если нужен Git update на ПК: используй <code>ViPikBotControl.exe</code> и кнопку <code>Git pull</code>.</li>
+        <li>Если нужно включить тяжёлую GPT с ПК для VPS: сначала включи bridge в локальном GUI, потом используй переключатель на этой панели.</li>
       </ul>
     </div>
   </div>

@@ -45,6 +45,13 @@ catch {
     Write-Host "Не удалось перезаписать $finalExe, возможно файл сейчас открыт." -ForegroundColor Yellow
 }
 
+if (Test-Path $buildDir) {
+    Remove-Item -LiteralPath $buildDir -Recurse -Force
+}
+if (Test-Path $specFile) {
+    Remove-Item -LiteralPath $specFile -Force
+}
+
 Write-Host ""
 if ($copiedToFinal) {
     Write-Host "Готово: $finalExe" -ForegroundColor Green

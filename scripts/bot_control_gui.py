@@ -10,7 +10,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 
 def resolve_root() -> Path:
@@ -40,6 +40,25 @@ DEFAULTS = {
     "ssh_key": str(Path(os.environ.get("USERPROFILE", "")) / ".ssh" / "disbot_vps_ed25519"),
     "admin_url": "http://100.90.24.117:8080/",
 }
+SCENARIOS_TEXT = (
+    "Обычная работа:\n"
+    "1. Обновить Git.\n"
+    "2. Скачать свежую messages.db.\n"
+    "3. Открыть обучение моделей и выбрать нужный режим.\n"
+    "4. Если нужен GPT с ПК для VPS: запустить bridge и связать VPS.\n\n"
+    "Если нужен только прод-контроль:\n"
+    "1. Проверить статус VPS.\n"
+    "2. Открыть веб-панель.\n"
+    "3. При необходимости включить или выключить удалённую тяжёлую модель.\n\n"
+    "Если нужен новый VPS:\n"
+    "1. Запустить установку нового VPS.\n"
+    "2. Заполнить KGTD.env на сервере.\n"
+    "3. Отправить лёгкие модели и базы на VPS.\n\n"
+    "Если что-то сломалось:\n"
+    "1. Сначала посмотри лог в этой программе.\n"
+    "2. Проверь Git статус и статус VPS.\n"
+    "3. Только потом лезь в ручные скрипты."
+)
 
 
 class StatusCard(ttk.Frame):
@@ -109,18 +128,21 @@ class BotControlApp:
         self.settings_tab = ttk.Frame(notebook, padding=14)
         self.env_tab = ttk.Frame(notebook, padding=14)
         self.log_tab = ttk.Frame(notebook, padding=14)
+        self.help_tab = ttk.Frame(notebook, padding=14)
 
         notebook.add(self.dashboard_tab, text="Обзор")
         notebook.add(self.control_tab, text="Управление")
         notebook.add(self.settings_tab, text="Настройки")
         notebook.add(self.env_tab, text="KGTD.env")
         notebook.add(self.log_tab, text="Лог")
+        notebook.add(self.help_tab, text="Сценарии")
 
         self._build_dashboard_tab()
         self._build_control_tab()
         self._build_settings_tab()
         self._build_env_tab()
         self._build_log_tab()
+        self._build_help_tab()
 
     def _build_dashboard_tab(self):
         self.dashboard_tab.columnconfigure((0, 1, 2), weight=1)
@@ -145,6 +167,10 @@ class BotControlApp:
         ttk.Button(quick, text="Связать VPS с ПК", command=self.link_vps).grid(row=0, column=1, sticky="ew", padx=4, pady=4)
         ttk.Button(quick, text="Запустить комплект", command=self.start_full_kit).grid(row=0, column=2, sticky="ew", padx=4, pady=4)
         ttk.Button(quick, text="Обновить статусы", command=self.refresh_statuses).grid(row=0, column=3, sticky="ew", padx=4, pady=4)
+        ttk.Button(quick, text="Git pull", command=self.git_pull).grid(row=1, column=0, sticky="ew", padx=4, pady=4)
+        ttk.Button(quick, text="Скачать messages.db", command=self.sync_messages).grid(row=1, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Button(quick, text="Открыть обучение", command=self.open_training_menu).grid(row=1, column=2, sticky="ew", padx=4, pady=4)
+        ttk.Button(quick, text="Статус VPS", command=self.show_vps_status).grid(row=1, column=3, sticky="ew", padx=4, pady=4)
 
         help_box = ttk.LabelFrame(self.dashboard_tab, text="Как пользоваться", padding=12)
         help_box.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=6, pady=6)
@@ -186,10 +212,16 @@ class BotControlApp:
         project_box.columnconfigure(0, weight=1)
 
         for idx, (text, command) in enumerate([
+            ("Установить локальные зависимости", self.install_dependencies),
+            ("Запустить бота локально", self.run_bot_locally),
             ("Git pull", self.git_pull),
+            ("Показать Git status", self.git_status),
+            ("Commit и push", self.git_commit_push),
             ("Скачать messages.db с VPS", self.sync_messages),
+            ("Поставить ежедневную sync-задачу", self.install_daily_sync_task),
             ("Отправить лёгкие модели и базы на VPS", self.sync_training),
             ("Открыть обучение моделей", self.open_training_menu),
+            ("Поставить бота на новый VPS", self.install_new_vps),
             ("Открыть README", self.open_readme),
             ("Очистить лог", self.clear_log),
         ]):
@@ -237,6 +269,21 @@ class BotControlApp:
         scroll = ttk.Scrollbar(self.log_tab, orient="vertical", command=self.log_text.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scroll.set)
+
+    def _build_help_tab(self):
+        self.help_tab.columnconfigure(0, weight=1)
+        self.help_tab.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            self.help_tab,
+            text="Что делать по шагам",
+            font=("Segoe UI", 13, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        help_text = tk.Text(self.help_tab, wrap="word", font=("Segoe UI", 11), height=22)
+        help_text.grid(row=1, column=0, sticky="nsew")
+        help_text.insert("1.0", SCENARIOS_TEXT)
+        help_text.configure(state="disabled")
 
     def _build_env_tab(self):
         self.env_tab.columnconfigure(0, weight=1)
@@ -370,6 +417,17 @@ class BotControlApp:
             *extra_args,
         ]
 
+    def _powershell_command(self, command: str):
+        return [
+            PS,
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ]
+
     def _run_background_command(self, title: str, args: list[str], on_success=None):
         def worker():
             self._log(f"[start] {title}")
@@ -399,6 +457,9 @@ class BotControlApp:
                 self._log(f"[exception] {title}: {exc}")
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _run_background_powershell(self, title: str, command: str, on_success=None):
+        self._run_background_command(title, self._powershell_command(command), on_success=on_success)
 
     def _stream_process_output(self, pipe, prefix: str):
         try:
@@ -447,6 +508,121 @@ class BotControlApp:
                 self.root.after(0, lambda: self.vps_card.set("Недоступен"))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _open_powershell_window(self, title: str, command: str):
+        args = [
+            PS,
+            "-NoLogo",
+            "-NoExit",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ]
+        try:
+            subprocess.Popen(args, cwd=ROOT)
+            self._log(f"Открыто окно: {title}")
+            self.status_var.set(f"Открыто: {title}")
+        except Exception as exc:
+            self._log(f"[exception] Не удалось открыть окно '{title}': {exc}")
+            self.status_var.set(f"Ошибка: {title}")
+
+    def install_dependencies(self):
+        command = (
+            f"Set-Location -LiteralPath '{ROOT}'; "
+            "if (-not (Test-Path '.venv')) { python -m venv .venv }; "
+            "& '.\\.venv\\Scripts\\python.exe' -m pip install --upgrade pip; "
+            "& '.\\.venv\\Scripts\\python.exe' -m pip install -r requirements.txt"
+        )
+        self._run_background_powershell("Установка зависимостей", command)
+
+    def run_bot_locally(self):
+        command = (
+            f"Set-Location -LiteralPath '{ROOT}'; "
+            "if (-not (Test-Path '.venv\\Scripts\\python.exe')) { "
+            "Write-Host 'Сначала установи зависимости.' -ForegroundColor Yellow; return }; "
+            "& '.\\.venv\\Scripts\\python.exe' main_file.py"
+        )
+        self._open_powershell_window("Локальный бот", command)
+
+    def git_status(self):
+        self._run_background_command("Git status", ["git", "status"])
+
+    def git_commit_push(self):
+        if not messagebox.askyesno("Git", "Добавить все текущие изменения в git?"):
+            return
+        commit_message = simpledialog.askstring("Commit", "Сообщение коммита:", parent=self.root)
+        if not commit_message or not commit_message.strip():
+            self._log("Commit отменён: пустое сообщение.")
+            self.status_var.set("Commit отменён.")
+            return
+
+        def worker():
+            self._log("[start] Commit и push")
+            steps = [
+                ("git add .", ["git", "add", "."]),
+                (f"git commit -m {commit_message}", ["git", "commit", "-m", commit_message.strip()]),
+                ("git push origin main", ["git", "push", "origin", "main"]),
+            ]
+            for title, args in steps:
+                proc = subprocess.run(
+                    args,
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+                if proc.stdout.strip():
+                    self._log(proc.stdout.rstrip())
+                if proc.stderr.strip():
+                    self._log(proc.stderr.rstrip())
+                if proc.returncode != 0:
+                    self.status_var.set("Ошибка: Commit и push")
+                    self._log(f"[fail] {title} (код {proc.returncode})")
+                    return
+            self.status_var.set("Commit и push выполнены.")
+            self._log("[ok] Commit и push")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def install_daily_sync_task(self):
+        daily_at = simpledialog.askstring(
+            "Планировщик",
+            "Во сколько ставить ежедневную sync-задачу? Формат HH:mm",
+            initialvalue="07:30",
+            parent=self.root,
+        )
+        if daily_at is None:
+            return
+        daily_at = (daily_at or "07:30").strip()
+        self._run_background_command(
+            "Установка ежедневной sync-задачи",
+            self._powershell_args("install_local_message_sync_task.ps1", "-DailyAt", daily_at),
+        )
+
+    def install_new_vps(self):
+        host = simpledialog.askstring("Новый VPS", "IP или домен нового VPS:", initialvalue=self.vps_host_var.get().strip(), parent=self.root)
+        if host is None:
+            return
+        user = simpledialog.askstring("Новый VPS", "SSH user:", initialvalue=self.vps_user_var.get().strip(), parent=self.root)
+        if user is None:
+            return
+        app_dir = simpledialog.askstring("Новый VPS", "Путь проекта на VPS:", initialvalue="/opt/dis-bot", parent=self.root)
+        if app_dir is None:
+            return
+        self._run_background_command(
+            "Установка бота на новый VPS",
+            self._powershell_args(
+                "install_bot_on_vps.ps1",
+                "-VpsHost",
+                host.strip() or self.vps_host_var.get().strip(),
+                "-VpsUser",
+                user.strip() or self.vps_user_var.get().strip(),
+                "-RemoteAppDir",
+                app_dir.strip() or "/opt/dis-bot",
+            ),
+        )
 
     def start_bridge(self):
         token = self.bridge_token_var.get().strip()
@@ -534,10 +710,14 @@ class BotControlApp:
         )
 
     def sync_training(self):
-        self._run_background_command(
-            "Отправка лёгких моделей и баз на VPS",
-            self._powershell_args("sync_training_to_vps.ps1"),
+        include_gpt = messagebox.askyesno(
+            "Sync training",
+            "Включать GPT-модели в отправку на VPS?\nОбычно это не нужно.",
         )
+        args = self._powershell_args("sync_training_to_vps.ps1")
+        if include_gpt:
+            args.append("-IncludeGpt")
+        self._run_background_command("Отправка лёгких моделей и баз на VPS", args)
 
     def git_pull(self):
         self._run_background_command("Git pull", ["git", "pull", "origin", "main"])
