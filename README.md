@@ -212,6 +212,7 @@ WEB_ADMIN_TITLE=ViPik Bot Control
 Если не хочешь работать через `cmd`, запускай:
 
 - [ViPik Bot Control GUI.bat](D:/dis-bot/ViPik%20Bot%20Control%20GUI.bat)
+- `dist/ViPikBotControl.exe`
 
 Это однооконная оболочка для самых частых действий:
 
@@ -224,6 +225,14 @@ WEB_ADMIN_TITLE=ViPik Bot Control
 - открытие меню обучения;
 - статус VPS;
 - открытие веб-панели.
+
+Сборка `.exe`:
+
+- [scripts/build_bot_control_gui.ps1](D:/dis-bot/scripts/build_bot_control_gui.ps1)
+
+Готовый файл после сборки:
+
+- `dist/ViPikBotControl.exe`
 
 ### Актуальные пункты меню
 

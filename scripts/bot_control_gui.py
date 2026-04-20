@@ -10,7 +10,21 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 
-ROOT = Path(__file__).resolve().parent.parent
+def resolve_root() -> Path:
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+    candidates.append(Path.cwd().resolve())
+    candidates.append(Path(__file__).resolve().parent.parent)
+
+    for candidate in candidates:
+        if (candidate / "scripts").exists():
+            return candidate
+
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = resolve_root()
 SETTINGS_PATH = ROOT / ".control_center.local.json"
 README_PATH = ROOT / "README.md"
 PS = "powershell.exe"
