@@ -11,6 +11,23 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$runtimeConfigPath = Join-Path $projectRoot ".model_bridge.runtime.json"
+
+if (Test-Path $runtimeConfigPath) {
+    try {
+        $runtimeConfig = Get-Content -LiteralPath $runtimeConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $runtimeToken = [string]$runtimeConfig.token
+        if (-not [string]::IsNullOrWhiteSpace($runtimeToken)) {
+            if ($Token -and $Token -ne $runtimeToken) {
+                Write-Host "[bridge] token from running bridge differs from manual input, using runtime token" -ForegroundColor Yellow
+            }
+            $Token = $runtimeToken
+        }
+    }
+    catch {
+        Write-Host "[bridge] warning: failed to read runtime token, using manual input" -ForegroundColor Yellow
+    }
+}
 
 Write-Host "[bridge] checking existing local bridge..."
 $healthOk = $false
