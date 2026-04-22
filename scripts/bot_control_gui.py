@@ -53,6 +53,11 @@ class StatusCard(ttk.Frame):
         self.value.configure(text=text)
 
 
+class HintLabel(ttk.Label):
+    def __init__(self, master, text: str):
+        super().__init__(master, text=text, justify="left", foreground="#5b6472", wraplength=1020)
+
+
 class BotControlApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -139,6 +144,13 @@ class BotControlApp:
         )
         ttk.Button(main_actions, text="Обновить статусы", command=self.refresh_statuses).grid(row=1, column=2, sticky="ew", padx=4, pady=4)
         ttk.Button(main_actions, text="Статус VPS", command=self.show_vps_status).grid(row=1, column=3, sticky="ew", padx=4, pady=4)
+        HintLabel(
+            main_actions,
+            "Как этим пользоваться: `Включить GPT модели` поднимает bridge на ПК и связывает его с VPS. "
+            "`Скачать свежую DB` просто обновляет локальную базу сообщений. "
+            "`Обучить GPT` обучает модель по уже скачанной базе. "
+            "`Скачать свежую DB и обучить GPT` — самый удобный вариант, если хочешь сразу переобучить модель.",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=4, pady=(8, 0))
 
         extra = ttk.LabelFrame(self.main_tab, text="Дополнительно", padding=12)
         extra.grid(row=2, column=0, columnspan=4, sticky="ew", padx=6, pady=6)
@@ -157,6 +169,13 @@ class BotControlApp:
         ttk.Button(extra, text="Daily sync-задача", command=self.install_daily_sync_task).grid(row=2, column=1, sticky="ew", padx=4, pady=4)
         ttk.Button(extra, text="README", command=self.open_readme).grid(row=2, column=2, sticky="ew", padx=4, pady=4)
         ttk.Button(extra, text="Очистить лог", command=self.clear_log).grid(row=2, column=3, sticky="ew", padx=4, pady=4)
+        HintLabel(
+            extra,
+            "Этот блок нужен не каждый день. "
+            "`Настройки подключения` — если меняется IP, токен bridge, VPS host или ключ. "
+            "`Daily sync-задача` — чтобы Windows сама каждый день скачивала свежую messages.db. "
+            "`Отправить лёгкие модели на VPS` — только для лёгких артефактов, не для тяжёлой GPT.",
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=4, pady=(8, 0))
 
         help_box = ttk.LabelFrame(self.main_tab, text="Как пользоваться", padding=12)
         help_box.grid(row=3, column=0, columnspan=4, sticky="ew", padx=6, pady=6)
@@ -167,6 +186,11 @@ class BotControlApp:
             "4. Если что-то сломалось: открой вкладку «Лог» и посмотри последние строки."
         )
         ttk.Label(help_box, text=help_text, justify="left").grid(row=0, column=0, sticky="w")
+        HintLabel(
+            help_box,
+            "Подсказка: если видишь сверху статус `Ошибка`, не гадай — сразу открывай вкладку `Лог`. "
+            "Именно она показывает, на каком шаге сломалось: bridge, SSH, обучение, git или синхронизация базы.",
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
 
     def _build_log_tab(self):
         self.log_tab.columnconfigure(0, weight=1)
@@ -205,7 +229,7 @@ class BotControlApp:
     def open_settings_window(self):
         win = tk.Toplevel(self.root)
         win.title("Настройки подключения")
-        win.geometry("760x300")
+        win.geometry("760x360")
         win.transient(self.root)
         win.grab_set()
         win.columnconfigure(1, weight=1)
@@ -230,8 +254,14 @@ class BotControlApp:
         ttk.Label(win, text="URL веб-панели").grid(row=4, column=0, sticky="w", padx=10, pady=8)
         ttk.Entry(win, textvariable=self.admin_url_var).grid(row=4, column=1, columnspan=3, sticky="ew", padx=10, pady=8)
 
+        HintLabel(
+            win,
+            "Когда это нужно: обычно сюда заходят один раз при первой настройке. "
+            "Потом трогать это нужно только если изменился Tailscale IP, bridge token, адрес VPS или SSH-ключ.",
+        ).grid(row=5, column=0, columnspan=4, sticky="w", padx=10, pady=(6, 0))
+
         ttk.Button(win, text="Сохранить", command=lambda: [self.save_settings(), win.destroy()]).grid(
-            row=5, column=0, columnspan=4, sticky="ew", padx=10, pady=(12, 8)
+            row=6, column=0, columnspan=4, sticky="ew", padx=10, pady=(12, 8)
         )
 
     def detect_ip_to_field(self):
