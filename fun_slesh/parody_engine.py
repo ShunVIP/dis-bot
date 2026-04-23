@@ -194,6 +194,10 @@ def _load_model(user_id: int, quality: str = DEFAULT_MODEL):
         return None
 
 def model_exists(user_id: int, quality: str = DEFAULT_MODEL) -> bool:
+    if quality == "автор":
+        return PERSONA_OK and persona_exists(user_id)
+    if quality == "нейро":
+        return GPT_OK and gpt_model_exists(user_id)
     return os.path.exists(_model_path(user_id, quality))
 
 # ─── Объединение дублей ───────────────────────────────────────────────────────

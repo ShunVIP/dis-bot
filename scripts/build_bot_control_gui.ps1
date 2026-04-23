@@ -5,19 +5,14 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
 
-$distDir = Join-Path $projectRoot "dist_build"
-$buildDir = Join-Path $projectRoot "build"
+$runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$distDir = Join-Path $projectRoot ("dist_build_" + $runStamp)
+$buildDir = Join-Path $projectRoot ("build_" + $runStamp)
 $specFile = Join-Path $projectRoot "ViPikBotControl.spec"
 $finalDistDir = Join-Path $projectRoot "dist"
 $finalExe = Join-Path $finalDistDir "ViPikBotControl.exe"
 $builtExe = Join-Path $distDir "ViPikBotControl.exe"
 
-if (Test-Path $distDir) {
-    Remove-Item -LiteralPath $distDir -Recurse -Force
-}
-if (Test-Path $buildDir) {
-    Remove-Item -LiteralPath $buildDir -Recurse -Force
-}
 if (Test-Path $specFile) {
     Remove-Item -LiteralPath $specFile -Force
 }

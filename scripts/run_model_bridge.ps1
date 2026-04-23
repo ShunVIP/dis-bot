@@ -1,6 +1,6 @@
 param(
     [string]$Token,
-    [string]$BridgeHost = "127.0.0.1",
+    [string]$BridgeHost = "0.0.0.0",
     [int]$BridgePort = 8787
 )
 

@@ -1,11 +1,13 @@
 import json
 import os
 import queue
+import re
 import socket
 import subprocess
 import sys
 import threading
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
@@ -97,22 +99,20 @@ class BotControlApp:
         header.columnconfigure(0, weight=1)
 
         ttk.Label(header, text="ViPik Bot Control", font=("Segoe UI", 22, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            header,
-            text="Одно окно для GPT, VPS, обучения и обслуживания проекта",
-            font=("Segoe UI", 10),
-        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(header, textvariable=self.status_var, foreground="#136f2d").grid(row=0, column=1, rowspan=2, sticky="e")
+        ttk.Label(header, textvariable=self.status_var, foreground="#136f2d").grid(row=0, column=1, sticky="e")
 
         notebook = ttk.Notebook(self.root)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
 
         self.main_tab = ttk.Frame(notebook, padding=14)
+        self.docs_tab = ttk.Frame(notebook, padding=14)
         self.log_tab = ttk.Frame(notebook, padding=14)
         notebook.add(self.main_tab, text="Обзор")
+        notebook.add(self.docs_tab, text="Документация")
         notebook.add(self.log_tab, text="Лог")
 
         self._build_main_tab()
+        self._build_docs_tab()
         self._build_log_tab()
 
     def _build_main_tab(self):
@@ -124,36 +124,46 @@ class BotControlApp:
         self.vps_card = StatusCard(self.main_tab, "VPS")
         self.vps_card.grid(row=0, column=1, sticky="nsew", padx=6, pady=6)
 
-        self.tailnet_card = StatusCard(self.main_tab, "Tailscale")
-        self.tailnet_card.grid(row=0, column=2, sticky="nsew", padx=6, pady=6)
+        self.bot_card = StatusCard(self.main_tab, "Бот")
+        self.bot_card.grid(row=0, column=2, sticky="nsew", padx=6, pady=6)
 
-        self.gpt_card = StatusCard(self.main_tab, "GPT режим")
-        self.gpt_card.grid(row=0, column=3, sticky="nsew", padx=6, pady=6)
+        self.commands_card = StatusCard(self.main_tab, "Команды")
+        self.commands_card.grid(row=0, column=3, sticky="nsew", padx=6, pady=6)
+
+        self.db_card = StatusCard(self.main_tab, "База сегодня")
+        self.db_card.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
+
+        self.markov_card = StatusCard(self.main_tab, "Markov сегодня")
+        self.markov_card.grid(row=1, column=1, sticky="nsew", padx=6, pady=6)
+
+        self.tailnet_card = StatusCard(self.main_tab, "Tailscale")
+        self.tailnet_card.grid(row=1, column=2, sticky="nsew", padx=6, pady=6)
+
+        self.gpt_card = StatusCard(self.main_tab, "GPT мост")
+        self.gpt_card.grid(row=1, column=3, sticky="nsew", padx=6, pady=6)
 
         main_actions = ttk.LabelFrame(self.main_tab, text="Главные действия", padding=12)
-        main_actions.grid(row=1, column=0, columnspan=4, sticky="ew", padx=6, pady=6)
-        for col in range(4):
+        main_actions.grid(row=2, column=0, columnspan=4, sticky="ew", padx=6, pady=6)
+        for col in range(3):
             main_actions.columnconfigure(col, weight=1)
 
         self.gpt_toggle_button = ttk.Button(main_actions, text="Включить GPT модели", command=self.toggle_gpt_models)
-        self.gpt_toggle_button.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=4)
-        ttk.Button(main_actions, text="Скачать свежую DB", command=self.sync_messages).grid(row=0, column=2, sticky="ew", padx=4, pady=4)
-        ttk.Button(main_actions, text="Обучить GPT", command=self.train_gpt).grid(row=0, column=3, sticky="ew", padx=4, pady=4)
+        self.gpt_toggle_button.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
         ttk.Button(main_actions, text="Скачать свежую DB и обучить GPT", command=self.sync_and_train_gpt).grid(
-            row=1, column=0, columnspan=2, sticky="ew", padx=4, pady=4
+            row=0, column=1, sticky="ew", padx=4, pady=4
         )
-        ttk.Button(main_actions, text="Обновить статусы", command=self.refresh_statuses).grid(row=1, column=2, sticky="ew", padx=4, pady=4)
-        ttk.Button(main_actions, text="Статус VPS", command=self.show_vps_status).grid(row=1, column=3, sticky="ew", padx=4, pady=4)
+        ttk.Button(main_actions, text="Обновить статусы", command=self.refresh_statuses).grid(
+            row=0, column=2, sticky="ew", padx=4, pady=4
+        )
         HintLabel(
             main_actions,
-            "Как этим пользоваться: `Включить GPT модели` поднимает bridge на ПК и связывает его с VPS. "
-            "`Скачать свежую DB` просто обновляет локальную базу сообщений. "
-            "`Обучить GPT` обучает модель по уже скачанной базе. "
-            "`Скачать свежую DB и обучить GPT` — самый удобный вариант, если хочешь сразу переобучить модель.",
-        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=4, pady=(8, 0))
+            "Главная схема простая: `Включить GPT модели` включает bridge и связывает VPS с ПК. "
+            "`Скачать свежую DB и обучить GPT` сначала забирает свежую базу сообщений с VPS, потом запускает локальное GPT-обучение. "
+            "`Обновить статусы` проверяет всё сразу: VPS, бота, команды, базу, Markov и доступность GPT с сервера.",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(8, 0))
 
         extra = ttk.LabelFrame(self.main_tab, text="Дополнительно", padding=12)
-        extra.grid(row=2, column=0, columnspan=4, sticky="ew", padx=6, pady=6)
+        extra.grid(row=3, column=0, columnspan=4, sticky="ew", padx=6, pady=6)
         for col in range(4):
             extra.columnconfigure(col, weight=1)
 
@@ -167,30 +177,64 @@ class BotControlApp:
         ttk.Button(extra, text="Поставить нового VPS", command=self.install_new_vps).grid(row=1, column=3, sticky="ew", padx=4, pady=4)
         ttk.Button(extra, text="Настройки подключения", command=self.open_settings_window).grid(row=2, column=0, sticky="ew", padx=4, pady=4)
         ttk.Button(extra, text="Daily sync-задача", command=self.install_daily_sync_task).grid(row=2, column=1, sticky="ew", padx=4, pady=4)
-        ttk.Button(extra, text="README", command=self.open_readme).grid(row=2, column=2, sticky="ew", padx=4, pady=4)
-        ttk.Button(extra, text="Очистить лог", command=self.clear_log).grid(row=2, column=3, sticky="ew", padx=4, pady=4)
+        ttk.Button(extra, text="Очистить лог", command=self.clear_log).grid(row=2, column=2, sticky="ew", padx=4, pady=4)
         HintLabel(
             extra,
-            "Этот блок нужен не каждый день. "
-            "`Настройки подключения` — если меняется IP, токен bridge, VPS host или ключ. "
-            "`Daily sync-задача` — чтобы Windows сама каждый день скачивала свежую messages.db. "
-            "`Отправить лёгкие модели на VPS` — только для лёгких артефактов, не для тяжёлой GPT.",
+            "Этот блок нужен не каждый день. Настройки подключения трогай только если меняются IP, токен bridge, VPS host или SSH-ключ. "
+            "Отправка лёгких моделей на VPS не нужна для тяжёлой GPT с ПК.",
         ).grid(row=3, column=0, columnspan=4, sticky="w", padx=4, pady=(8, 0))
 
-        help_box = ttk.LabelFrame(self.main_tab, text="Как пользоваться", padding=12)
-        help_box.grid(row=3, column=0, columnspan=4, sticky="ew", padx=6, pady=6)
-        help_text = (
-            "1. Если нужен нейро-режим на сервере: нажми «Включить GPT модели».\n"
-            "2. Когда больше не нужно: нажми «Выключить GPT модели».\n"
-            "3. Если хочешь переобучить GPT: используй «Скачать свежую DB и обучить GPT».\n"
-            "4. Если что-то сломалось: открой вкладку «Лог» и посмотри последние строки."
-        )
-        ttk.Label(help_box, text=help_text, justify="left").grid(row=0, column=0, sticky="w")
-        HintLabel(
-            help_box,
-            "Подсказка: если видишь сверху статус `Ошибка`, не гадай — сразу открывай вкладку `Лог`. "
-            "Именно она показывает, на каком шаге сломалось: bridge, SSH, обучение, git или синхронизация базы.",
-        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+    def _build_docs_tab(self):
+        self.docs_tab.columnconfigure(0, weight=1)
+
+        intro = ttk.LabelFrame(self.docs_tab, text="Как пользоваться", padding=12)
+        intro.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+        ttk.Label(
+            intro,
+            text=(
+                "1. Если нужен нейро-режим на сервере: нажми «Включить GPT модели».\n"
+                "2. Если хочешь переобучить нейро: нажми «Скачать свежую DB и обучить GPT».\n"
+                "3. Если что-то не сходится: жми «Обновить статусы».\n"
+                "4. Если сверху видишь ошибку: сразу открывай вкладку «Лог»."
+            ),
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+
+        status_help = ttk.LabelFrame(self.docs_tab, text="Что означают статусы", padding=12)
+        status_help.grid(row=1, column=0, sticky="ew", padx=6, pady=6)
+        ttk.Label(
+            status_help,
+            text=(
+                "Bridge: локальный bridge на ПК отвечает.\n"
+                "VPS: systemd-сервис бота активен.\n"
+                "Бот: в логах есть успешный старт и вход в Discord.\n"
+                "Команды: slash-команды синхронизированы и в последних логах нет явной аварии.\n"
+                "База сегодня: messages.db на VPS сегодня добирала новые сообщения.\n"
+                "Markov сегодня: ежедневный safe daily Markov сегодня завершился.\n"
+                "GPT мост: VPS реально достучался до bridge на ПК, а не просто хранит URL в env."
+            ),
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+
+        docs_actions = ttk.LabelFrame(self.docs_tab, text="Документация", padding=12)
+        docs_actions.grid(row=2, column=0, sticky="ew", padx=6, pady=6)
+        ttk.Button(docs_actions, text="Открыть README", command=self.open_readme).grid(row=0, column=0, sticky="ew")
+
+        extra_help = ttk.LabelFrame(self.docs_tab, text="Что в разделе «Дополнительно»", padding=12)
+        extra_help.grid(row=3, column=0, sticky="ew", padx=6, pady=6)
+        ttk.Label(
+            extra_help,
+            text=(
+                "Git pull / Git status / Commit и push — обслуживание репозитория.\n"
+                "Открыть веб-панель — открыть приватную админку на VPS через Tailscale.\n"
+                "Установить зависимости / Запустить бота локально — если нужно запускать проект на ПК.\n"
+                "Отправить лёгкие модели на VPS — только для лёгких артефактов, не для тяжёлой GPT.\n"
+                "Поставить нового VPS — аварийное восстановление на новом сервере.\n"
+                "Настройки подключения — Tailscale IP, bridge token, VPS host/user и SSH key.\n"
+                "Daily sync-задача — чтобы Windows каждый день сама скачивала свежую messages.db."
+            ),
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
 
     def _build_log_tab(self):
         self.log_tab.columnconfigure(0, weight=1)
@@ -377,58 +421,182 @@ class BotControlApp:
         except OSError:
             return False
 
+    def _ssh_args(self, remote_command: str) -> list[str]:
+        return [
+            "ssh",
+            "-i",
+            self.ssh_key_var.get().strip(),
+            f"{self.vps_user_var.get().strip()}@{self.vps_host_var.get().strip()}",
+            remote_command,
+        ]
+
+    def _ssh_capture(self, remote_command: str, timeout: float = 30) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            self._ssh_args(remote_command),
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=timeout,
+        )
+
+    def _pick_probe_user_id(self) -> int | None:
+        gpt_root = ROOT / "models" / "gpt"
+        if not gpt_root.exists():
+            return None
+        candidates = []
+        for entry in gpt_root.iterdir():
+            if not entry.is_dir() or not entry.name.isdigit():
+                continue
+            if (entry / "config.json").exists():
+                try:
+                    candidates.append((entry.stat().st_mtime, int(entry.name)))
+                except Exception:
+                    continue
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
+    def _format_iso_short(self, value: str | None) -> str:
+        if not value:
+            return "нет данных"
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return dt.astimezone(timezone.utc).strftime("%d.%m %H:%M UTC")
+        except Exception:
+            return value[:16]
+
     def _apply_remote_state_to_ui(self):
         if self.remote_enabled:
-            self.gpt_card.set("Включен")
             self.gpt_toggle_button.configure(text="Выключить GPT модели")
         else:
-            self.gpt_card.set("Выключен")
             self.gpt_toggle_button.configure(text="Включить GPT модели")
 
     def refresh_statuses(self):
         bridge_up = self._check_tcp("127.0.0.1", 8787)
-        self.bridge_card.set("Работает" if bridge_up else "Выключен")
+        self.bridge_card.set("Локально OK" if bridge_up else "Не отвечает")
+        self.vps_card.set("Проверка...")
+        self.bot_card.set("Проверка...")
+        self.commands_card.set("Проверка...")
+        self.db_card.set("Проверка...")
+        self.markov_card.set("Проверка...")
         self.tailnet_card.set(self.tailscale_ip_var.get().strip() or "IP не задан")
         self.gpt_card.set("Проверка...")
 
-        def worker():
-            ssh_target = f"{self.vps_user_var.get().strip()}@{self.vps_host_var.get().strip()}"
-            ssh_key = self.ssh_key_var.get().strip()
-            try:
-                service_proc = subprocess.run(
-                    ["ssh", "-i", ssh_key, ssh_target, "systemctl is-active vipik-discord-bot"],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="ignore",
-                    timeout=20,
-                )
-                service_value = service_proc.stdout.strip() or service_proc.stderr.strip() or "unknown"
-                self.root.after(0, lambda: self.vps_card.set(service_value))
+        probe_user_id = self._pick_probe_user_id()
 
-                remote_proc = subprocess.run(
-                    [
-                        "ssh",
-                        "-i",
-                        ssh_key,
-                        ssh_target,
-                        "grep -q '^REMOTE_MODEL_API_URL=http' /opt/dis-bot/KGTD.env && echo enabled || echo disabled",
-                    ],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="ignore",
-                    timeout=20,
+        def worker():
+            utc_today = datetime.now(timezone.utc).date().isoformat()
+            try:
+                service_proc = self._ssh_capture("systemctl is-active vipik-discord-bot", timeout=20)
+                service_value = service_proc.stdout.strip() or service_proc.stderr.strip() or "unknown"
+
+                log_proc = self._ssh_capture("journalctl -u vipik-discord-bot --no-pager -n 200", timeout=25)
+                logs = (log_proc.stdout or "") + "\n" + (log_proc.stderr or "")
+
+                today_log_proc = self._ssh_capture("journalctl -u vipik-discord-bot --since today --no-pager", timeout=25)
+                today_logs = (today_log_proc.stdout or "") + "\n" + (today_log_proc.stderr or "")
+
+                db_script = (
+                    "python3 - <<'PY'\n"
+                    "import json, sqlite3\n"
+                    "from pathlib import Path\n"
+                    "p=Path('/opt/dis-bot/datebase/messages.db')\n"
+                    "result={'exists': p.exists(), 'max_created_at': None, 'max_last_collected': None}\n"
+                    "if p.exists():\n"
+                    "    conn=sqlite3.connect(p)\n"
+                    "    cur=conn.cursor()\n"
+                    "    cur.execute('select max(created_at) from user_messages')\n"
+                    "    result['max_created_at']=cur.fetchone()[0]\n"
+                    "    cur.execute('select max(last_collected) from collect_checkpoints')\n"
+                    "    result['max_last_collected']=cur.fetchone()[0]\n"
+                    "    conn.close()\n"
+                    "print(json.dumps(result, ensure_ascii=False))\n"
+                    "PY"
                 )
-                self.remote_enabled = (remote_proc.stdout.strip().lower() == "enabled")
-            except Exception:
-                self.root.after(0, lambda: self.vps_card.set("Недоступен"))
+                db_proc = self._ssh_capture(db_script, timeout=30)
+                db_info = json.loads((db_proc.stdout or "{}").strip() or "{}")
+
+                bridge_script = (
+                    "python3 - <<'PY'\n"
+                    "import json, urllib.request\n"
+                    "from pathlib import Path\n"
+                    "env={}\n"
+                    "for line in Path('/opt/dis-bot/KGTD.env').read_text(encoding='utf-8').splitlines():\n"
+                    "    if '=' in line:\n"
+                    "        k,v=line.split('=',1); env[k.strip()]=v.strip()\n"
+                    f"probe_uid = {probe_user_id if probe_user_id is not None else 'None'}\n"
+                    "base=env.get('REMOTE_MODEL_API_URL','').rstrip('/')\n"
+                    "token=env.get('REMOTE_MODEL_API_TOKEN','')\n"
+                    "result={'configured': bool(base and token), 'health': False, 'model_exists': None, 'probe_uid': probe_uid}\n"
+                    "if base and token:\n"
+                    "    try:\n"
+                    "        with urllib.request.urlopen(base + '/health', timeout=4) as resp:\n"
+                    "            result['health'] = resp.status == 200\n"
+                    "    except Exception:\n"
+                    "        result['health'] = False\n"
+                    "    if probe_uid is not None:\n"
+                    "        try:\n"
+                    "            req = urllib.request.Request(base + '/model_exists', data=json.dumps({'user_id': probe_uid}).encode('utf-8'), headers={'Content-Type':'application/json','X-Model-Token':token}, method='POST')\n"
+                    "            with urllib.request.urlopen(req, timeout=5) as resp:\n"
+                    "                result['model_exists'] = bool(json.loads(resp.read().decode('utf-8')).get('exists'))\n"
+                    "        except Exception:\n"
+                    "            result['model_exists'] = None\n"
+                    "print(json.dumps(result, ensure_ascii=False))\n"
+                    "PY"
+                )
+                bridge_proc = self._ssh_capture(bridge_script, timeout=30)
+                bridge_info = json.loads((bridge_proc.stdout or "{}").strip() or "{}")
+
+                bot_ready = "Бот готов к работе" in logs and service_value == "active"
+                slash_match = re.search(r"Slash-команд синхронизировано:\s*(\d+)", logs)
+                has_recent_error = any(marker in logs for marker in ["Traceback", "Unknown interaction", "discord.app_commands.errors"])
+                commands_text = "OK"
+                if slash_match:
+                    commands_text = f"Sync {slash_match.group(1)}"
+                if has_recent_error:
+                    commands_text = f"{commands_text}, есть ошибки"
+
+                last_collected = db_info.get("max_last_collected")
+                db_today = bool(last_collected and str(last_collected).startswith(utc_today))
+
+                markov_today = "Safe daily Markov готово" in today_logs
+
+                gpt_text = "Выключен"
+                self.remote_enabled = bool(bridge_info.get("configured") and bridge_info.get("health"))
+                if bridge_info.get("configured") and bridge_info.get("health"):
+                    if bridge_info.get("model_exists") is True and bridge_info.get("probe_uid") is not None:
+                        gpt_text = f"OK для {bridge_info['probe_uid']}"
+                    else:
+                        gpt_text = "Bridge OK"
+                elif bridge_info.get("configured"):
+                    gpt_text = "URL есть, но VPS не достучался"
+
+                self.root.after(0, lambda: self.vps_card.set(service_value))
+                self.root.after(0, lambda: self.bot_card.set("Готов" if bot_ready else "Нет сигнала"))
+                self.root.after(0, lambda: self.commands_card.set(commands_text))
+                self.root.after(
+                    0,
+                    lambda: self.db_card.set(
+                        f"Сегодня ({self._format_iso_short(last_collected)})" if db_today else self._format_iso_short(last_collected)
+                    ),
+                )
+                self.root.after(0, lambda: self.markov_card.set("Сегодня" if markov_today else "Нет сигнала сегодня"))
+                self.root.after(0, lambda: self.gpt_card.set(gpt_text))
+            except Exception as exc:
                 self.remote_enabled = False
+                self.root.after(0, lambda: self.vps_card.set("Недоступен"))
+                self.root.after(0, lambda: self.bot_card.set("Неизвестно"))
+                self.root.after(0, lambda: self.commands_card.set("Неизвестно"))
+                self.root.after(0, lambda: self.db_card.set("Неизвестно"))
+                self.root.after(0, lambda: self.markov_card.set("Неизвестно"))
+                self.root.after(0, lambda: self.gpt_card.set("Неизвестно"))
+                self._log(f"[exception] Обновление статусов: {exc}")
             finally:
                 self.root.after(0, self._apply_remote_state_to_ui)
-
+                self.root.after(0, lambda: self.status_var.set("Статусы обновлены."))
         threading.Thread(target=worker, daemon=True).start()
 
     def _open_powershell_window(self, title: str, command: str):
@@ -559,7 +727,7 @@ class BotControlApp:
 
         try:
             self.bridge_process = subprocess.Popen(
-                self._powershell_args("run_model_bridge.ps1", "-Token", token),
+                self._powershell_args("run_model_bridge.ps1", "-Token", token, "-BridgeHost", "0.0.0.0"),
                 cwd=ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
