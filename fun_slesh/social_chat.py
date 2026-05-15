@@ -16,12 +16,21 @@ import random
 import re
 import sqlite3
 import asyncio
+import io
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+try:
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+    ImageOps = None
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 UTC = timezone.utc
@@ -91,6 +100,27 @@ PARODY_PREFIXES = [
     "Если уж совсем по-честному, это звучит так:",
     "В версии без фильтров это выглядело бы так:",
     "Беру микрофон и читаю это как надо:",
+]
+
+MEME_CAPTIONS = [
+    "Когда чат снова пошёл не по плану",
+    "Когда человек сказал это вслух и теперь поздно отступать",
+    "Когда сервер коллективно принял очень сомнительное решение",
+    "Когда идея звучит ужасно, но все уже согласились",
+]
+
+MEME_REACTIONS = [
+    "Это надо было увековечить.",
+    "Скриншот морали сделан.",
+    "Чат снова дал материал для искусства.",
+    "Исторический момент, зафиксировано.",
+]
+
+CARD_COLORS = [
+    ((38, 13, 58), (121, 53, 165), (248, 216, 79)),
+    ((17, 34, 64), (35, 105, 185), (255, 134, 75)),
+    ((31, 21, 21), (172, 52, 75), (255, 226, 133)),
+    ((18, 42, 39), (32, 122, 106), (202, 247, 213)),
 ]
 
 
@@ -264,6 +294,111 @@ def _build_reply(kind: str, text: str) -> str:
     return random.choice(SMALL_TALK)
 
 
+def _pick_meme_lines(text: str, kind: str) -> tuple[str, str]:
+    topic = _extract_topic(text)
+    top = random.choice(MEME_CAPTIONS)
+    if topic:
+        bottom = f"ТЕМА: {topic[:56].upper()}"
+    elif kind == "chaos":
+        bottom = "УРОВЕНЬ СПОКОЙСТВИЯ: ОТСУТСТВУЕТ"
+    elif kind == "question":
+        bottom = "МЫСЛЬ ЕСТЬ. ПЛАНА НЕТ."
+    else:
+        bottom = "ЧАТ ОПЯТЬ ВЫБРАЛ ПРИКЛЮЧЕНИЯ"
+    return top, bottom
+
+
+def _get_font(size: int):
+    if ImageFont is None:
+        return None
+    for candidate in ("arialbd.ttf", "arial.ttf", "segoeuib.ttf"):
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _fit_text(draw: ImageDraw.ImageDraw, text: str, max_width: int, start_size: int):
+    font = _get_font(start_size)
+    if font is None:
+        return None
+    size = start_size
+    while size > 20:
+        font = _get_font(size)
+        box = draw.multiline_textbbox((0, 0), text, font=font, spacing=8, align="center")
+        width = box[2] - box[0]
+        if width <= max_width:
+            return font
+        size -= 4
+    return _get_font(20)
+
+
+def _draw_centered_text(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str, font, fill):
+    left, top, right, bottom = box
+    text_box = draw.multiline_textbbox((0, 0), text, font=font, spacing=8, align="center")
+    width = text_box[2] - text_box[0]
+    height = text_box[3] - text_box[1]
+    x = left + (right - left - width) / 2
+    y = top + (bottom - top - height) / 2
+    draw.multiline_text((x, y), text, font=font, fill=fill, spacing=8, align="center")
+
+
+async def _render_meme_card(message: discord.Message, kind: str) -> discord.File | None:
+    if Image is None or ImageDraw is None or ImageFont is None:
+        return None
+
+    width, height = 1100, 760
+    bg, accent, text_color = random.choice(CARD_COLORS)
+    image = Image.new("RGB", (width, height), color=bg)
+    draw = ImageDraw.Draw(image)
+
+    for i in range(height):
+        blend = i / max(height - 1, 1)
+        row = (
+            int(bg[0] * (1 - blend) + accent[0] * blend),
+            int(bg[1] * (1 - blend) + accent[1] * blend),
+            int(bg[2] * (1 - blend) + accent[2] * blend),
+        )
+        draw.line((0, i, width, i), fill=row)
+
+    draw.rounded_rectangle((32, 32, width - 32, height - 32), radius=36, outline=(255, 255, 255), width=3)
+
+    try:
+        avatar_bytes = await message.author.display_avatar.replace(size=256, static_format="png").read()
+        avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGB").resize((180, 180))
+        mask = Image.new("L", (180, 180), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, 179, 179), fill=255)
+        avatar = ImageOps.fit(avatar, (180, 180))
+        image.paste(avatar, (60, 72), mask)
+    except Exception:
+        pass
+
+    top_text, bottom_text = _pick_meme_lines(message.content, kind)
+    quote_text = message.content.strip()
+    if len(quote_text) > 170:
+        quote_text = quote_text[:167] + "..."
+    quote_text = f"«{quote_text}»"
+
+    top_font = _fit_text(draw, top_text, 760, 56)
+    quote_font = _fit_text(draw, quote_text, width - 140, 52)
+    bottom_font = _fit_text(draw, bottom_text, width - 140, 34)
+    small_font = _get_font(24)
+
+    _draw_centered_text(draw, (280, 78, width - 60, 222), top_text, top_font, fill=(255, 255, 255))
+    _draw_centered_text(draw, (70, 270, width - 70, 500), quote_text, quote_font, fill=text_color)
+    _draw_centered_text(draw, (70, 540, width - 70, 630), bottom_text, bottom_font, fill=(255, 255, 255))
+
+    footer = f"@{message.author.display_name} • ViPik meme response"
+    draw.text((70, height - 92), footer, fill=(230, 230, 230), font=small_font)
+    draw.text((width - 250, height - 92), datetime.now(MSK).strftime("%d.%m %H:%M"), fill=(230, 230, 230), font=small_font)
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    return discord.File(buffer, filename=f"vipik_meme_{message.id}.png")
+
+
 class SocialChat(commands.Cog):
     chat_group = app_commands.Group(name="болтовня", description="Настройки разговорчивости бота")
 
@@ -272,6 +407,7 @@ class SocialChat(commands.Cog):
         _ensure_tables()
         self._channel_cooldowns: dict[tuple[int, int], datetime] = {}
         self._user_cooldowns: dict[tuple[int, int], datetime] = {}
+        self._image_cooldowns: dict[tuple[int, int], datetime] = {}
 
     async def _build_fun_reply(self, message: discord.Message, kind: str) -> str:
         user_id = message.author.id
@@ -324,6 +460,34 @@ class SocialChat(commands.Cog):
         self._user_cooldowns[key] = now
         return True
 
+    def _image_ready(self, guild_id: int, channel_id: int) -> bool:
+        key = (guild_id, channel_id)
+        now = datetime.now(UTC)
+        last = self._image_cooldowns.get(key)
+        if last and now - last < timedelta(minutes=18):
+            return False
+        self._image_cooldowns[key] = now
+        return True
+
+    async def _maybe_build_meme(self, message: discord.Message, kind: str) -> discord.File | None:
+        if kind not in {"chaos", "ambient", "talk", "direct", "question"}:
+            return None
+        if len((message.content or "").strip()) < 10:
+            return None
+        if not self._image_ready(message.guild.id, message.channel.id):
+            return None
+
+        chance = {
+            "chaos": 0.30,
+            "direct": 0.16,
+            "question": 0.10,
+            "ambient": 0.12,
+            "talk": 0.14,
+        }.get(kind, 0.0)
+        if random.random() > chance:
+            return None
+        return await _render_meme_card(message, kind)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not message.content:
@@ -357,7 +521,16 @@ class SocialChat(commands.Cog):
                 return
 
         reply = await self._build_fun_reply(message, kind)
+        meme_file = await self._maybe_build_meme(message, kind)
         try:
+            if meme_file is not None:
+                await message.reply(
+                    random.choice(MEME_REACTIONS),
+                    file=meme_file,
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
             await message.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             pass

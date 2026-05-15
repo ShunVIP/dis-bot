@@ -6,6 +6,7 @@ loguru
 beautifulsoup4
 lxml
 markovify
+Pillow
 
 # Продвинутые модели пародии (нейрослоп)
 transformers
