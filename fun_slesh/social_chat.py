@@ -15,6 +15,7 @@ import os
 import random
 import re
 import sqlite3
+import asyncio
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -39,6 +40,8 @@ THANKS_RE = re.compile(r"\b(спасибо|спс|благодарю|пасиб|
 HOW_ARE_YOU_RE = re.compile(r"\b(как дела|как жизнь|ч[её] как|как сам|как ты)\b", re.I)
 QUESTION_RE = re.compile(r"\?$")
 TALK_RE = re.compile(r"\b(поговори|скажи что|че скажешь|что думаешь|есть мнение|расскажи)\b", re.I)
+LAUGH_RE = re.compile(r"(ахах|хаха|ор[уюа]|ору|лол|kekw|azaza|азааза|угар|ржу)", re.I)
+CHAOS_RE = re.compile(r"(!{2,}|\\?{2,}|чзх|wtf|пиздец|ебать|жесть|сдох|умер|легенда|разъеб)", re.I)
 
 GREETINGS = [
     "Привет. Я тут, слежу за порядком и иногда влезаю в разговоры.",
@@ -73,6 +76,21 @@ SMALL_TALK = [
     "Я делаю вид, что молчу, но вообще всё вижу.",
     "Иногда этот чат звучит как тест на выживание.",
     "Продолжаем разговор, я записываю лучшие моменты.",
+]
+
+ROFL_FALLBACKS = [
+    "Сильное сообщение. Я бы сохранил это как улику.",
+    "Чат снова выбрал путь хаоса, я уважаю.",
+    "Это звучит как начало очень плохой, но великой идеи.",
+    "Я не осуждаю. Я просто записываю это в золотой фонд.",
+    "Сюда бы драматичную музыку и можно не продолжать.",
+]
+
+PARODY_PREFIXES = [
+    "Перевожу с вашего языка:",
+    "Если уж совсем по-честному, это звучит так:",
+    "В версии без фильтров это выглядело бы так:",
+    "Беру микрофон и читаю это как надо:",
 ]
 
 
@@ -213,10 +231,14 @@ def _classify_message(message: discord.Message, bot_user: discord.ClientUser | d
         return "how_are_you"
     if GREETING_RE.search(text):
         return "greeting"
+    if LAUGH_RE.search(text) or CHAOS_RE.search(text):
+        return "chaos"
     if TALK_RE.search(text):
         return "talk"
     if QUESTION_RE.search(text):
         return "question"
+    if len(text.split()) >= 5:
+        return "ambient"
     return None
 
 
@@ -232,6 +254,8 @@ def _build_reply(kind: str, text: str) -> str:
         if topic:
             return f"Если про **{topic}**, то я бы послушал, к чему вы ведёте."
         return random.choice(SMALL_TALK)
+    if kind == "chaos":
+        return random.choice(ROFL_FALLBACKS)
     if kind in {"question", "direct"}:
         base = random.choice(SHORT_QUESTIONS)
         if topic:
@@ -248,6 +272,39 @@ class SocialChat(commands.Cog):
         _ensure_tables()
         self._channel_cooldowns: dict[tuple[int, int], datetime] = {}
         self._user_cooldowns: dict[tuple[int, int], datetime] = {}
+
+    async def _build_fun_reply(self, message: discord.Message, kind: str) -> str:
+        user_id = message.author.id
+
+        try:
+            from fun_slesh.parody_engine import generate_phrase, model_exists
+            from fun_slesh.parody_gpt import generate_author_phrase, generate_neuro_phrase, GPT_OK, gpt_model_exists
+
+            # Для неожиданных рофлов сначала пробуем самые смешные локальные модели.
+            if kind in {"chaos", "ambient", "talk", "question", "direct"}:
+                if model_exists(user_id, "мем"):
+                    phrase = await asyncio.to_thread(generate_phrase, user_id, "мем")
+                    if phrase:
+                        return f"{random.choice(PARODY_PREFIXES)} *{phrase}*"
+
+                if model_exists(user_id, "разум") and random.random() < 0.7:
+                    phrase = await asyncio.to_thread(generate_phrase, user_id, "разум")
+                    if phrase:
+                        return f"{random.choice(PARODY_PREFIXES)} *{phrase}*"
+
+                if model_exists(user_id, "автор") and random.random() < 0.45:
+                    phrase = await asyncio.to_thread(generate_author_phrase, user_id)
+                    if phrase:
+                        return f"{random.choice(PARODY_PREFIXES)} *{phrase}*"
+
+                if GPT_OK and gpt_model_exists(user_id) and random.random() < 0.2:
+                    phrase = await asyncio.to_thread(generate_neuro_phrase, user_id)
+                    if phrase:
+                        return f"{random.choice(PARODY_PREFIXES)} *{phrase}*"
+        except Exception:
+            pass
+
+        return _build_reply(kind, message.content)
 
     def _channel_ready(self, guild_id: int, channel_id: int) -> bool:
         key = (guild_id, channel_id)
@@ -299,7 +356,7 @@ class SocialChat(commands.Cog):
             if roll > chance_percent:
                 return
 
-        reply = _build_reply(kind, message.content)
+        reply = await self._build_fun_reply(message, kind)
         try:
             await message.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
