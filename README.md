@@ -127,6 +127,10 @@ Bridge нужен только для тяжёлой GPT-модели.
 ### Основные папки
 
 - [fun_slesh](D:/dis-bot/fun_slesh) — slash-команды и логика модулей.
+  В том числе:
+  - `toxicity.py` — реакция на токсичные сообщения;
+  - `social_chat.py` — лёгкая разговорная болтовня бота в чате;
+  - `parody_engine.py` — пародии, Markov, Persona и GPT.
 - [core](D:/dis-bot/core) — runtime policy, админ-панель и базовая логика.
 - [scheduled](D:/dis-bot/scheduled) — фоновые задачи.
 - [scripts](D:/dis-bot/scripts) — локальные/VPS служебные скрипты.
