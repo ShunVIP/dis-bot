@@ -128,6 +128,7 @@ Bridge нужен только для тяжёлой GPT-модели.
 
 - [fun_slesh](D:/dis-bot/fun_slesh) — slash-команды и логика модулей.
   В том числе:
+  - `heroes_troll.py` — троллит игроков, которые запускают Heroes of Might and Magic в Discord activity;
   - `toxicity.py` — реакция на токсичные сообщения;
   - `social_chat.py` — лёгкая разговорная болтовня бота в чате, неожиданные рофлы и мем-картинки;
   - `parody_engine.py` — пародии, Markov, Persona и GPT.
