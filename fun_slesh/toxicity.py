@@ -157,19 +157,19 @@ def _inc_counter(guild_id: int, user_id: int) -> int:
 
 # ── Генерация троллинг-ответа ─────────────────────────────────────────────────
 def _markov_troll(user_id: int) -> str | None:
-    """Генерирует фразу через Markov модель пользователя."""
+    """Генерирует фразу через актуальные модели пародии пользователя."""
     try:
-        import markovify, json, glob
-        models_dir = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "models"))
-        pattern = os.path.join(models_dir, f"{user_id}_*.json")
-        files = sorted(glob.glob(pattern), reverse=True)
-        if not files:
-            return None
-        with open(files[0], encoding="utf-8") as f:
-            model = markovify.Text.from_json(f.read())
-        for _ in range(5):
-            sentence = model.make_short_sentence(120)
+        from fun_slesh.parody_engine import generate_phrase, model_exists
+
+        # Для токсичности лучше сначала брать более внятную модель,
+        # а уже потом абсурдную.
+        if model_exists(user_id, "разум"):
+            sentence = generate_phrase(user_id, "разум")
+            if sentence:
+                return sentence
+
+        if model_exists(user_id, "мем"):
+            sentence = generate_phrase(user_id, "мем")
             if sentence:
                 return sentence
     except Exception:
