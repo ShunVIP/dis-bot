@@ -311,7 +311,19 @@ def _pick_meme_lines(text: str, kind: str) -> tuple[str, str]:
 def _get_font(size: int):
     if ImageFont is None:
         return None
-    for candidate in ("arialbd.ttf", "arial.ttf", "segoeuib.ttf"):
+    candidates = (
+        "arialbd.ttf",
+        "arial.ttf",
+        "segoeuib.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    )
+    for candidate in candidates:
         try:
             return ImageFont.truetype(candidate, size=size)
         except Exception:
