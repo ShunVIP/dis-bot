@@ -6,6 +6,7 @@
 - иногда отвечает людям не только на токсичность;
 - реагирует на упоминание бота, ответ на сообщение бота, приветствия и вопросы;
 - не спамит: есть кулдаун по каналу и пользователю;
+- умеет редко и адресно подтроллить человека по его модели, если давно не трогал;
 - настраивается через slash-команды.
 """
 
@@ -100,6 +101,20 @@ PARODY_PREFIXES = [
     "Если уж совсем по-честному, это звучит так:",
     "В версии без фильтров это выглядело бы так:",
     "Беру микрофон и читаю это как надо:",
+]
+
+TROLL_PREFIXES = [
+    "Ловлю тебя на слове:",
+    "Стенограмма твоей души такая:",
+    "Если убрать приличия, получается вот это:",
+    "Ты это сказал, а модель услышала вот так:",
+]
+
+TROLL_FALLBACKS = [
+    "Это сообщение заслуживает отдельного расследования.",
+    "Я ничего не добавлю, тут человек сам себя переиграл.",
+    "Сильный заход. Пахнет легендарной ошибкой.",
+    "Вижу сообщение, вижу хаос, вижу характер.",
 ]
 
 MEME_CAPTIONS = [
@@ -420,6 +435,7 @@ class SocialChat(commands.Cog):
         self._channel_cooldowns: dict[tuple[int, int], datetime] = {}
         self._user_cooldowns: dict[tuple[int, int], datetime] = {}
         self._image_cooldowns: dict[tuple[int, int], datetime] = {}
+        self._troll_cooldowns: dict[tuple[int, int], datetime] = {}
 
     async def _build_fun_reply(self, message: discord.Message, kind: str) -> str:
         user_id = message.author.id
@@ -454,6 +470,28 @@ class SocialChat(commands.Cog):
 
         return _build_reply(kind, message.content)
 
+    async def _build_model_troll_reply(self, message: discord.Message) -> str | None:
+        user_id = message.author.id
+        try:
+            from fun_slesh.parody_engine import generate_phrase, model_exists
+            from fun_slesh.parody_gpt import generate_author_phrase, generate_neuro_phrase, GPT_OK, gpt_model_exists
+
+            phrase = None
+            if model_exists(user_id, "разум"):
+                phrase = await asyncio.to_thread(generate_phrase, user_id, "разум")
+            elif model_exists(user_id, "мем"):
+                phrase = await asyncio.to_thread(generate_phrase, user_id, "мем")
+            elif model_exists(user_id, "автор"):
+                phrase = await asyncio.to_thread(generate_author_phrase, user_id)
+            elif GPT_OK and gpt_model_exists(user_id):
+                phrase = await asyncio.to_thread(generate_neuro_phrase, user_id)
+
+            if phrase:
+                return f"{random.choice(TROLL_PREFIXES)} *{phrase}*"
+        except Exception:
+            pass
+        return random.choice(TROLL_FALLBACKS)
+
     def _channel_ready(self, guild_id: int, channel_id: int) -> bool:
         key = (guild_id, channel_id)
         now = datetime.now(UTC)
@@ -480,6 +518,17 @@ class SocialChat(commands.Cog):
             return False
         self._image_cooldowns[key] = now
         return True
+
+    def _troll_ready(self, guild_id: int, user_id: int) -> bool:
+        key = (guild_id, user_id)
+        now = datetime.now(UTC)
+        last = self._troll_cooldowns.get(key)
+        if last and now - last < timedelta(hours=5):
+            return False
+        return True
+
+    def _mark_troll(self, guild_id: int, user_id: int):
+        self._troll_cooldowns[(guild_id, user_id)] = datetime.now(UTC)
 
     async def _maybe_build_meme(self, message: discord.Message, kind: str) -> discord.File | None:
         if kind not in {"chaos", "ambient", "talk", "direct", "question"}:
@@ -530,6 +579,17 @@ class SocialChat(commands.Cog):
         if not direct_kind:
             roll = random.randint(1, 100)
             if roll > chance_percent:
+                if self._troll_ready(guild_id, message.author.id) and len(message.content.split()) >= 4 and random.random() < 0.18:
+                    try:
+                        troll_reply = await self._build_model_troll_reply(message)
+                        self._mark_troll(guild_id, message.author.id)
+                        await message.reply(
+                            troll_reply,
+                            mention_author=False,
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                    except Exception:
+                        pass
                 return
 
         reply = await self._build_fun_reply(message, kind)
