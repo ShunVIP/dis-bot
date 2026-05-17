@@ -519,13 +519,13 @@ class SocialChat(commands.Cog):
         self._image_cooldowns[key] = now
         return True
 
-    def _troll_ready(self, guild_id: int, user_id: int) -> bool:
+    def _troll_hours_silent(self, guild_id: int, user_id: int) -> float:
         key = (guild_id, user_id)
         now = datetime.now(UTC)
         last = self._troll_cooldowns.get(key)
-        if last and now - last < timedelta(hours=5):
-            return False
-        return True
+        if not last:
+            return 999.0
+        return (now - last).total_seconds() / 3600.0
 
     def _mark_troll(self, guild_id: int, user_id: int):
         self._troll_cooldowns[(guild_id, user_id)] = datetime.now(UTC)
@@ -579,7 +579,15 @@ class SocialChat(commands.Cog):
         if not direct_kind:
             roll = random.randint(1, 100)
             if roll > chance_percent:
-                if self._troll_ready(guild_id, message.author.id) and len(message.content.split()) >= 4 and random.random() < 0.18:
+                hours_silent = self._troll_hours_silent(guild_id, message.author.id)
+                should_troll = False
+                if len(message.content.split()) >= 4:
+                    if hours_silent >= 5:
+                        should_troll = True
+                    elif random.random() < 0.08:
+                        should_troll = True
+
+                if should_troll:
                     try:
                         troll_reply = await self._build_model_troll_reply(message)
                         self._mark_troll(guild_id, message.author.id)
