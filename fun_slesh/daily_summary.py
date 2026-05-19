@@ -267,6 +267,22 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (guild_id, last_week_code),
         ) if _table_exists(conn, "toxicity_weekly") else []
+        top_heroes = _top_rows(
+            conn,
+            """
+            SELECT user_id, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM heroes_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<?
+            GROUP BY user_id
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 5
+            """,
+            (
+                guild_id,
+                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+            ),
+        ) if _table_exists(conn, "heroes_sessions") else []
 
     return {
         "since": since,
@@ -279,6 +295,7 @@ def _get_weekly_stats(guild_id: int) -> dict:
         "top_streaks": top_streaks,
         "top_rep": top_rep,
         "top_toxic": top_toxic,
+        "top_heroes": top_heroes,
         "total_msgs": total_msgs,
         "total_voice_s": total_voice,
     }
@@ -307,6 +324,63 @@ def _format_rank_lines(
         shown = value_formatter(value) if value_formatter else f"{value} {suffix}"
         lines.append(f"{prefix} {_member_name(guild, int(user_id))} — **{shown}**")
     return "\n".join(lines) if lines else "Пока пусто."
+
+
+def _winner_phrase(user_id: int) -> str | None:
+    try:
+        from fun_slesh.parody_engine import generate_phrase, model_exists
+        for quality in ("разум", "мем"):
+            if model_exists(user_id, quality):
+                phrase = generate_phrase(user_id, quality)
+                if phrase:
+                    return phrase
+    except Exception:
+        pass
+    return None
+
+
+def _winner_haiku(display_name: str, categories: list[str]) -> str:
+    joined = ", ".join(categories[:3])
+    return (
+        f"Корона недели.\n"
+        f"{display_name} забрал: {joined}.\n"
+        f"Сервер шлёт салют."
+    )
+
+
+def _build_winner_congrats(guild: discord.Guild, stats: dict) -> str:
+    winners: dict[int, list[str]] = {}
+
+    category_sources = [
+        ("активность", stats["top_msgs"]),
+        ("слова", stats["top_words"]),
+        ("эмодзи", stats["top_emojis"]),
+        ("войс", stats["top_voice"]),
+        ("баланс", stats["top_balance"]),
+        ("серии", stats["top_streaks"]),
+        ("репа", stats["top_rep"]),
+        ("герои", stats["top_heroes"]),
+    ]
+
+    for label, rows in category_sources:
+        if not rows:
+            continue
+        user_id = int(rows[0][0])
+        winners.setdefault(user_id, []).append(label)
+
+    if not winners:
+        return "На прошлой неделе не нашлось чемпионов для поздравления."
+
+    blocks = []
+    for user_id, categories in list(winners.items())[:5]:
+        display = _member_name(guild, user_id)
+        haiku = _winner_haiku(display, categories)
+        phrase = _winner_phrase(user_id)
+        block = f"**{display}** — {', '.join(categories)}\n*{haiku}*"
+        if phrase:
+            block += f"\n> {phrase}"
+        blocks.append(block)
+    return "\n\n".join(blocks)
 
 
 # ── Генерация хокку ───────────────────────────────────────────────────────────
@@ -469,11 +543,18 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
         value=_format_rank_lines(guild, stats["top_voice"], "", value_formatter=_fmt_seconds),
         inline=False,
     )
+    if stats["top_heroes"]:
+        emb.add_field(
+            name="🏰 Топ Heroes за неделю",
+            value=_format_rank_lines(guild, stats["top_heroes"], "", value_formatter=_fmt_seconds),
+            inline=False,
+        )
     emb.add_field(name="💰 Топ баланса", value=_format_rank_lines(guild, stats["top_balance"], "монет"), inline=True)
     emb.add_field(name="🔥 Топ серий", value=_format_rank_lines(guild, stats["top_streaks"], "дн."), inline=True)
     emb.add_field(name="⭐ Топ репы", value=_format_rank_lines(guild, stats["top_rep"], "репы"), inline=False)
     if stats["top_toxic"]:
         emb.add_field(name="☢️ Топ токсиков", value=_format_rank_lines(guild, stats["top_toxic"], "раз"), inline=False)
+    emb.add_field(name="🎐 Поздравления чемпионам", value=_build_winner_congrats(guild, stats), inline=False)
     emb.set_footer(text="Если хочешь тише — можно вынести этот дайджест в отдельный канал.")
     return emb
 

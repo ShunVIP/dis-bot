@@ -8,13 +8,17 @@
 
 from __future__ import annotations
 
+import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 UTC = timezone.utc
-HOUR = timedelta(hours=1)
+MSK = ZoneInfo("Europe/Moscow")
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 
 HEROES_PATTERNS = (
     "heroes of might and magic",
@@ -35,44 +39,70 @@ HEROES_PATTERNS = (
     "heroes 7",
 )
 
-GENERIC_TROLLS = [
-    "🎺 <@{user_id}> снова ушёл двигать пиксельных рыцарей по клеточкам. Традиции уважаю.",
-    "🪦 <@{user_id}> опять запускает Heroes. Современные игры снова проиграли некромантии.",
-    "🏰 <@{user_id}> выбрал Heroes. Ещё один вечер, когда инициативу считают важнее сна.",
-    "🐴 <@{user_id}> снова ускакал в Heroes. Если пропадёт, ищите его между таверной и шахтой руды.",
-    "📜 <@{user_id}> включил Heroes. Значит, ближайшие часы будут крики про идеальный старт и сломанный баланс.",
-    "🧙 <@{user_id}> снова открыл Heroes. Где-то тихо заплакала ещё одна современная AAA-игра.",
-    "⛏️ <@{user_id}> ушёл добывать руду в Heroes. Человек буквально выбрал экономику 1999 года.",
-    "🐉 <@{user_id}> вернулся в Heroes. Нормальные люди отдыхают, этот считает мувпойнты.",
-    "🎲 <@{user_id}> снова в Heroes. Сейчас начнётся священная война за лучший замок и правильный билд героя.",
-    "🏹 <@{user_id}> запустил Heroes. Похоже, вечер официально посвящён гремлинам, скелетам и ошибкам маршрута.",
+GENERIC_START_HAIKUS = [
+    "Старые замки.\n<@{user_id}> снова с нами.\nНочь ушла в Heroes.",
+    "Ход начат тихо.\n<@{user_id}> ищет рудник.\nСон отложен прочь.",
+    "Пыль на картах спит.\n<@{user_id}> будит скелетов.\nВечер потерян.",
+    "Башни ждут приказ.\n<@{user_id}> выбрал клетку.\nМир стал пошагов.",
 ]
 
-OLDEN_ERA_TROLLS = [
-    "🕯️ <@{user_id}> запустил Olden Era. Красиво, конечно, но душой он всё равно в тройке.",
-    "⚔️ <@{user_id}> ушёл в Olden Era. Проверяет, можно ли сделать новый Heroes и не разбудить древние споры.",
-    "🏹 <@{user_id}> играет в Olden Era. Исторический момент: ностальгия официально получила современную обёртку.",
-    "📯 <@{user_id}> открыл Olden Era. Ставлю на то, что через 10 минут он уже сравнивает её с Heroes III.",
-    "🗿 <@{user_id}> включил Olden Era. Посмотрим, сколько минут пройдёт до фразы «а в тройке было лучше».",
-    "🧾 <@{user_id}> ушёл в Olden Era. Похоже, сегодня опять будет аудит чужой ностальгии.",
-    "🏰 <@{user_id}> снова тестирует Olden Era. Сервер ждёт экспертный вердикт в жанре «норм, но дух не тот».",
+OLDEN_START_HAIKUS = [
+    "Новая эра.\n<@{user_id}> снова проверит.\nТройка ждёт судей.",
+    "Старый дух шуршит.\n<@{user_id}> в Olden Era.\nСпоры неизбежны.",
+    "Ностальгии звон.\n<@{user_id}> ищет чудо.\nТройка смотрит вдаль.",
 ]
 
-GENERIC_HOURLY_TROLLS = [
-    "⏰ <@{user_id}> уже **{hours} ч.** сидит в Heroes. Это уже не матч, это образ жизни.",
-    "📉 **{hours} ч.** в Heroes у <@{user_id}>. Производительность офлайн, тактика онлайн.",
-    "🪦 <@{user_id}> всё ещё в Heroes уже **{hours} ч.**. Семья, работа, солнечный свет проигрывают.",
-    "🛏️ **{hours} ч.** в Heroes. <@{user_id}> официально перешёл в пошаговый режим жизни.",
-    "📚 <@{user_id}> уже **{hours} ч.** доказывает, что один ход может длиться бесконечно.",
-    "💀 Heroes держит <@{user_id}> уже **{hours} ч.** Если что, это уже полноценная экспедиция.",
+GENERIC_END_HAIKUS = [
+    "Ход окончен, тишь.\n<@{user_id}> вышел из Heroes.\nПробыл {duration}.",
+    "Замок опустел.\n<@{user_id}> вернулся к людям.\nСессия: {duration}.",
+    "Последний мувпойнт.\n<@{user_id}> покинул карту.\nИгра длилась {duration}.",
 ]
 
-OLDEN_ERA_HOURLY_TROLLS = [
-    "⏰ <@{user_id}> уже **{hours} ч.** в Olden Era. Рецензия явно пишется кровью и ностальгией.",
-    "🧓 **{hours} ч.** в Olden Era у <@{user_id}>. Где-то рядом уже созрел новый тезис про Heroes III.",
-    "📯 <@{user_id}> не выходит из Olden Era уже **{hours} ч.**. Экспертиза по древним спорам набирает обороты.",
-    "🪦 Olden Era держит <@{user_id}> уже **{hours} ч.** Ещё немного и он начнёт сравнивать анимации покадрово.",
+OLDEN_END_HAIKUS = [
+    "Эра стихает.\n<@{user_id}> вышел из споров.\nПробыл {duration}.",
+    "Новая эра.\n<@{user_id}> вернулся в чат.\nСессия: {duration}.",
 ]
+
+
+def _ensure_tables():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS heroes_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                game_name TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                seconds INTEGER NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
+def get_last_week_heroes_top(guild_id: int) -> list[tuple[int, int]]:
+    today = datetime.now(MSK).date()
+    start_this_week = today - timedelta(days=today.weekday())
+    start_prev_week = start_this_week - timedelta(days=7)
+    start_prev_week_utc = datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat()
+    start_this_week_utc = datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT user_id, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM heroes_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<?
+            GROUP BY user_id
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC
+            LIMIT 5
+            """,
+            (guild_id, start_prev_week_utc, start_this_week_utc),
+        ).fetchall()
+    return [(int(user_id), int(total_seconds)) for user_id, total_seconds in rows]
 
 
 def _normalize_name(name: str) -> str:
@@ -133,76 +163,62 @@ class HeroesTroll(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._active_sessions: dict[tuple[int, int], dict[str, object]] = {}
-        self._hourly_presence_check.start()
+        _ensure_tables()
 
     def cog_unload(self):
-        self._hourly_presence_check.cancel()
+        pass
 
     def _remember_session(self, guild_id: int, user_id: int, game_name: str):
         now = datetime.now(UTC)
         self._active_sessions[(guild_id, user_id)] = {
             "game_name": game_name,
             "started_at": now,
-            "last_hourly_hours": 0,
         }
 
-    def _drop_session(self, guild_id: int, user_id: int):
-        self._active_sessions.pop((guild_id, user_id), None)
+    def _pop_session(self, guild_id: int, user_id: int):
+        return self._active_sessions.pop((guild_id, user_id), None)
 
-    def _pick_message(self, user_id: int, game_name: str, pool: list[str], *, hours: int | None = None) -> str:
-        base = pool[hash((user_id, game_name, hours or 0, datetime.now(UTC).hour)) % len(pool)]
-        payload = {"user_id": user_id}
-        if hours is not None:
-            payload["hours"] = hours
+    def _pick_message(self, user_id: int, game_name: str, pool: list[str], *, duration: str | None = None) -> str:
+        base = pool[hash((user_id, game_name, datetime.now(UTC).hour, duration or "")) % len(pool)]
+        payload = {"user_id": user_id, "duration": duration or "недолго"}
         return base.format(**payload)
 
-    async def _send_troll(self, guild: discord.Guild, user_id: int, game_name: str, *, hours: int | None = None):
+    async def _send_troll(self, guild: discord.Guild, user_id: int, game_name: str, *, duration: str | None = None, ended: bool = False):
         channel = _pick_channel(guild)
         if channel is None:
             return
         olden = _is_olden_era(game_name)
-        if hours is None:
-            pool = OLDEN_ERA_TROLLS if olden else GENERIC_TROLLS
+        if ended:
+            pool = OLDEN_END_HAIKUS if olden else GENERIC_END_HAIKUS
         else:
-            pool = OLDEN_ERA_HOURLY_TROLLS if olden else GENERIC_HOURLY_TROLLS
-        message = self._pick_message(user_id, game_name, pool, hours=hours)
+            pool = OLDEN_START_HAIKUS if olden else GENERIC_START_HAIKUS
+        message = self._pick_message(user_id, game_name, pool, duration=duration)
         try:
             await channel.send(message, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
         except Exception:
             pass
 
-    @tasks.loop(minutes=10)
-    async def _hourly_presence_check(self):
-        now = datetime.now(UTC)
-        for guild in self.bot.guilds:
-            for member in guild.members:
-                if member.bot:
-                    continue
-                active = _find_active_heroes(_extract_game_names(member.activities))
-                key = (guild.id, member.id)
-                if not active:
-                    self._drop_session(guild.id, member.id)
-                    continue
+    def _save_finished_session(self, guild_id: int, user_id: int, game_name: str, started_at: datetime, ended_at: datetime):
+        seconds = int((ended_at - started_at).total_seconds())
+        if seconds <= 0:
+            return
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO heroes_sessions(guild_id, user_id, game_name, started_at, ended_at, seconds)
+                VALUES(?,?,?,?,?,?)
+                """,
+                (guild_id, user_id, game_name, started_at.isoformat(), ended_at.isoformat(), seconds),
+            )
+            conn.commit()
 
-                session = self._active_sessions.get(key)
-                if session is None:
-                    self._remember_session(guild.id, member.id, active)
-                    continue
-
-                session["game_name"] = active
-                started_at = session["started_at"]
-                hours = int((now - started_at) // HOUR)
-                if hours <= 0:
-                    continue
-                if hours <= int(session.get("last_hourly_hours", 0)):
-                    continue
-
-                session["last_hourly_hours"] = hours
-                await self._send_troll(guild, member.id, active, hours=hours)
-
-    @_hourly_presence_check.before_loop
-    async def _before_hourly_presence_check(self):
-        await self.bot.wait_until_ready()
+    @staticmethod
+    def _format_duration(seconds: int) -> str:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        if hours:
+            return f"{hours}ч {minutes}м"
+        return f"{minutes}м"
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
@@ -212,14 +228,23 @@ class HeroesTroll(commands.Cog):
         before_names = _extract_game_names(before.activities)
         after_names = _extract_game_names(after.activities)
         started = _find_started_heroes(before_names, after_names)
+        active_before = _find_active_heroes(before_names)
         active_after = _find_active_heroes(after_names)
+        key = (after.guild.id, after.id)
 
-        if not active_after:
-            self._drop_session(after.guild.id, after.id)
+        if active_before and not active_after:
+            session = self._pop_session(after.guild.id, after.id)
+            if session:
+                started_at = session["started_at"]
+                game_name = str(session["game_name"])
+                ended_at = datetime.now(UTC)
+                self._save_finished_session(after.guild.id, after.id, game_name, started_at, ended_at)
+                duration = self._format_duration(int((ended_at - started_at).total_seconds()))
+                await self._send_troll(after.guild, after.id, game_name, duration=duration, ended=True)
             return
 
         if not started:
-            if (after.guild.id, after.id) not in self._active_sessions:
+            if key not in self._active_sessions and active_after:
                 self._remember_session(after.guild.id, after.id, active_after)
             return
         self._remember_session(after.guild.id, after.id, started)

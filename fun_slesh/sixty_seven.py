@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import html
 import random
 import re
 from datetime import datetime, timedelta, timezone
@@ -20,26 +21,59 @@ from discord.ext import commands
 UTC = timezone.utc
 GIPHY_EXPLORE_URL = "https://giphy.com/explore/67"
 TRIGGER_RE = re.compile(r"(?<!\d)(67)(?!\d)|\bsix\s*seven\b", re.I)
+MEDIA_RE = re.compile(r"https://media\d*\.giphy\.com/media/([A-Za-z0-9]+)/giphy(?:[-\w]*)?\.(?:gif|webp)")
+HREF_ID_RE = re.compile(r"/gifs/[^\"' ]*?-([A-Za-z0-9]+)(?:[/?#]|$)")
 
 FALLBACK_GIFS = [
-    "https://giphy.com/explore/67",
+    "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcXZiYWJqem05bm9qa3RqOWQ1eDZnMmdpNHJzMHcyNTR4OTdiOXp2diZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l3q2K5jinAlChoCLS/giphy.gif",
+    "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdmpnZXQ5M2JsbDNjZXQ1eTR5Mm83aGdoemI4cnM5aWx2eG9oM3gxeCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/1zSz5MVw4zKg0/giphy.gif",
+    "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExa2N0ZjRucnV0Zjcycm90eWNsN2NtaHFydDdhb2ZlNXRuMXYwYXd3YyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3orieLeZL5kyNqiLm/giphy.gif",
 ]
 
 
-def _extract_giphy_links(html: str) -> list[str]:
-    soup = BeautifulSoup(html, "html.parser")
+def _normalize_media_url(gif_id: str) -> str:
+    return f"https://media.giphy.com/media/{gif_id}/giphy.gif"
+
+
+def _extract_giphy_links(page_html: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        if not href.startswith("/gifs/"):
+    for gif_id in MEDIA_RE.findall(page_html):
+        url = _normalize_media_url(gif_id)
+        if url not in seen:
+            seen.add(url)
+            found.append(url)
+
+    if found:
+        return found
+
+    for gif_id in HREF_ID_RE.findall(page_html):
+        url = _normalize_media_url(gif_id)
+        if url not in seen:
+            seen.add(url)
+            found.append(url)
+
+    if found:
+        return found
+
+    soup = BeautifulSoup(page_html, "html.parser")
+    for script in soup.find_all("script"):
+        text = script.string or script.get_text(" ", strip=False)
+        if not text:
             continue
-        full = "https://giphy.com" + href.split("?")[0]
-        if full in seen:
-            continue
-        seen.add(full)
-        found.append(full)
+        text = html.unescape(text)
+        for gif_id in MEDIA_RE.findall(text):
+            url = _normalize_media_url(gif_id)
+            if url not in seen:
+                seen.add(url)
+                found.append(url)
+        for gif_id in HREF_ID_RE.findall(text):
+            url = _normalize_media_url(gif_id)
+            if url not in seen:
+                seen.add(url)
+                found.append(url)
+
     return found
 
 
@@ -76,9 +110,10 @@ class SixtySeven(commands.Cog):
                         html = await response.text()
                         links = _extract_giphy_links(html)
                         if links:
-                            self._gif_cache = links
+                            random.shuffle(links)
+                            self._gif_cache = links[:30]
                             self._gif_cache_fetched_at = now
-                            return links
+                            return self._gif_cache
         except Exception:
             pass
 
@@ -110,7 +145,12 @@ class SixtySeven(commands.Cog):
             return
 
         try:
-            await message.reply(gif_url, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+            await message.reply(
+                gif_url,
+                mention_author=False,
+                suppress_embeds=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         except Exception:
             pass
 
