@@ -11,8 +11,6 @@
   /итог_дня_канал      — (Админ) канал для авто-постинга в полночь
   /итог_дня_вкл        — (Админ) включить/выключить авто-постинг
   /итог_недели         — показать еженедельный дайджест прямо сейчас
-  /итог_недели_канал   — (Админ) канал для авто-постинга по понедельникам
-  /итог_недели_вкл     — (Админ) включить/выключить еженедельный дайджест
 """
 
 import os, sqlite3, random, asyncio
@@ -58,11 +56,6 @@ def _ensure_tables():
                 guild_id  INTEGER PRIMARY KEY,
                 channel_id INTEGER,
                 enabled   INTEGER NOT NULL DEFAULT 1
-            );
-            CREATE TABLE IF NOT EXISTS weekly_summary_config (
-                guild_id   INTEGER PRIMARY KEY,
-                channel_id INTEGER,
-                enabled    INTEGER NOT NULL DEFAULT 1
             );
         """)
 
@@ -562,7 +555,7 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
 async def _post_weekly_summary(bot: commands.Bot):
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT guild_id, channel_id FROM weekly_summary_config WHERE enabled=1 AND channel_id IS NOT NULL"
+            "SELECT guild_id, channel_id FROM daily_summary_config WHERE enabled=1 AND channel_id IS NOT NULL"
         ).fetchall()
 
     for guild_id, ch_id in rows:
@@ -647,41 +640,6 @@ class DailySummary(commands.Cog):
         stats = _get_weekly_stats(interaction.guild.id)
         emb = await _build_weekly_embed(interaction.guild, stats)
         await interaction.followup.send(embed=emb)
-
-    @app_commands.command(name="итог_недели_канал",
-                          description="(Админ) Канал для авто-постинга еженедельного дайджеста")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def итог_недели_канал(self, interaction: discord.Interaction,
-                                канал: discord.TextChannel):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO weekly_summary_config(guild_id, channel_id, enabled)"
-                " VALUES(?,?,1)"
-                " ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id, enabled=1",
-                (interaction.guild.id, канал.id)
-            )
-        await interaction.response.send_message(
-            f"✅ Итог недели будет постить в {канал.mention} каждый понедельник в 00:00 МСК.",
-            ephemeral=True
-        )
-
-    @app_commands.command(name="итог_недели_вкл",
-                          description="(Админ) Включить/выключить еженедельный дайджест")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def итог_недели_вкл(self, interaction: discord.Interaction,
-                              включить: bool):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO weekly_summary_config(guild_id, enabled) VALUES(?,?)"
-                " ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
-                (interaction.guild.id, int(включить))
-            )
-        status = "✅ Включён" if включить else "⛔ Выключен"
-        await interaction.response.send_message(
-            f"{status} еженедельный дайджест топов.",
-            ephemeral=True
-        )
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(DailySummary(bot))
