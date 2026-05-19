@@ -1,263 +1,348 @@
 # -*- coding: utf-8 -*-
-# fun_slesh/menu.py
 """
-/меню и /меню_админ — интерактивный справочник команд.
-Select Menu вместо кнопок — нет лимита на количество категорий.
+/меню и /меню_админ — живой каталог slash-команд.
+
+В отличие от старого ручного списка:
+- подтягивает реальные команды из bot.tree;
+- показывает подкоманды групп вроде `токсичность топ`;
+- не устаревает после добавления новых модулей;
+- делит команды на категории по правилам, а не по захардкоженному списку.
 """
+
+from __future__ import annotations
+
+from collections import OrderedDict
+from dataclasses import dataclass
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-# ─── Пользовательские категории ───────────────────────────────────────────────
 
-CATEGORIES = {
-    "🎭 Пародия": {
-        "color": discord.Color.purple(),
-        "emoji": "🎭",
-        "commands": [
-            ("/пародия",            "Фраза в стиле пользователя (Мем / Разум / Автор / Нейро)"),
-            ("/батл",               "7 раундов между двумя пользователями"),
-            ("/коллаж",             "Смешать стиль двух пользователей"),
-            ("/эпоха",              "Фраза из определённого года или промежутка"),
-            ("/тема",               "Фраза по ключевому слову"),
-            ("/мем_фраза",          "Короткая мем-фраза ЗАГЛАВНЫМИ — лучшая из N"),
-            ("/профиль_стиля",      "Паспорт стиля речи пользователя"),
-        ]
-    },
-    "📊 Статистика": {
-        "color": discord.Color.blurple(),
-        "emoji": "📊",
-        "commands": [
-            ("/топ_актив",          "Топ по количеству сообщений за N дней"),
-            ("/топ_слова",          "Топ по количеству слов за N дней"),
-            ("/топ_эмодзи",         "Топ по использованию эмодзи за N дней"),
-            ("/voice_топ",          "Топ по времени в голосовых каналах"),
-            ("/voice_я",            "Моя статистика по голосу"),
-        ]
-    },
-    "⭐ Репутация": {
-        "color": discord.Color.gold(),
-        "emoji": "⭐",
-        "commands": [
-            ("/репа",               "Дать +1 репутацию участнику (раз в день)"),
-            ("/антирепа",           "Снизить репутацию участнику (раз в день)"),
-            ("/топ_репа",           "Топ репутации на сервере"),
-            ("/история_репы",       "Кто и когда давал репутацию"),
-            ("/репа_роли",          "Пороги репутации для получения роли"),
-            ("/моя_репа_роль",      "Моя текущая роль за репутацию"),
-            ("/мое_настроение",     "Оценить своё настроение от 1 до 10"),
-            ("/настроение_сегодня", "Настроение участников за сегодня"),
-        ]
-    },
-    "🎂 Дни рождения": {
-        "color": discord.Color.pink(),
-        "emoji": "🎂",
-        "commands": [
-            ("/др",                 "Установить свой день рождения (ДД.ММ)"),
-            ("/д-р",                "Удалить свой день рождения"),
-            ("/когда_др",           "Узнать дату рождения пользователя"),
-            ("/все_др",             "Все дни рождения на сервере"),
-        ]
-    },
-    "💰 Экономика": {
-        "color": discord.Color.green(),
-        "emoji": "💰",
-        "commands": [
-            ("/дэйлик",             "Ежедневная награда монет"),
-            ("/баланс",             "Баланс монет (своё или чужое)"),
-            ("/перевод",            "Передать монеты другому участнику"),
-            ("/магазин",            "Магазин ролей за монеты"),
-            ("/купить_роль",        "Купить роль из магазина"),
-            ("/топ_баланс",         "Топ богатейших на сервере"),
-            ("/топ_серии",          "Топ по сериям дэйлика"),
-            ("/налог_статус",       "Текущие настройки налога"),
-        ]
-    },
-    "🎮 Игры": {
-        "color": discord.Color.red(),
-        "emoji": "🎮",
-        "commands": [
-            ("/кнб",                "Камень-ножницы-бумага с ботом"),
-            ("/кнб_дуэль",          "PvP дуэль КНБ"),
-            ("/кнб_ход",            "Сделать ход в дуэли"),
-            ("/кнб_отмена",         "Отменить свой вызов"),
-            ("/угадай",             "Угадай число — выиграй монеты"),
-            ("/виселица",           "Соло виселица (бот загадывает или своё слово)"),
-            ("/виселица_старт",     "Мульти виселица — загадать слово для сервера"),
-            ("/виселица_буква",     "Угадать букву в мульти виселице"),
-            ("/бж",                 "Блэкджек против бота со ставкой"),
-            ("/бж_дуэль",           "Блэкджек PvP — кто ближе к 21"),
-            ("/шар",                "Магический шар — ответ на вопрос"),
-        ]
-    },
-    "⏰ Напоминания": {
-        "color": discord.Color.teal(),
-        "emoji": "⏰",
-        "commands": [
-            ("/напоминания создать", "Разовое или повторяющееся напоминание (роли, пользователи)"),
-            ("/напоминания мои",     "Активные напоминания с обратным отсчётом"),
-            ("/напоминания удалить", "Удалить напоминание по ID"),
-        ]
-    },
-    "🎲 Рандом": {
-        "color": discord.Color.og_blurple(),
-        "emoji": "🎲",
-        "commands": [
-            ("/монетка",            "Орёл или решка"),
-            ("/кубик",              "Бросить кубик"),
-            ("/анекдот",            "Случайный анекдот"),
-            ("/котик",              "Случайное фото котика"),
-            ("/мем",                "Случайный мем"),
-        ]
-    },
-    "🔍 Поиск": {
-        "color": discord.Color.from_rgb(100, 180, 255),
-        "emoji": "🔍",
-        "commands": [
-            ("/вики",               "Поиск в Википедии"),
-            ("/пабмед",             "Поиск в PubMed"),
-            ("/wwm_search",         "Поиск в базе знаний WWM"),
-            ("/wwm_random",         "Случайная статья или гайд по WWM"),
-        ]
-    },
-    "ℹ️ Информация": {
-        "color": discord.Color.light_grey(),
-        "emoji": "ℹ️",
-        "commands": [
-            ("/ачивки",             "Мои достижения"),
-            ("/активные_роли",      "Мои активные роли на сервере"),
-            ("/кто",                "Информация об участнике"),
-            ("/сервер",             "Информация о сервере"),
-            ("/пинг",               "Задержка бота"),
-            ("/награды_статус",     "Настройки пассивных наград за активность"),
-        ]
-    },
-    "🎮 Steam": {
-        "color": discord.Color.dark_blue(),
-        "emoji": "🎮",
-        "commands": [
-            ("/стим_привязать",     "Привязать Steam профиль"),
-            ("/стим_отвязать",      "Отвязать Steam профиль"),
-            ("/стим",               "Статистика Steam профиля"),
-            ("/стим_вишлист",       "Вишлист Steam участника"),
-            ("/стим_общие",         "Общие игры с другим участником"),
-        ]
-    },
-    "☢️ Активность": {
-        "color": discord.Color.orange(),
-        "emoji": "☢️",
-        "commands": [
-            ("/токсичность топ",    "Топ токсичных участников за неделю"),
-            ("/итог_дня",           "Итог дня с хокку и статистикой"),
-            ("/войс_роли статус",   "Текущие авто-роли голосовых каналов"),
-        ]
-    },
+@dataclass(frozen=True)
+class CategoryStyle:
+    emoji: str
+    color: discord.Color
+
+
+CATEGORY_STYLES: dict[str, CategoryStyle] = {
+    "🧭 Навигация": CategoryStyle("🧭", discord.Color.light_grey()),
+    "🎭 Пародия": CategoryStyle("🎭", discord.Color.purple()),
+    "📊 Статистика": CategoryStyle("📊", discord.Color.blurple()),
+    "⭐ Репутация": CategoryStyle("⭐", discord.Color.gold()),
+    "🎂 Дни рождения": CategoryStyle("🎂", discord.Color.pink()),
+    "💰 Экономика": CategoryStyle("💰", discord.Color.green()),
+    "🎮 Игры": CategoryStyle("🎮", discord.Color.red()),
+    "⏰ Напоминания": CategoryStyle("⏰", discord.Color.teal()),
+    "🎲 Рандом": CategoryStyle("🎲", discord.Color.og_blurple()),
+    "🔍 Поиск": CategoryStyle("🔍", discord.Color.from_rgb(100, 180, 255)),
+    "ℹ️ Информация": CategoryStyle("ℹ️", discord.Color.light_grey()),
+    "🎮 Steam": CategoryStyle("🎮", discord.Color.dark_blue()),
+    "☢️ Активность": CategoryStyle("☢️", discord.Color.orange()),
+    "💬 Болтовня": CategoryStyle("💬", discord.Color.from_rgb(225, 111, 255)),
+    "🛡️ Админ": CategoryStyle("🛡️", discord.Color.dark_gold()),
+    "🧩 Прочее": CategoryStyle("🧩", discord.Color.dark_grey()),
 }
 
-ADMIN_CATEGORIES = {
-    "🎭 Пародия (адм)": {
-        "color": discord.Color.purple(),
-        "emoji": "🎭",
-        "commands": [
-            ("/дообучить",              "Обучить модели: Markovify / Persona, GPT защищён на VPS"),
-            ("/профилактика",           "Полный цикл, по умолчанию защищён от запуска на VPS"),
-            ("/собрать_сообщения",      "Собрать сообщения из всех каналов"),
-            ("/сбросить_чекпоинты",     "Перечитать все каналы с начала"),
-            ("/модели_статус",          "Статус обученных моделей"),
-            ("/список_пользователей",   "Все пользователи в базе"),
-            ("/индекс_сообщений",       "Индексация истории канала батчами"),
-        ]
-    },
-    "⚙️ Фильтры пародии": {
-        "color": discord.Color.dark_grey(),
-        "emoji": "⚙️",
-        "commands": [
-            ("/фильтр_канал_добавить",  "Исключить канал из сбора сообщений"),
-            ("/фильтр_канал_убрать",    "Вернуть канал в сбор"),
-            ("/фильтр_слово_блок",      "Полностью убрать слово из профиля стиля"),
-            ("/фильтр_слово_понизить",  "Снизить приоритет слова (выбор %)"),
-            ("/фильтр_слово_убрать",    "Убрать слово из любого фильтра"),
-            ("/фильтр_список",          "Показать все активные фильтры"),
-        ]
-    },
-    "🎂 Дни рождения (адм)": {
-        "color": discord.Color.pink(),
-        "emoji": "🎂",
-        "commands": [
-            ("/др_ад",                  "Установить день рождения другому пользователю"),
-            ("/д-р_ад",                 "Удалить день рождения пользователя"),
-        ]
-    },
-    "🛡️ Роли и порядок": {
-        "color": discord.Color.dark_blue(),
-        "emoji": "🛡️",
-        "commands": [
-            ("/выдать_роль",            "Выдать роль участнику"),
-            ("/очистить_сироты",        "Удалить роли без участников"),
-            ("/магазин_добавить",       "Добавить роль в магазин"),
-            ("/магазин_убрать",         "Убрать роль из магазина"),
-            ("/штраф",                  "Оштрафовать участника"),
-            ("/налог_настроить",        "Включить/выключить налог"),
-            ("/награды_настроить",      "Настроить монеты/репу за активность"),
-            ("/репа_роль_добавить",     "Добавить порог репы для роли"),
-            ("/репа_роль_убрать",       "Убрать порог репы"),
-            ("/репа_роль_постоянная",   "Сделать репа-роль участника постоянной"),
-            ("/репа_роль_изменить",     "Изменить порог или метку уровня"),
-            ("/репа_роли_вкл",          "Включить / выключить систему репа-ролей"),
-        ]
-    },
-    "⚙️ Система": {
-        "color": discord.Color.greyple(),
-        "emoji": "⚙️",
-        "commands": [
-            ("/токсичность вкл",        "Включить/выключить детектор токсичности"),
-            ("/токсичность порог",      "Уровень чувствительности детектора"),
-            ("/токсичность канал",      "Каналы мониторинга токсичности"),
-            ("/итог_дня_канал",         "Канал для авто-постинга итога дня"),
-            ("/итог_дня_вкл",           "Включить/выключить авто-постинг итога"),
-            ("/войс_роли вкл",          "Включить/выключить авто-роли войса"),
-            ("/релизы канал",           "Канал уведомлений о релизах/скидках Steam"),
-            ("/релизы проверить",       "Проверить вишлисты Steam прямо сейчас"),
-        ]
-    },
+CATEGORY_ORDER = [
+    "🧭 Навигация",
+    "🎭 Пародия",
+    "💬 Болтовня",
+    "☢️ Активность",
+    "📊 Статистика",
+    "⭐ Репутация",
+    "💰 Экономика",
+    "🎮 Игры",
+    "🎮 Steam",
+    "⏰ Напоминания",
+    "🔍 Поиск",
+    "🎲 Рандом",
+    "🎂 Дни рождения",
+    "ℹ️ Информация",
+    "🛡️ Админ",
+    "🧩 Прочее",
+]
+
+CATEGORY_SUMMARIES = {
+    "🧭 Навигация": "Главные входные точки и каталог бота.",
+    "🎭 Пародия": "Фразы, батлы, стили, коллажи и обучение моделей.",
+    "💬 Болтовня": "Настройки живого общения и внезапных ответов бота.",
+    "☢️ Активность": "Токсичность, войс-роли, сводки, игровые реакции и мем-триггеры.",
+    "📊 Статистика": "Сообщения, слова, эмодзи, голос и награды.",
+    "⭐ Репутация": "Репа, настроение и роль за репутацию.",
+    "💰 Экономика": "Монеты, дэйлик, переводы, магазин и баланс.",
+    "🎮 Игры": "КНБ, виселица, угадай число и блэкджек.",
+    "🎮 Steam": "Привязка Steam, вишлист, общие игры и релизы.",
+    "⏰ Напоминания": "Создание, просмотр и удаление напоминаний.",
+    "🔍 Поиск": "Вики, PubMed и поиск по Where Winds Meet.",
+    "🎲 Рандом": "Монетка, шар, анекдоты, котики, мемы и опросы.",
+    "🎂 Дни рождения": "Установка, просмотр и админ-управление ДР.",
+    "ℹ️ Информация": "Пинг, пользователь, сервер и ачивки.",
+    "🛡️ Админ": "Команды обслуживания, настройки и ручные переключатели.",
+    "🧩 Прочее": "Редкие или пока неразобранные команды.",
 }
 
+ADMIN_ROOTS = {
+    "дообучить",
+    "профилактика",
+    "индекс_сообщений",
+    "др_ад",
+    "д-р_ад",
+    "выдать_роль",
+    "очистить_сироты",
+    "штраф",
+    "налог_настроить",
+    "магазин_добавить",
+    "магазин_убрать",
+    "награды_настроить",
+    "репа_роль_добавить",
+    "репа_роль_убрать",
+    "репа_роль_постоянная",
+    "репа_роль_изменить",
+    "репа_роли_вкл",
+    "итог_дня_канал",
+    "итог_дня_вкл",
+}
 
-# ─── Embed ────────────────────────────────────────────────────────────────────
+INFO_COMMANDS = {"ачивки", "кто", "сервер", "пинг"}
+RANDOM_COMMANDS = {"монетка", "шар", "кубик", "анекдот", "котик", "опрос", "мем"}
+SEARCH_COMMANDS = {"вики", "пабмед", "wwm_search", "wwm_random"}
+STATS_COMMANDS = {"топ_актив", "топ_слова", "топ_эмодзи", "voice_топ", "voice_я", "награды_статус"}
+ECON_COMMANDS = {"баланс", "дэйлик", "перевод", "налог_статус", "магазин", "купить_роль", "топ_серии", "топ_баланс"}
+GAME_COMMANDS = {"кнб", "кнб_дуэль", "кнб_ход", "кнб_отмена", "угадай", "виселица", "виселица_старт", "виселица_буква", "бж", "бж_дуэль"}
+REP_COMMANDS = {"репа", "антирепа", "топ_репа", "история_репы", "мое_настроение", "настроение_сегодня", "репа_роли", "моя_репа_роль"}
+BIRTHDAY_COMMANDS = {"др", "д-р", "все_др", "когда_др"}
+PARODY_COMMANDS = {"пародия", "батл", "коллаж", "эпоха", "тема", "мем_фраза", "профиль_стиля", "модели_статус", "список_пользователей", "дообучить", "профилактика"}
+STEAM_ROOTS = {"стим_привязать", "стим_отвязать", "стим", "стим_вишлист", "стим_общие", "релизы"}
+ACTIVITY_ROOTS = {"токсичность", "войс_роли", "итог_дня", "heroes_troll", "sixty_seven"}
+REMINDER_ROOTS = {"напоминания"}
+CHAT_ROOTS = {"болтовня"}
+MENU_ROOTS = {"меню", "меню_админ"}
 
-def _build_embed(category: str, cmd_ids: dict, categories: dict) -> discord.Embed:
-    data = categories[category]
-    emb  = discord.Embed(title=category, color=data["color"])
+
+def _has_admin_permission_check(cmd: app_commands.Command) -> bool:
+    for check in getattr(cmd, "checks", []):
+        for cell in getattr(check, "__closure__", []) or []:
+            content = getattr(cell, "cell_contents", None)
+            if isinstance(content, dict) and content.get("administrator") is True:
+                return True
+    return False
+
+
+def _is_admin_command(cmd: app_commands.Command, qualified_name: str) -> bool:
+    root = qualified_name.split()[0]
+    if root in ADMIN_ROOTS:
+        return True
+    if _has_admin_permission_check(cmd):
+        return True
+
+    description = (cmd.description or "").strip().lower()
+    return description.startswith("(админ)")
+
+
+def _category_for_command(qualified_name: str, module_name: str) -> str:
+    root = qualified_name.split()[0]
+
+    if root in MENU_ROOTS:
+        return "🧭 Навигация"
+    if root in CHAT_ROOTS:
+        return "💬 Болтовня"
+    if root in REMINDER_ROOTS:
+        return "⏰ Напоминания"
+    if root in SEARCH_COMMANDS or module_name in {"fun_slesh.ai_tools", "fun_slesh.wwm_search_cog"}:
+        return "🔍 Поиск"
+    if root in STEAM_ROOTS or module_name == "fun_slesh.steam":
+        return "🎮 Steam"
+    if root in PARODY_COMMANDS or module_name.startswith("fun_slesh.parody_"):
+        return "🎭 Пародия"
+    if root in STATS_COMMANDS or module_name == "fun_slesh.message_and_voice_stats":
+        return "📊 Статистика"
+    if root in REP_COMMANDS or module_name in {"fun_slesh.rep_and_mood", "fun_slesh.rep_roles"}:
+        return "⭐ Репутация"
+    if root in BIRTHDAY_COMMANDS or module_name == "fun_slesh.birthday":
+        return "🎂 Дни рождения"
+    if root in ECON_COMMANDS or module_name == "fun_slesh.daily":
+        return "💰 Экономика"
+    if root in GAME_COMMANDS or module_name == "fun_slesh.games":
+        return "🎮 Игры"
+    if root in RANDOM_COMMANDS:
+        return "🎲 Рандом"
+    if root in INFO_COMMANDS or module_name in {"fun_slesh.achievements_engine", "fun_slesh.test_hello"}:
+        return "ℹ️ Информация"
+    if root in ACTIVITY_ROOTS or module_name in {"fun_slesh.toxicity", "fun_slesh.voice_roles", "fun_slesh.daily_summary", "fun_slesh.heroes_troll", "fun_slesh.sixty_seven"}:
+        return "☢️ Активность"
+    if root in ADMIN_ROOTS:
+        return "🛡️ Админ"
+    return "🧩 Прочее"
+
+
+def _mention_for(qualified_name: str, root_id: int | None) -> str:
+    if root_id:
+        return f"</{qualified_name}:{root_id}>"
+    return f"`/{qualified_name}`"
+
+
+async def _fetch_root_ids(bot: commands.Bot) -> dict[str, int]:
+    root_ids = {}
+    for cmd in bot.tree.get_commands():
+        cmd_id = getattr(cmd, "id", None)
+        if cmd_id:
+            root_ids[cmd.name] = cmd_id
+
+    if root_ids:
+        return root_ids
+
+    try:
+        fetched = await bot.tree.fetch_commands()
+        root_ids = {cmd.name: cmd.id for cmd in fetched}
+    except Exception:
+        pass
+    return root_ids
+
+
+def _walk_leaf_commands(tree_commands: list[app_commands.Command | app_commands.Group], root_ids: dict[str, int]):
+    collected: list[dict] = []
+
+    def visit(cmd: app_commands.Command | app_commands.Group):
+        if isinstance(cmd, app_commands.Group):
+            for sub in cmd.commands:
+                visit(sub)
+            return
+
+        qualified_name = cmd.qualified_name
+        root_name = qualified_name.split()[0]
+        callback = getattr(cmd, "callback", None)
+        module_name = getattr(callback, "__module__", "") if callback else ""
+        description = (cmd.description or "Без описания").strip()
+        collected.append(
+            {
+                "qualified_name": qualified_name,
+                "root_name": root_name,
+                "module_name": module_name,
+                "description": description,
+                "root_id": root_ids.get(root_name),
+                "is_admin": _is_admin_command(cmd, qualified_name),
+            }
+        )
+
+    for command in tree_commands:
+        visit(command)
+    return collected
+
+
+async def _build_catalog(bot: commands.Bot, *, admin_only: bool) -> dict[str, list[dict]]:
+    root_ids = await _fetch_root_ids(bot)
+    commands_flat = _walk_leaf_commands(bot.tree.get_commands(), root_ids)
+    catalog: dict[str, list[dict]] = {}
+
+    for item in commands_flat:
+        qualified_name = item["qualified_name"]
+        is_admin = item["is_admin"]
+        if admin_only and not is_admin:
+            continue
+        if not admin_only and is_admin:
+            continue
+
+        category = _category_for_command(qualified_name, item["module_name"])
+        if admin_only and category != "🛡️ Админ":
+            category = "🛡️ Админ"
+        catalog.setdefault(category, []).append(item)
+
+    for items in catalog.values():
+        items.sort(key=lambda row: row["qualified_name"])
+
+    ordered: "OrderedDict[str, list[dict]]" = OrderedDict()
+    for category in CATEGORY_ORDER:
+        if category in catalog:
+            ordered[category] = catalog[category]
+
+    for category, items in catalog.items():
+        if category not in ordered:
+            ordered[category] = items
+    return dict(ordered)
+
+
+def _build_overview_embed(catalog: dict[str, list[dict]], *, admin_only: bool) -> discord.Embed:
+    total = sum(len(v) for v in catalog.values())
+    color = discord.Color.dark_gold() if admin_only else discord.Color.blurple()
+    title = "🛡️ Меню администратора" if admin_only else "🧭 Меню команд"
+    emb = discord.Embed(title=title, color=color)
+
+    intro = (
+        "Это живой каталог реальных slash-команд бота.\n"
+        "Выбери категорию в выпадающем списке ниже — внутри будут кликабельные команды."
+    )
+    if admin_only:
+        intro += "\n\nСкрыты обычные пользовательские команды: здесь только админские действия."
+    else:
+        intro += "\n\nАдмин-команды вынесены отдельно в `/меню_админ`, чтобы обычное меню было чище."
+    emb.description = intro
+
     lines = []
-    for cmd, desc in data["commands"]:
-        name    = cmd.lstrip("/")
-        cmd_id  = cmd_ids.get(name)
-        cmd_fmt = f"</{name}:{cmd_id}>" if cmd_id else f"`{cmd}`"
-        lines.append(f"{cmd_fmt} — {desc}")
-    emb.description = "\n".join(lines)
-    total = sum(len(v["commands"]) for v in categories.values())
-    emb.set_footer(text=f"Всего команд: {total}")
+    for category, items in catalog.items():
+        summary = CATEGORY_SUMMARIES.get(category, "Команды этой категории.")
+        lines.append(f"**{category}** — {len(items)}\n{summary}")
+
+    emb.add_field(name="Категории", value="\n\n".join(lines[:8]) or "Категории не найдены.", inline=False)
+    if len(lines) > 8:
+        emb.add_field(name="Ещё", value="\n\n".join(lines[8:]), inline=False)
+
+    emb.set_footer(text=f"Всего команд: {total} • Каталог собирается автоматически из bot.tree")
     return emb
 
 
-# ─── Select Menu View ─────────────────────────────────────────────────────────
+def _build_embed(category: str, catalog: dict[str, list[dict]], *, admin_only: bool) -> discord.Embed:
+    if category == "__overview__":
+        return _build_overview_embed(catalog, admin_only=admin_only)
+
+    style = CATEGORY_STYLES.get(category, CATEGORY_STYLES["🧩 Прочее"])
+    items = catalog.get(category, [])
+    total = sum(len(v) for v in catalog.values())
+
+    title = f"{style.emoji} {category.split(' ', 1)[-1]}"
+    emb = discord.Embed(title=title, color=style.color)
+
+    if admin_only:
+        emb.description = "Админ-каталог собран из реальных slash-команд бота.\n\n"
+    else:
+        emb.description = "Живой каталог собран из реальных slash-команд бота.\n\n"
+
+    lines = []
+    for item in items:
+        mention = _mention_for(item["qualified_name"], item["root_id"])
+        lines.append(f"{mention}\n`{item['description']}`")
+
+    emb.description += "\n".join(lines) if lines else "В этой категории пока ничего нет."
+    emb.set_footer(text=f"Команд в этом меню: {total} • Нажми на mention, чтобы открыть slash-команду")
+    return emb
+
 
 class MenuSelect(discord.ui.Select):
-    def __init__(self, current: str, cmd_ids: dict, categories: dict):
-        self.cmd_ids    = cmd_ids
-        self.categories = categories
+    def __init__(self, current: str, catalog: dict[str, list[dict]], *, admin_only: bool):
+        self.catalog = catalog
+        self.admin_only = admin_only
         options = [
             discord.SelectOption(
-                label=name,
-                emoji=data.get("emoji"),
-                value=name,
-                default=(name == current),
+                label="Обзор",
+                emoji="🧭",
+                value="__overview__",
+                description="Все категории и как пользоваться",
+                default=(current == "__overview__"),
             )
-            for name, data in categories.items()
         ]
+        for name, items in catalog.items():
+            style = CATEGORY_STYLES.get(name, CATEGORY_STYLES["🧩 Прочее"])
+            options.append(
+                discord.SelectOption(
+                    label=name,
+                    emoji=style.emoji,
+                    value=name,
+                    description=f"{len(items)} команд",
+                    default=(name == current),
+                )
+            )
         super().__init__(
-            placeholder="Выбери категорию...",
+            placeholder="Выбери обзор или категорию...",
             options=options,
             min_values=1,
             max_values=1,
@@ -265,19 +350,18 @@ class MenuSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         chosen = self.values[0]
-        # Обновляем default в options
-        for opt in self.options:
-            opt.default = (opt.value == chosen)
+        for option in self.options:
+            option.default = option.value == chosen
         await interaction.response.edit_message(
-            embed=_build_embed(chosen, self.cmd_ids, self.categories),
+            embed=_build_embed(chosen, self.catalog, admin_only=self.admin_only),
             view=self.view,
         )
 
 
 class MenuView(discord.ui.View):
-    def __init__(self, current: str, cmd_ids: dict, categories: dict):
+    def __init__(self, current: str, catalog: dict[str, list[dict]], *, admin_only: bool):
         super().__init__(timeout=300)
-        self.add_item(MenuSelect(current, cmd_ids, categories))
+        self.add_item(MenuSelect(current, catalog, admin_only=admin_only))
 
     async def on_timeout(self):
         for child in self.children:
@@ -285,43 +369,34 @@ class MenuView(discord.ui.View):
         self.stop()
 
 
-# ─── Получение ID команд ──────────────────────────────────────────────────────
-
-async def _fetch_cmd_ids(bot: commands.Bot) -> dict:
-    cmd_ids = {cmd.name: cmd.id for cmd in bot.tree.get_commands() if hasattr(cmd, "id") and cmd.id}
-    if not cmd_ids:
-        try:
-            fetched = await bot.tree.fetch_commands()
-            cmd_ids = {c.name: c.id for c in fetched}
-        except Exception:
-            pass
-    return cmd_ids
-
-
-# ─── Cog ──────────────────────────────────────────────────────────────────────
-
 class Menu(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="меню", description="Справочник всех команд бота по категориям")
+    @app_commands.command(name="меню", description="Живой каталог всех обычных команд бота")
     async def меню(self, interaction: discord.Interaction):
-        cmd_ids = await _fetch_cmd_ids(self.bot)
-        first   = next(iter(CATEGORIES))
+        catalog = await _build_catalog(self.bot, admin_only=False)
+        if not catalog:
+            await interaction.response.send_message("❌ Не удалось собрать каталог команд.", ephemeral=True)
+            return
+        first = "__overview__"
         await interaction.response.send_message(
-            embed=_build_embed(first, cmd_ids, CATEGORIES),
-            view=MenuView(first, cmd_ids, CATEGORIES),
+            embed=_build_embed(first, catalog, admin_only=False),
+            view=MenuView(first, catalog, admin_only=False),
             ephemeral=True,
         )
 
-    @app_commands.command(name="меню_админ", description="(Админ) Справочник административных команд")
+    @app_commands.command(name="меню_админ", description="(Админ) Живой каталог административных команд")
     @app_commands.checks.has_permissions(administrator=True)
     async def меню_админ(self, interaction: discord.Interaction):
-        cmd_ids = await _fetch_cmd_ids(self.bot)
-        first   = next(iter(ADMIN_CATEGORIES))
+        catalog = await _build_catalog(self.bot, admin_only=True)
+        if not catalog:
+            await interaction.response.send_message("❌ Не удалось собрать каталог админ-команд.", ephemeral=True)
+            return
+        first = "__overview__"
         await interaction.response.send_message(
-            embed=_build_embed(first, cmd_ids, ADMIN_CATEGORIES),
-            view=MenuView(first, cmd_ids, ADMIN_CATEGORIES),
+            embed=_build_embed(first, catalog, admin_only=True),
+            view=MenuView(first, catalog, admin_only=True),
             ephemeral=True,
         )
 
