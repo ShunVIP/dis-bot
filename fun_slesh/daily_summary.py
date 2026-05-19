@@ -10,6 +10,9 @@
   /итог_дня            — показать итог дня прямо сейчас
   /итог_дня_канал      — (Админ) канал для авто-постинга в полночь
   /итог_дня_вкл        — (Админ) включить/выключить авто-постинг
+  /итог_недели         — показать еженедельный дайджест прямо сейчас
+  /итог_недели_канал   — (Админ) канал для авто-постинга по понедельникам
+  /итог_недели_вкл     — (Админ) включить/выключить еженедельный дайджест
 """
 
 import os, sqlite3, random, asyncio
@@ -55,6 +58,11 @@ def _ensure_tables():
                 guild_id  INTEGER PRIMARY KEY,
                 channel_id INTEGER,
                 enabled   INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS weekly_summary_config (
+                guild_id   INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                enabled    INTEGER NOT NULL DEFAULT 1
             );
         """)
 
@@ -148,6 +156,157 @@ def _fmt_seconds(sec: int) -> str:
     if h:
         return f"{h}ч {m}м"
     return f"{m}м"
+
+
+def _week_bounds_msk() -> tuple[date, date]:
+    today = datetime.now(MSK).date()
+    start_this_week = today - timedelta(days=today.weekday())
+    start_prev_week = start_this_week - timedelta(days=7)
+    return start_prev_week, start_this_week
+
+
+def _top_rows(conn: sqlite3.Connection, query: str, params: tuple) -> list[tuple]:
+    return conn.execute(query, params).fetchall()
+
+
+def _get_weekly_stats(guild_id: int) -> dict:
+    start_prev_week, start_this_week = _week_bounds_msk()
+    since = start_prev_week.isoformat()
+    until = start_this_week.isoformat()
+    last_week_code = (datetime.now(MSK) - timedelta(days=7)).strftime("%Y-W%W")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        top_msgs = _top_rows(
+            conn,
+            """
+            SELECT user_id, SUM(messages) AS total
+            FROM msg_stats_daily
+            WHERE guild_id=? AND date>=? AND date<?
+            GROUP BY user_id
+            ORDER BY total DESC LIMIT 5
+            """,
+            (guild_id, since, until),
+        )
+        top_words = _top_rows(
+            conn,
+            """
+            SELECT user_id, SUM(words) AS total
+            FROM msg_stats_daily
+            WHERE guild_id=? AND date>=? AND date<?
+            GROUP BY user_id
+            ORDER BY total DESC LIMIT 5
+            """,
+            (guild_id, since, until),
+        )
+        top_emojis = _top_rows(
+            conn,
+            """
+            SELECT user_id, SUM(emojis) AS total
+            FROM msg_stats_daily
+            WHERE guild_id=? AND date>=? AND date<?
+            GROUP BY user_id
+            ORDER BY total DESC LIMIT 5
+            """,
+            (guild_id, since, until),
+        )
+        total_msgs = conn.execute(
+            "SELECT COALESCE(SUM(messages), 0) FROM msg_stats_daily WHERE guild_id=? AND date>=? AND date<?",
+            (guild_id, since, until),
+        ).fetchone()[0]
+        top_voice = _top_rows(
+            conn,
+            """
+            SELECT user_id, SUM(seconds) AS total
+            FROM voice_totals_daily
+            WHERE guild_id=? AND date>=? AND date<?
+            GROUP BY user_id
+            ORDER BY total DESC LIMIT 5
+            """,
+            (guild_id, since, until),
+        )
+        total_voice = conn.execute(
+            "SELECT COALESCE(SUM(seconds), 0) FROM voice_totals_daily WHERE guild_id=? AND date>=? AND date<?",
+            (guild_id, since, until),
+        ).fetchone()[0]
+        top_balance = _top_rows(
+            conn,
+            """
+            SELECT user_id, balance
+            FROM coins_wallet
+            ORDER BY balance DESC LIMIT 5
+            """,
+            (),
+        ) if _table_exists(conn, "coins_wallet") else []
+        top_streaks = _top_rows(
+            conn,
+            """
+            SELECT user_id, streak
+            FROM daily_rewards
+            ORDER BY streak DESC LIMIT 5
+            """,
+            (),
+        ) if _table_exists(conn, "daily_rewards") else []
+        top_rep = _top_rows(
+            conn,
+            """
+            SELECT user_id, SUM(delta) AS total
+            FROM reputation
+            GROUP BY user_id
+            HAVING total > 0
+            ORDER BY total DESC LIMIT 5
+            """,
+            (),
+        ) if _table_exists(conn, "reputation") else []
+        top_toxic = _top_rows(
+            conn,
+            """
+            SELECT user_id, count
+            FROM toxicity_weekly
+            WHERE guild_id=? AND week=?
+            ORDER BY count DESC LIMIT 5
+            """,
+            (guild_id, last_week_code),
+        ) if _table_exists(conn, "toxicity_weekly") else []
+
+    return {
+        "since": since,
+        "until": until,
+        "top_msgs": top_msgs,
+        "top_words": top_words,
+        "top_emojis": top_emojis,
+        "top_voice": top_voice,
+        "top_balance": top_balance,
+        "top_streaks": top_streaks,
+        "top_rep": top_rep,
+        "top_toxic": top_toxic,
+        "total_msgs": total_msgs,
+        "total_voice_s": total_voice,
+    }
+
+
+def _member_name(guild: discord.Guild, user_id: int) -> str:
+    member = guild.get_member(int(user_id))
+    if member:
+        return member.display_name
+    return f"<@{user_id}>"
+
+
+def _format_rank_lines(
+    guild: discord.Guild,
+    rows: list[tuple],
+    suffix: str,
+    *,
+    cast_int: bool = True,
+    value_formatter=None,
+) -> str:
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (user_id, raw_value) in enumerate(rows[:5], start=1):
+        prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
+        value = int(raw_value) if cast_int else raw_value
+        shown = value_formatter(value) if value_formatter else f"{value} {suffix}"
+        lines.append(f"{prefix} {_member_name(guild, int(user_id))} — **{shown}**")
+    return "\n".join(lines) if lines else "Пока пусто."
 
 
 # ── Генерация хокку ───────────────────────────────────────────────────────────
@@ -285,6 +444,59 @@ async def _post_daily_summary(bot: commands.Bot):
             pass
 
 
+async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embed:
+    start = datetime.fromisoformat(stats["since"]).strftime("%d.%m")
+    end = (datetime.fromisoformat(stats["until"]) - timedelta(days=1)).strftime("%d.%m")
+
+    emb = discord.Embed(
+        title=f"🏆 Итоги недели — {start}–{end}",
+        description=(
+            "Автоматический еженедельный дайджест по главным топам сервера.\n"
+            "Собрано за прошлую неделю, постится по понедельникам в 00:00 МСК."
+        ),
+        color=discord.Color.gold(),
+    )
+    emb.add_field(
+        name="За неделю",
+        value=f"💬 {stats['total_msgs']} сообщений\n🎙️ {_fmt_seconds(int(stats['total_voice_s']))} в войсе",
+        inline=False,
+    )
+    emb.add_field(name="🗣️ Топ активности", value=_format_rank_lines(guild, stats["top_msgs"], "сообщ."), inline=False)
+    emb.add_field(name="📝 Топ слов", value=_format_rank_lines(guild, stats["top_words"], "слов"), inline=True)
+    emb.add_field(name="😎 Топ эмодзи", value=_format_rank_lines(guild, stats["top_emojis"], "эмодзи"), inline=True)
+    emb.add_field(
+        name="🎙️ Топ войса",
+        value=_format_rank_lines(guild, stats["top_voice"], "", value_formatter=_fmt_seconds),
+        inline=False,
+    )
+    emb.add_field(name="💰 Топ баланса", value=_format_rank_lines(guild, stats["top_balance"], "монет"), inline=True)
+    emb.add_field(name="🔥 Топ серий", value=_format_rank_lines(guild, stats["top_streaks"], "дн."), inline=True)
+    emb.add_field(name="⭐ Топ репы", value=_format_rank_lines(guild, stats["top_rep"], "репы"), inline=False)
+    if stats["top_toxic"]:
+        emb.add_field(name="☢️ Топ токсиков", value=_format_rank_lines(guild, stats["top_toxic"], "раз"), inline=False)
+    emb.set_footer(text="Если хочешь тише — можно вынести этот дайджест в отдельный канал.")
+    return emb
+
+
+async def _post_weekly_summary(bot: commands.Bot):
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT guild_id, channel_id FROM weekly_summary_config WHERE enabled=1 AND channel_id IS NOT NULL"
+        ).fetchall()
+
+    for guild_id, ch_id in rows:
+        guild = bot.get_guild(guild_id)
+        channel = bot.get_channel(ch_id)
+        if not guild or not channel:
+            continue
+        try:
+            stats = _get_weekly_stats(guild_id)
+            emb = await _build_weekly_embed(guild, stats)
+            await channel.send(embed=emb)
+        except Exception:
+            pass
+
+
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class DailySummary(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -297,6 +509,11 @@ class DailySummary(commands.Cog):
             _post_daily_summary, "cron",
             hour=23, minute=59, timezone=MSK,
             args=[bot], id="daily_summary", replace_existing=True
+        )
+        scheduler.add_job(
+            _post_weekly_summary, "cron",
+            day_of_week="mon", hour=0, minute=0, timezone=MSK,
+            args=[bot], id="weekly_summary", replace_existing=True
         )
 
     # ── /итог_дня ─────────────────────────────────────────────────────────────
@@ -341,6 +558,48 @@ class DailySummary(commands.Cog):
         status = "✅ Включён" if включить else "⛔ Выключен"
         await interaction.response.send_message(
             f"{status} авто-постинг итога дня.", ephemeral=True)
+
+    @app_commands.command(name="итог_недели",
+                          description="Еженедельный дайджест главных топов сервера")
+    async def итог_недели(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        stats = _get_weekly_stats(interaction.guild.id)
+        emb = await _build_weekly_embed(interaction.guild, stats)
+        await interaction.followup.send(embed=emb)
+
+    @app_commands.command(name="итог_недели_канал",
+                          description="(Админ) Канал для авто-постинга еженедельного дайджеста")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def итог_недели_канал(self, interaction: discord.Interaction,
+                                канал: discord.TextChannel):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO weekly_summary_config(guild_id, channel_id, enabled)"
+                " VALUES(?,?,1)"
+                " ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id, enabled=1",
+                (interaction.guild.id, канал.id)
+            )
+        await interaction.response.send_message(
+            f"✅ Итог недели будет постить в {канал.mention} каждый понедельник в 00:00 МСК.",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="итог_недели_вкл",
+                          description="(Админ) Включить/выключить еженедельный дайджест")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def итог_недели_вкл(self, interaction: discord.Interaction,
+                              включить: bool):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO weekly_summary_config(guild_id, enabled) VALUES(?,?)"
+                " ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
+                (interaction.guild.id, int(включить))
+            )
+        status = "✅ Включён" if включить else "⛔ Выключен"
+        await interaction.response.send_message(
+            f"{status} еженедельный дайджест топов.",
+            ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot):
