@@ -573,6 +573,11 @@ async def _post_weekly_summary(bot: commands.Bot):
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class DailySummary(commands.Cog):
+    summary_group = app_commands.Group(
+        name="итоги",
+        description="Дневные и недельные итоги сервера"
+    )
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         _ensure_tables()
@@ -591,17 +596,16 @@ class DailySummary(commands.Cog):
         )
 
     # ── /итог_дня ─────────────────────────────────────────────────────────────
-    @app_commands.command(name="итог_дня",
-                          description="Итог сегодняшнего дня с хокку")
+    @summary_group.command(name="день",
+                           description="Итог сегодняшнего дня с хокку")
     async def итог_дня(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         stats = _get_today_stats(interaction.guild.id)
         emb   = await _build_summary_embed(interaction.guild, stats)
         await interaction.followup.send(embed=emb)
 
-    # ── /итог_дня_канал ───────────────────────────────────────────────────────
-    @app_commands.command(name="итог_дня_канал",
-                          description="(Админ) Канал для авто-постинга итога дня в полночь")
+    @summary_group.command(name="канал",
+                           description="(Админ) Канал для авто-постинга итогов")
     @app_commands.checks.has_permissions(administrator=True)
     async def итог_дня_канал(self, interaction: discord.Interaction,
                                канал: discord.TextChannel):
@@ -614,12 +618,11 @@ class DailySummary(commands.Cog):
                 (interaction.guild.id, канал.id)
             )
         await interaction.response.send_message(
-            f"✅ Итог дня будет постить в {канал.mention} каждый день в 23:59 МСК.",
+            f"✅ Итоги будут постить в {канал.mention}: день — в 23:59 МСК, неделя — по понедельникам в 00:00 МСК.",
             ephemeral=True)
 
-    # ── /итог_дня_вкл ─────────────────────────────────────────────────────────
-    @app_commands.command(name="итог_дня_вкл",
-                          description="(Админ) Включить/выключить авто-постинг итога дня")
+    @summary_group.command(name="вкл",
+                           description="(Админ) Включить/выключить авто-постинг итогов")
     @app_commands.checks.has_permissions(administrator=True)
     async def итог_дня_вкл(self, interaction: discord.Interaction,
                              включить: bool):
@@ -631,10 +634,10 @@ class DailySummary(commands.Cog):
             )
         status = "✅ Включён" if включить else "⛔ Выключен"
         await interaction.response.send_message(
-            f"{status} авто-постинг итога дня.", ephemeral=True)
+            f"{status} авто-постинг итогов дня и недели.", ephemeral=True)
 
-    @app_commands.command(name="итог_недели",
-                          description="Еженедельный дайджест главных топов сервера")
+    @summary_group.command(name="неделя",
+                           description="Еженедельный дайджест главных топов сервера")
     async def итог_недели(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         stats = _get_weekly_stats(interaction.guild.id)
