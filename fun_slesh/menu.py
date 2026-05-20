@@ -418,6 +418,11 @@ async def _run_quick_button_action(bot: commands.Bot, interaction: discord.Inter
         await interaction.response.send_message("❌ Для этой кнопки не найден обработчик.", ephemeral=True)
         return
 
+    callback = getattr(handler, "callback", None)
+    if callable(callback):
+        await callback(cog, interaction, **action.kwargs)
+        return
+
     await handler(interaction, **action.kwargs)
 
 
