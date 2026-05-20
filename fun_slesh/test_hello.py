@@ -284,11 +284,33 @@ class FunAndInfo(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # ✅ /пинг
-    @app_commands.command(name="пинг", description="Проверить задержку бота")
-    async def ping(self, interaction: discord.Interaction):
+    async def menu_ping(self, interaction: discord.Interaction):
         latency = round(self.bot.latency * 1000)
         await interaction.response.send_message(f"🏓 Пингани гиганта: задержка в развитии `{latency}мс`")
+
+    async def menu_coinflip(self, interaction: discord.Interaction):
+        result = random.choice(["Орёл 🦅", "Решка 💰"])
+        await interaction.response.send_message(f"🪙 {result}")
+
+    def _build_server_embed(self, guild: discord.Guild, owner: discord.Member) -> discord.Embed:
+        embed = discord.Embed(title=f"Сервер: {guild.name}", color=discord.Color.green())
+        embed.set_thumbnail(url=guild.icon.url if guild.icon else discord.Embed.Empty)
+        embed.add_field(name="ID", value=guild.id, inline=True)
+        embed.add_field(name="Владелец", value=owner.mention, inline=True)
+        embed.add_field(name="Создан", value=guild.created_at.strftime("%d.%m.%Y %H:%M"), inline=False)
+        embed.add_field(name="Участников", value=guild.member_count, inline=True)
+        embed.add_field(name="Каналов", value=len(guild.channels), inline=True)
+        return embed
+
+    async def menu_server(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        owner = guild.owner or await guild.fetch_member(guild.owner_id)
+        await interaction.response.send_message(embed=self._build_server_embed(guild, owner))
+
+    async def _send_random_meme(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        followup = interaction.followup
 
     # 👤 /кто
     @app_commands.command(name="кто", description="Показать информацию о пользователе")
@@ -307,28 +329,6 @@ class FunAndInfo(commands.Cog):
         embed.add_field(name="Роли", value=roles_str, inline=False)
 
         await interaction.response.send_message(embed=embed)
-
-    # 🌐 /сервер
-    @app_commands.command(name="сервер", description="Показать информацию о сервере")
-    async def сервер(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        owner = await guild.fetch_member(guild.owner_id)
-
-        embed = discord.Embed(title=f"Сервер: {guild.name}", color=discord.Color.green())
-        embed.set_thumbnail(url=guild.icon.url if guild.icon else discord.Embed.Empty)
-        embed.add_field(name="ID", value=guild.id, inline=True)
-        embed.add_field(name="Владелец", value=owner.mention, inline=True)
-        embed.add_field(name="Создан", value=guild.created_at.strftime("%d.%m.%Y %H:%M"), inline=False)
-        embed.add_field(name="Участников", value=guild.member_count, inline=True)
-        embed.add_field(name="Каналов", value=len(guild.channels), inline=True)
-
-        await interaction.response.send_message(embed=embed)
-
-    # 🎲 /монетка
-    @app_commands.command(name="монетка", description="Подбросить монетку")
-    async def монетка(self, interaction: discord.Interaction):
-        result = random.choice(["Орёл 🦅", "Решка 💰"])
-        await interaction.response.send_message(f"🪙 {result}")
 
     # 🔮 /шар
     @app_commands.command(name="шар", description="Магический шар 8 даст тебе ответ")
@@ -552,11 +552,8 @@ class FunAndInfo(commands.Cog):
                 await finish_poll(msg, view, st, ping_role=None, reason="Истёк таймер")
             asyncio.create_task(close_later())
 
-    # 😂 /мем — RU приоритет, EN падение
-    @app_commands.command(name="мем", description="Показать случайный мем")
-    async def мем(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-
+    async def menu_meme(self, interaction: discord.Interaction):
+        await self._send_random_meme(interaction)
         # Русскоязычные subreddits через meme-api
         RU_SUBS = ["Pikabu", "ru_memes", "PurpleOrangeMemes"]
         random.shuffle(RU_SUBS)
@@ -601,9 +598,9 @@ class FunAndInfo(commands.Cog):
                 color=discord.Color.orange()
             )
             embed.set_image(url=meme_url)
-            await interaction.followup.send(embed=embed)
+            await followup.send(embed=embed)
         else:
-            await interaction.followup.send("❌ Не удалось достать мем. Попробуй позже.")
+            await followup.send("❌ Не удалось достать мем. Попробуй позже.")
 
 
 async def setup(bot):

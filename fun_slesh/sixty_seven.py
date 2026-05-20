@@ -3,7 +3,7 @@
 Реакции на мем "67 / six seven".
 
 Если в сообщении встречается 67 или six seven, бот иногда кидает
-случайную Giphy-ссылку по теме.
+случайную Giphy-гифку по теме мема.
 """
 
 from __future__ import annotations
@@ -23,8 +23,9 @@ GIPHY_EXPLORE_URL = "https://giphy.com/explore/67"
 TRIGGER_RE = re.compile(r"(?<!\d)(67)(?!\d)|\bsix\s*seven\b", re.I)
 MEDIA_RE = re.compile(r"https://media\d*\.giphy\.com/media/([A-Za-z0-9]+)/giphy(?:[-\w]*)?\.(?:gif|webp)")
 HREF_ID_RE = re.compile(r"/gifs/[^\"' ]*?-([A-Za-z0-9]+)(?:[/?#]|$)")
+JSON_ID_RE = re.compile(r'"id":"([A-Za-z0-9]+)"')
 
-FALLBACK_GIFS = [
+FALLBACK_67_GIFS = [
     "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcXZiYWJqem05bm9qa3RqOWQ1eDZnMmdpNHJzMHcyNTR4OTdiOXp2diZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l3q2K5jinAlChoCLS/giphy.gif",
     "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdmpnZXQ5M2JsbDNjZXQ1eTR5Mm83aGdoemI4cnM5aWx2eG9oM3gxeCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/1zSz5MVw4zKg0/giphy.gif",
     "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExa2N0ZjRucnV0Zjcycm90eWNsN2NtaHFydDdhb2ZlNXRuMXYwYXd3YyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3orieLeZL5kyNqiLm/giphy.gif",
@@ -54,6 +55,12 @@ def _extract_giphy_links(page_html: str) -> list[str]:
             seen.add(url)
             found.append(url)
 
+    for gif_id in JSON_ID_RE.findall(page_html):
+        url = _normalize_media_url(gif_id)
+        if url not in seen:
+            seen.add(url)
+            found.append(url)
+
     if found:
         return found
 
@@ -69,6 +76,11 @@ def _extract_giphy_links(page_html: str) -> list[str]:
                 seen.add(url)
                 found.append(url)
         for gif_id in HREF_ID_RE.findall(text):
+            url = _normalize_media_url(gif_id)
+            if url not in seen:
+                seen.add(url)
+                found.append(url)
+        for gif_id in JSON_ID_RE.findall(text):
             url = _normalize_media_url(gif_id)
             if url not in seen:
                 seen.add(url)
@@ -117,7 +129,10 @@ class SixtySeven(commands.Cog):
         except Exception:
             pass
 
-        self._gif_cache = FALLBACK_GIFS[:]
+        if self._gif_cache:
+            return self._gif_cache
+
+        self._gif_cache = FALLBACK_67_GIFS[:]
         self._gif_cache_fetched_at = now
         return self._gif_cache
 
@@ -144,9 +159,16 @@ class SixtySeven(commands.Cog):
         if not gif_url:
             return
 
+        embed = discord.Embed(
+            title="67",
+            description="Шесть-семь активирован.",
+            color=discord.Color.from_rgb(103, 103, 180),
+        )
+        embed.set_image(url=gif_url)
+
         try:
             await message.reply(
-                gif_url,
+                embed=embed,
                 mention_author=False,
                 suppress_embeds=False,
                 allowed_mentions=discord.AllowedMentions.none(),

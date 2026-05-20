@@ -25,6 +25,16 @@ class CategoryStyle:
     color: discord.Color
 
 
+@dataclass(frozen=True)
+class MenuOnlyAction:
+    action_id: str
+    label: str
+    description: str
+    category: str
+    method_name: str
+    emoji: str
+
+
 CATEGORY_STYLES: dict[str, CategoryStyle] = {
     "🧭 Навигация": CategoryStyle("🧭", discord.Color.light_grey()),
     "🎭 Пародия": CategoryStyle("🎭", discord.Color.purple()),
@@ -117,6 +127,14 @@ ACTIVITY_ROOTS = {"токсичность", "войс_роли", "итоги", "
 REMINDER_ROOTS = {"напоминания"}
 CHAT_ROOTS = {"болтовня"}
 MENU_ROOTS = {"меню", "меню_админ"}
+
+MENU_ONLY_ACTIONS: tuple[MenuOnlyAction, ...] = (
+    MenuOnlyAction("ping", "Пинг", "Быстрый ответ с текущей задержкой бота.", "ℹ️ Информация", "menu_ping", "🏓"),
+    MenuOnlyAction("server", "Сервер", "Карточка сервера без отдельного slash-ввода.", "ℹ️ Информация", "menu_server", "🏰"),
+    MenuOnlyAction("coinflip", "Монетка", "Подбросить монетку прямо из меню.", "🎲 Рандом", "menu_coinflip", "🪙"),
+    MenuOnlyAction("meme", "Мем", "Случайный мем без отдельной slash-команды.", "🎲 Рандом", "menu_meme", "😂"),
+)
+MENU_ONLY_BY_ID = {item.action_id: item for item in MENU_ONLY_ACTIONS}
 
 
 def _has_admin_permission_check(cmd: app_commands.Command) -> bool:
@@ -247,8 +265,25 @@ async def _build_catalog(bot: commands.Bot, *, admin_only: bool) -> dict[str, li
             category = "🛡️ Админ"
         catalog.setdefault(category, []).append(item)
 
+    if not admin_only:
+        for action in MENU_ONLY_ACTIONS:
+            catalog.setdefault(action.category, []).append(
+                {
+                    "qualified_name": action.label,
+                    "root_name": action.action_id,
+                    "module_name": "fun_slesh.menu",
+                    "description": action.description,
+                    "root_id": None,
+                    "is_admin": False,
+                    "menu_only": True,
+                    "action_id": action.action_id,
+                    "button_label": action.label,
+                    "emoji": action.emoji,
+                }
+            )
+
     for items in catalog.values():
-        items.sort(key=lambda row: row["qualified_name"])
+        items.sort(key=lambda row: (not row.get("menu_only", False), row["qualified_name"]))
 
     ordered: "OrderedDict[str, list[dict]]" = OrderedDict()
     for category in CATEGORY_ORDER:
@@ -269,7 +304,7 @@ def _build_overview_embed(catalog: dict[str, list[dict]], *, admin_only: bool) -
 
     intro = (
         "Это живой каталог реальных slash-команд бота.\n"
-        "Выбери категорию в выпадающем списке ниже — внутри будут кликабельные команды."
+        "Выбери категорию в выпадающем списке ниже — внутри будут кликабельные команды и быстрые кнопки."
     )
     if admin_only:
         intro += "\n\nСкрыты обычные пользовательские команды: здесь только админские действия."
@@ -286,8 +321,18 @@ def _build_overview_embed(catalog: dict[str, list[dict]], *, admin_only: bool) -
     if len(lines) > 8:
         emb.add_field(name="Ещё", value="\n\n".join(lines[8:]), inline=False)
 
-    emb.set_footer(text=f"Всего команд: {total} • Каталог собирается автоматически из bot.tree")
+    emb.set_footer(text=f"Всего пунктов: {total} • Slash-команды берутся из bot.tree, простые действия живут только в меню")
     return emb
+
+
+def _format_entry(item: dict) -> str:
+    if item.get("menu_only"):
+        emoji = item.get("emoji", "🖱️")
+        label = item.get("button_label", item["qualified_name"])
+        return f"{emoji} **{label}** *(только через меню)*\n`{item['description']}`"
+
+    mention = _mention_for(item["qualified_name"], item["root_id"])
+    return f"{mention}\n`{item['description']}`"
 
 
 def _build_embed(category: str, catalog: dict[str, list[dict]], *, admin_only: bool) -> discord.Embed:
@@ -306,14 +351,30 @@ def _build_embed(category: str, catalog: dict[str, list[dict]], *, admin_only: b
     else:
         emb.description = "Живой каталог собран из реальных slash-команд бота.\n\n"
 
-    lines = []
-    for item in items:
-        mention = _mention_for(item["qualified_name"], item["root_id"])
-        lines.append(f"{mention}\n`{item['description']}`")
+    lines = [_format_entry(item) for item in items]
 
     emb.description += "\n".join(lines) if lines else "В этой категории пока ничего нет."
-    emb.set_footer(text=f"Команд в этом меню: {total} • Нажми на mention, чтобы открыть slash-команду")
+    emb.set_footer(text=f"Пунктов в этом меню: {total} • Mention открывает slash, кнопки запускают простые действия прямо отсюда")
     return emb
+
+
+async def _run_menu_only_action(bot: commands.Bot, interaction: discord.Interaction, action_id: str):
+    action = MENU_ONLY_BY_ID.get(action_id)
+    if not action:
+        await interaction.response.send_message("❌ Действие меню не найдено.", ephemeral=True)
+        return
+
+    fun_cog = bot.get_cog("FunAndInfo")
+    if fun_cog is None:
+        await interaction.response.send_message("❌ Модуль простых команд не загружен.", ephemeral=True)
+        return
+
+    handler = getattr(fun_cog, action.method_name, None)
+    if handler is None:
+        await interaction.response.send_message("❌ Для этой кнопки не найден обработчик.", ephemeral=True)
+        return
+
+    await handler(interaction)
 
 
 class MenuSelect(discord.ui.Select):
@@ -357,10 +418,33 @@ class MenuSelect(discord.ui.Select):
         )
 
 
+class MenuActionButton(discord.ui.Button):
+    def __init__(self, action: MenuOnlyAction):
+        self.action = action
+        super().__init__(
+            label=action.label,
+            emoji=action.emoji,
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"menu_action:{action.action_id}",
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if view is None:
+            await interaction.response.send_message("❌ Меню уже недоступно.", ephemeral=True)
+            return
+        await _run_menu_only_action(view.bot, interaction, self.action.action_id)
+
+
 class MenuView(discord.ui.View):
-    def __init__(self, current: str, catalog: dict[str, list[dict]], *, admin_only: bool):
+    def __init__(self, bot: commands.Bot, current: str, catalog: dict[str, list[dict]], *, admin_only: bool):
         super().__init__(timeout=300)
+        self.bot = bot
         self.add_item(MenuSelect(current, catalog, admin_only=admin_only))
+        if not admin_only:
+            for action in MENU_ONLY_ACTIONS:
+                self.add_item(MenuActionButton(action))
 
     async def on_timeout(self):
         for child in self.children:
@@ -381,7 +465,7 @@ class Menu(commands.Cog):
         first = "__overview__"
         await interaction.response.send_message(
             embed=_build_embed(first, catalog, admin_only=False),
-            view=MenuView(first, catalog, admin_only=False),
+            view=MenuView(self.bot, first, catalog, admin_only=False),
             ephemeral=True,
         )
 
@@ -395,7 +479,7 @@ class Menu(commands.Cog):
         first = "__overview__"
         await interaction.response.send_message(
             embed=_build_embed(first, catalog, admin_only=True),
-            view=MenuView(first, catalog, admin_only=True),
+            view=MenuView(self.bot, first, catalog, admin_only=True),
             ephemeral=True,
         )
 
