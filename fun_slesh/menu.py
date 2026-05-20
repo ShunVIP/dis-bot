@@ -35,6 +35,17 @@ class MenuOnlyAction:
     emoji: str
 
 
+@dataclass(frozen=True)
+class QuickButtonAction:
+    action_id: str
+    label: str
+    emoji: str
+    cog_name: str
+    method_name: str
+    kwargs: dict
+    row: int
+
+
 CATEGORY_STYLES: dict[str, CategoryStyle] = {
     "🧭 Навигация": CategoryStyle("🧭", discord.Color.light_grey()),
     "🎭 Пародия": CategoryStyle("🎭", discord.Color.purple()),
@@ -135,6 +146,20 @@ MENU_ONLY_ACTIONS: tuple[MenuOnlyAction, ...] = (
     MenuOnlyAction("meme", "Мем", "Случайный мем без отдельной slash-команды.", "🎲 Рандом", "menu_meme", "😂"),
 )
 MENU_ONLY_BY_ID = {item.action_id: item for item in MENU_ONLY_ACTIONS}
+QUICK_BUTTON_ACTIONS: tuple[QuickButtonAction, ...] = (
+    QuickButtonAction("top_active", "Топ актив", "📊", "MessageAndVoiceStats", "топ_актив", {}, 2),
+    QuickButtonAction("top_words", "Топ слова", "📝", "MessageAndVoiceStats", "топ_слова", {}, 2),
+    QuickButtonAction("top_emojis", "Топ эмодзи", "😎", "MessageAndVoiceStats", "топ_эмодзи", {}, 2),
+    QuickButtonAction("top_voice", "Топ войс", "🎙️", "MessageAndVoiceStats", "voice_top", {}, 2),
+    QuickButtonAction("top_rep", "Топ репа", "⭐", "RepAndMood", "топ_репа", {}, 2),
+    QuickButtonAction("my_balance", "Баланс", "💰", "Daily", "баланс", {}, 3),
+    QuickButtonAction("my_achievements", "Ачивки", "🏅", "AchievementsEngine", "ачивки", {}, 3),
+    QuickButtonAction("mood_today", "Настроение", "🙂", "RepAndMood", "настроение_сегодня", {}, 3),
+    QuickButtonAction("rewards_status", "Награды", "🎁", "MessageAndVoiceStats", "награды_статус", {}, 3),
+    QuickButtonAction("summary_day", "Итоги дня", "🌙", "DailySummary", "итог_дня", {}, 3),
+    QuickButtonAction("summary_week", "Итоги недели", "🗓️", "DailySummary", "итог_недели", {}, 4),
+)
+QUICK_BUTTON_BY_ID = {item.action_id: item for item in QUICK_BUTTON_ACTIONS}
 
 
 def _has_admin_permission_check(cmd: app_commands.Command) -> bool:
@@ -377,6 +402,25 @@ async def _run_menu_only_action(bot: commands.Bot, interaction: discord.Interact
     await handler(interaction)
 
 
+async def _run_quick_button_action(bot: commands.Bot, interaction: discord.Interaction, action_id: str):
+    action = QUICK_BUTTON_BY_ID.get(action_id)
+    if not action:
+        await interaction.response.send_message("❌ Быстрое действие не найдено.", ephemeral=True)
+        return
+
+    cog = bot.get_cog(action.cog_name)
+    if cog is None:
+        await interaction.response.send_message("❌ Нужный модуль сейчас не загружен.", ephemeral=True)
+        return
+
+    handler = getattr(cog, action.method_name, None)
+    if handler is None:
+        await interaction.response.send_message("❌ Для этой кнопки не найден обработчик.", ephemeral=True)
+        return
+
+    await handler(interaction, **action.kwargs)
+
+
 class MenuSelect(discord.ui.Select):
     def __init__(self, current: str, catalog: dict[str, list[dict]], *, admin_only: bool):
         self.catalog = catalog
@@ -437,6 +481,25 @@ class MenuActionButton(discord.ui.Button):
         await _run_menu_only_action(view.bot, interaction, self.action.action_id)
 
 
+class QuickActionButton(discord.ui.Button):
+    def __init__(self, action: QuickButtonAction):
+        self.action = action
+        super().__init__(
+            label=action.label,
+            emoji=action.emoji,
+            style=discord.ButtonStyle.primary,
+            custom_id=f"quick_action:{action.action_id}",
+            row=action.row,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if view is None:
+            await interaction.response.send_message("❌ Меню уже недоступно.", ephemeral=True)
+            return
+        await _run_quick_button_action(view.bot, interaction, self.action.action_id)
+
+
 class MenuView(discord.ui.View):
     def __init__(self, bot: commands.Bot, current: str, catalog: dict[str, list[dict]], *, admin_only: bool):
         super().__init__(timeout=300)
@@ -445,6 +508,8 @@ class MenuView(discord.ui.View):
         if not admin_only:
             for action in MENU_ONLY_ACTIONS:
                 self.add_item(MenuActionButton(action))
+            for action in QUICK_BUTTON_ACTIONS:
+                self.add_item(QuickActionButton(action))
 
     async def on_timeout(self):
         for child in self.children:
