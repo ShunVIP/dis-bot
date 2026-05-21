@@ -3,7 +3,7 @@
 Реакции на мем "67 / six seven".
 
 Если в сообщении встречается 67 или six seven, бот иногда кидает
-случайную Giphy-гифку по теме мема.
+случайную тематическую Giphy-гифку по мему 67.
 """
 
 from __future__ import annotations
@@ -19,12 +19,17 @@ from bs4 import BeautifulSoup
 from discord.ext import commands
 
 UTC = timezone.utc
-GIPHY_EXPLORE_URL = "https://giphy.com/explore/67"
+GIPHY_SEARCH_URLS = (
+    "https://giphy.com/search/67-meme",
+    "https://giphy.com/search/67-brainrot",
+    "https://giphy.com/search/six-seven",
+    "https://giphy.com/search/67",
+)
 TRIGGER_RE = re.compile(r"(?<!\d)(67)(?!\d)|\bsix\s*seven\b", re.I)
 MEDIA_RE = re.compile(r"https://media\d*\.giphy\.com/media/([A-Za-z0-9]+)/giphy(?:[-\w]*)?\.(?:gif|webp)")
 HREF_ID_RE = re.compile(r"/gifs/[^\"' ]*?-([A-Za-z0-9]+)(?:[/?#]|$)")
 JSON_ID_RE = re.compile(r'"id":"([A-Za-z0-9]+)"')
-PAGE_HREF_RE = re.compile(r'href="(/gifs/[^"]*67[^"]*|/gifs/[^"]*six[^"]*seven[^"]*)"', re.I)
+PAGE_HREF_RE = re.compile(r'href="(/gifs/[^"]+)"', re.I)
 PAGE_PATH_RE = re.compile(r"^/gifs/[A-Za-z0-9\-]+$")
 
 FALLBACK_67_GIFS = [
@@ -36,6 +41,9 @@ FALLBACK_67_PAGES = [
     "https://giphy.com/gifs/67-l3q2K5jinAlChoCLS",
     "https://giphy.com/gifs/67-1zSz5MVw4zKg0",
     "https://giphy.com/gifs/67-3orieLeZL5kyNqiLm",
+    "https://giphy.com/gifs/search-67-meme",
+    "https://giphy.com/gifs/search-67-brainrot",
+    "https://giphy.com/gifs/search-six-seven",
 ]
 
 
@@ -147,16 +155,24 @@ class SixtySeven(commands.Cog):
                 "User-Agent": "Mozilla/5.0",
                 "Accept-Language": "en-US,en;q=0.9",
             }
+            found: list[str] = []
+            seen: set[str] = set()
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.get(GIPHY_EXPLORE_URL) as response:
-                    if response.status == 200:
+                for url in GIPHY_SEARCH_URLS:
+                    async with session.get(url) as response:
+                        if response.status != 200:
+                            continue
                         html = await response.text()
                         links = _extract_giphy_links(html)
-                        if links:
-                            random.shuffle(links)
-                            self._gif_cache = links[:30]
-                            self._gif_cache_fetched_at = now
-                            return self._gif_cache
+                        for link in links:
+                            if link not in seen:
+                                seen.add(link)
+                                found.append(link)
+            if found:
+                random.shuffle(found)
+                self._gif_cache = found[:40]
+                self._gif_cache_fetched_at = now
+                return self._gif_cache
         except Exception:
             pass
 
