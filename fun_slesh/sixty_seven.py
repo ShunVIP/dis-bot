@@ -24,11 +24,18 @@ TRIGGER_RE = re.compile(r"(?<!\d)(67)(?!\d)|\bsix\s*seven\b", re.I)
 MEDIA_RE = re.compile(r"https://media\d*\.giphy\.com/media/([A-Za-z0-9]+)/giphy(?:[-\w]*)?\.(?:gif|webp)")
 HREF_ID_RE = re.compile(r"/gifs/[^\"' ]*?-([A-Za-z0-9]+)(?:[/?#]|$)")
 JSON_ID_RE = re.compile(r'"id":"([A-Za-z0-9]+)"')
+PAGE_HREF_RE = re.compile(r'href="(/gifs/[^"]*67[^"]*|/gifs/[^"]*six[^"]*seven[^"]*)"', re.I)
+PAGE_PATH_RE = re.compile(r"^/gifs/[A-Za-z0-9\-]+$")
 
 FALLBACK_67_GIFS = [
     "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcXZiYWJqem05bm9qa3RqOWQ1eDZnMmdpNHJzMHcyNTR4OTdiOXp2diZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l3q2K5jinAlChoCLS/giphy.gif",
     "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdmpnZXQ5M2JsbDNjZXQ1eTR5Mm83aGdoemI4cnM5aWx2eG9oM3gxeCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/1zSz5MVw4zKg0/giphy.gif",
     "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExa2N0ZjRucnV0Zjcycm90eWNsN2NtaHFydDdhb2ZlNXRuMXYwYXd3YyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3orieLeZL5kyNqiLm/giphy.gif",
+]
+FALLBACK_67_PAGES = [
+    "https://giphy.com/gifs/67-l3q2K5jinAlChoCLS",
+    "https://giphy.com/gifs/67-1zSz5MVw4zKg0",
+    "https://giphy.com/gifs/67-3orieLeZL5kyNqiLm",
 ]
 
 
@@ -36,9 +43,22 @@ def _normalize_media_url(gif_id: str) -> str:
     return f"https://media.giphy.com/media/{gif_id}/giphy.gif"
 
 
+def _normalize_page_url(path: str) -> str:
+    return f"https://giphy.com{path}"
+
+
 def _extract_giphy_links(page_html: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
+
+    for path in PAGE_HREF_RE.findall(page_html):
+        url = _normalize_page_url(path)
+        if url not in seen:
+            seen.add(url)
+            found.append(url)
+
+    if found:
+        return found
 
     for gif_id in MEDIA_RE.findall(page_html):
         url = _normalize_media_url(gif_id)
@@ -65,6 +85,17 @@ def _extract_giphy_links(page_html: str) -> list[str]:
         return found
 
     soup = BeautifulSoup(page_html, "html.parser")
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "").strip()
+        if PAGE_PATH_RE.match(href) and ("67" in href.lower() or "six" in href.lower()):
+            url = _normalize_page_url(href)
+            if url not in seen:
+                seen.add(url)
+                found.append(url)
+
+    if found:
+        return found
+
     for script in soup.find_all("script"):
         text = script.string or script.get_text(" ", strip=False)
         if not text:
@@ -132,7 +163,7 @@ class SixtySeven(commands.Cog):
         if self._gif_cache:
             return self._gif_cache
 
-        self._gif_cache = FALLBACK_67_GIFS[:]
+        self._gif_cache = FALLBACK_67_PAGES[:] + FALLBACK_67_GIFS[:]
         self._gif_cache_fetched_at = now
         return self._gif_cache
 
@@ -159,16 +190,9 @@ class SixtySeven(commands.Cog):
         if not gif_url:
             return
 
-        embed = discord.Embed(
-            title="67",
-            description="Шесть-семь активирован.",
-            color=discord.Color.from_rgb(103, 103, 180),
-        )
-        embed.set_image(url=gif_url)
-
         try:
             await message.reply(
-                embed=embed,
+                content=f"67\n{gif_url}",
                 mention_author=False,
                 suppress_embeds=False,
                 allowed_mentions=discord.AllowedMentions.none(),
