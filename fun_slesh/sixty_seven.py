@@ -131,18 +131,9 @@ def _extract_giphy_links(page_html: str) -> list[str]:
 class SixtySeven(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._channel_cooldowns: dict[int, datetime] = {}
         self._gif_cache: list[str] = []
         self._gif_cache_fetched_at: datetime | None = None
         self._last_sent: dict[int, str] = {}
-
-    def _channel_ready(self, channel_id: int) -> bool:
-        now = datetime.now(UTC)
-        last = self._channel_cooldowns.get(channel_id)
-        if last and now - last < timedelta(minutes=2):
-            return False
-        self._channel_cooldowns[channel_id] = now
-        return True
 
     async def _get_gif_pool(self) -> list[str]:
         now = datetime.now(UTC)
@@ -197,8 +188,6 @@ class SixtySeven(commands.Cog):
         if message.author.bot or not message.guild or not message.content:
             return
         if not TRIGGER_RE.search(message.content):
-            return
-        if not self._channel_ready(message.channel.id):
             return
 
         pool = await self._get_gif_pool()
