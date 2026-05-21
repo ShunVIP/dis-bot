@@ -32,6 +32,19 @@ JSON_ID_RE = re.compile(r'"id":"([A-Za-z0-9]+)"')
 PAGE_HREF_RE = re.compile(r'href="(/gifs/[^"]+)"', re.I)
 PAGE_PATH_RE = re.compile(r"^/gifs/[A-Za-z0-9\-]+$")
 BAD_GIPHY_IDS = {"comscore", "giphy", "search"}
+CURATED_67_MEMES = [
+    "https://giphy.com/gifs/meme-gifzbox-six-seven-RVCJ3vwebUGDpoy7Tm",
+    "https://giphy.com/gifs/raenaai-meme-brainrot-67-PXJ0gV0pE6CjRQqs9p",
+    "https://giphy.com/gifs/67-six-seven-6-7-jOEF9Bwm5vrqYEK4Xr",
+    "https://giphy.com/gifs/6-7-lospollos-los-and-wad-67-cfocwRJl99zkfd5w5s/",
+    "https://giphy.com/gifs/67-six-seven-diddybludeinstein-h1fDrNk53BgshHSFkf",
+    "https://giphy.com/gifs/digi995-67-6-7-six-seven-3K0JyaSZQJa6HIy3gU",
+    "https://giphy.com/gifs/brainrot-67-hate-MKUOUJrFldIyi2hJyT",
+    "https://giphy.com/gifs/67-6-7-meme-cMKVt2A8Eg9QQyWTto",
+    "https://giphy.com/gifs/brainrot-67-spongeball-g2mQaLCGAm3k7OpIN9/",
+    "https://giphy.com/gifs/six-67-6-7-FzfTeUt2qU30knozcq",
+    "https://giphy.com/gifs/RespectiveCollective-cat-brainrot-67-emleA2iGk5UFLXrGoX",
+]
 
 FALLBACK_67_GIFS = [
     "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcXZiYWJqem05bm9qa3RqOWQ1eDZnMmdpNHJzMHcyNTR4OTdiOXp2diZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l3q2K5jinAlChoCLS/giphy.gif",
@@ -169,6 +182,10 @@ class SixtySeven(commands.Cog):
         if self._gif_cache and self._gif_cache_fetched_at and now - self._gif_cache_fetched_at < timedelta(hours=3):
             return self._gif_cache
 
+        self._gif_cache = CURATED_67_MEMES[:]
+        random.shuffle(self._gif_cache)
+        self._gif_cache_fetched_at = now
+
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             headers = {
@@ -189,8 +206,9 @@ class SixtySeven(commands.Cog):
                                 seen.add(link)
                                 found.append(link)
             if found:
-                random.shuffle(found)
-                self._gif_cache = found[:40]
+                # Curated pool stays primary; scraped items are emergency fallback only.
+                self._gif_cache = CURATED_67_MEMES[:] + [item for item in found if item not in CURATED_67_MEMES][:12]
+                random.shuffle(self._gif_cache)
                 self._gif_cache_fetched_at = now
                 return self._gif_cache
         except Exception:
