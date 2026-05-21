@@ -31,6 +31,7 @@ HREF_ID_RE = re.compile(r"/gifs/[^\"' ]*?-([A-Za-z0-9]+)(?:[/?#]|$)")
 JSON_ID_RE = re.compile(r'"id":"([A-Za-z0-9]+)"')
 PAGE_HREF_RE = re.compile(r'href="(/gifs/[^"]+)"', re.I)
 PAGE_PATH_RE = re.compile(r"^/gifs/[A-Za-z0-9\-]+$")
+BAD_GIPHY_IDS = {"comscore", "giphy", "search"}
 
 FALLBACK_67_GIFS = [
     "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcXZiYWJqem05bm9qa3RqOWQ1eDZnMmdpNHJzMHcyNTR4OTdiOXp2diZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l3q2K5jinAlChoCLS/giphy.gif",
@@ -41,9 +42,6 @@ FALLBACK_67_PAGES = [
     "https://giphy.com/gifs/67-l3q2K5jinAlChoCLS",
     "https://giphy.com/gifs/67-1zSz5MVw4zKg0",
     "https://giphy.com/gifs/67-3orieLeZL5kyNqiLm",
-    "https://giphy.com/gifs/search-67-meme",
-    "https://giphy.com/gifs/search-67-brainrot",
-    "https://giphy.com/gifs/search-six-seven",
 ]
 
 
@@ -55,11 +53,30 @@ def _normalize_page_url(path: str) -> str:
     return f"https://giphy.com{path}"
 
 
+def _valid_gif_id(gif_id: str) -> bool:
+    gif_id = (gif_id or "").strip()
+    if not gif_id or len(gif_id) < 6:
+        return False
+    return gif_id.lower() not in BAD_GIPHY_IDS
+
+
+def _valid_page_path(path: str) -> bool:
+    path = (path or "").strip()
+    if not PAGE_PATH_RE.match(path):
+        return False
+    lowered = path.lower()
+    if "/search" in lowered:
+        return False
+    return "67" in lowered or "six" in lowered
+
+
 def _extract_giphy_links(page_html: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
 
     for path in PAGE_HREF_RE.findall(page_html):
+        if not _valid_page_path(path):
+            continue
         url = _normalize_page_url(path)
         if url not in seen:
             seen.add(url)
@@ -69,6 +86,8 @@ def _extract_giphy_links(page_html: str) -> list[str]:
         return found
 
     for gif_id in MEDIA_RE.findall(page_html):
+        if not _valid_gif_id(gif_id):
+            continue
         url = _normalize_media_url(gif_id)
         if url not in seen:
             seen.add(url)
@@ -78,12 +97,16 @@ def _extract_giphy_links(page_html: str) -> list[str]:
         return found
 
     for gif_id in HREF_ID_RE.findall(page_html):
+        if not _valid_gif_id(gif_id):
+            continue
         url = _normalize_media_url(gif_id)
         if url not in seen:
             seen.add(url)
             found.append(url)
 
     for gif_id in JSON_ID_RE.findall(page_html):
+        if not _valid_gif_id(gif_id):
+            continue
         url = _normalize_media_url(gif_id)
         if url not in seen:
             seen.add(url)
@@ -95,7 +118,7 @@ def _extract_giphy_links(page_html: str) -> list[str]:
     soup = BeautifulSoup(page_html, "html.parser")
     for link in soup.find_all("a", href=True):
         href = link.get("href", "").strip()
-        if PAGE_PATH_RE.match(href) and ("67" in href.lower() or "six" in href.lower()):
+        if _valid_page_path(href):
             url = _normalize_page_url(href)
             if url not in seen:
                 seen.add(url)
@@ -110,16 +133,22 @@ def _extract_giphy_links(page_html: str) -> list[str]:
             continue
         text = html.unescape(text)
         for gif_id in MEDIA_RE.findall(text):
+            if not _valid_gif_id(gif_id):
+                continue
             url = _normalize_media_url(gif_id)
             if url not in seen:
                 seen.add(url)
                 found.append(url)
         for gif_id in HREF_ID_RE.findall(text):
+            if not _valid_gif_id(gif_id):
+                continue
             url = _normalize_media_url(gif_id)
             if url not in seen:
                 seen.add(url)
                 found.append(url)
         for gif_id in JSON_ID_RE.findall(text):
+            if not _valid_gif_id(gif_id):
+                continue
             url = _normalize_media_url(gif_id)
             if url not in seen:
                 seen.add(url)
