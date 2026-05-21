@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -40,33 +41,33 @@ HEROES_PATTERNS = (
 )
 
 GENERIC_START_HAIKUS = [
-    "Старые замки.\n<@{user_id}> снова с нами.\nНочь ушла в Heroes.",
-    "Ход начат тихо.\n<@{user_id}> ищет рудник.\nСон отложен прочь.",
-    "Пыль на картах спит.\n<@{user_id}> будит скелетов.\nВечер потерян.",
-    "Башни ждут приказ.\n<@{user_id}> выбрал клетку.\nМир стал пошагов.",
+    "Старые замки.\n<@{user_id}> снова в Heroes.\nDiscord всё видит.",
+    "Ход начат тихо.\n<@{user_id}> ищет рудник.\nСессия открыта.",
+    "Пыль на картах спит.\n<@{user_id}> будит скелетов.\nHeroes запущен.",
+    "Башни ждут приказ.\n<@{user_id}> выбрал клетку.\nПошёл Discord-счёт.",
 ]
 
 OLDEN_START_HAIKUS = [
-    "Новая эра.\n<@{user_id}> снова проверит.\nТройка ждёт судей.",
-    "Старый дух шуршит.\n<@{user_id}> в Olden Era.\nСпоры неизбежны.",
-    "Ностальгии звон.\n<@{user_id}> ищет чудо.\nТройка смотрит вдаль.",
+    "Новая эра.\n<@{user_id}> снова проверит.\nDiscord начал счёт.",
+    "Старый дух шуршит.\n<@{user_id}> в Olden Era.\nСессия открыта.",
+    "Ностальгии звон.\n<@{user_id}> ищет чудо.\nТройка ждёт судей.",
 ]
 
 GENERIC_END_HAIKUS = [
-    "Ход окончен, тишь.\n<@{user_id}> вышел из Heroes.\nПробыл {duration}.",
-    "Замок опустел.\n<@{user_id}> вернулся к людям.\nСессия: {duration}.",
-    "Последний мувпойнт.\n<@{user_id}> покинул карту.\nИгра длилась {duration}.",
+    "Ход окончен, тишь.\n<@{user_id}> вышел из Heroes.\nDiscord-сессия: {duration}.",
+    "Замок опустел.\n<@{user_id}> вернулся к людям.\nHeroes открыт: {duration}.",
+    "Последний мувпойнт.\n<@{user_id}> покинул карту.\nПо Discord: {duration}.",
 ]
 
 OLDEN_END_HAIKUS = [
-    "Эра стихает.\n<@{user_id}> вышел из споров.\nПробыл {duration}.",
-    "Новая эра.\n<@{user_id}> вернулся в чат.\nСессия: {duration}.",
+    "Эра стихает.\n<@{user_id}> вышел из споров.\nDiscord-сессия: {duration}.",
+    "Новая эра.\n<@{user_id}> вернулся в чат.\nHeroes открыт: {duration}.",
 ]
 
 
 def _ensure_tables():
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
+        conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS heroes_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +77,15 @@ def _ensure_tables():
                 started_at TEXT NOT NULL,
                 ended_at TEXT NOT NULL,
                 seconds INTEGER NOT NULL
-            )
+            );
+
+            CREATE TABLE IF NOT EXISTS heroes_active_sessions (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                game_name TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            );
             """
         )
         conn.commit()
@@ -164,9 +173,31 @@ class HeroesTroll(commands.Cog):
         self.bot = bot
         self._active_sessions: dict[tuple[int, int], dict[str, object]] = {}
         _ensure_tables()
+        self._load_active_sessions()
+
+    def _load_active_sessions(self):
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT guild_id, user_id, game_name, started_at FROM heroes_active_sessions"
+            ).fetchall()
+        for guild_id, user_id, game_name, started_at in rows:
+            try:
+                started_dt = datetime.fromisoformat(started_at)
+                if started_dt.tzinfo is None:
+                    started_dt = started_dt.replace(tzinfo=UTC)
+            except Exception:
+                started_dt = datetime.now(UTC)
+            self._active_sessions[(int(guild_id), int(user_id))] = {
+                "game_name": str(game_name),
+                "started_at": started_dt,
+            }
 
     def cog_unload(self):
         pass
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        asyncio.create_task(self._reconcile_active_sessions())
 
     def _remember_session(self, guild_id: int, user_id: int, game_name: str):
         now = datetime.now(UTC)
@@ -174,9 +205,28 @@ class HeroesTroll(commands.Cog):
             "game_name": game_name,
             "started_at": now,
         }
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO heroes_active_sessions(guild_id, user_id, game_name, started_at)
+                VALUES(?,?,?,?)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                    game_name=excluded.game_name,
+                    started_at=excluded.started_at
+                """,
+                (guild_id, user_id, game_name, now.isoformat()),
+            )
+            conn.commit()
 
     def _pop_session(self, guild_id: int, user_id: int):
-        return self._active_sessions.pop((guild_id, user_id), None)
+        session = self._active_sessions.pop((guild_id, user_id), None)
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "DELETE FROM heroes_active_sessions WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id),
+            )
+            conn.commit()
+        return session
 
     def _pick_message(self, user_id: int, game_name: str, pool: list[str], *, duration: str | None = None) -> str:
         base = pool[hash((user_id, game_name, datetime.now(UTC).hour, duration or "")) % len(pool)]
@@ -219,6 +269,33 @@ class HeroesTroll(commands.Cog):
         if hours:
             return f"{hours}ч {minutes}м"
         return f"{minutes}м"
+
+    async def _reconcile_active_sessions(self):
+        await self.bot.wait_until_ready()
+        stale: list[tuple[discord.Guild, int, dict[str, object]]] = []
+
+        for (guild_id, user_id), session in list(self._active_sessions.items()):
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            member = guild.get_member(user_id)
+            if member is None:
+                continue
+            active_now = _find_active_heroes(_extract_game_names(member.activities))
+            if active_now:
+                continue
+            stale.append((guild, user_id, session))
+
+        for guild, user_id, session in stale:
+            popped = self._pop_session(guild.id, user_id)
+            if not popped:
+                continue
+            started_at = popped["started_at"]
+            game_name = str(popped["game_name"])
+            ended_at = datetime.now(UTC)
+            self._save_finished_session(guild.id, user_id, game_name, started_at, ended_at)
+            duration = self._format_duration(int((ended_at - started_at).total_seconds()))
+            await self._send_troll(guild, user_id, game_name, duration=duration, ended=True)
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
