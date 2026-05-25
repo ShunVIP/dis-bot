@@ -41,27 +41,27 @@ HEROES_PATTERNS = (
 )
 
 GENERIC_START_HAIKUS = [
-    "Старые замки.\n<@{user_id}> снова в Heroes.\nDiscord всё видит.",
-    "Ход начат тихо.\n<@{user_id}> ищет рудник.\nСессия открыта.",
-    "Пыль на картах спит.\n<@{user_id}> будит скелетов.\nHeroes запущен.",
-    "Башни ждут приказ.\n<@{user_id}> выбрал клетку.\nПошёл Discord-счёт.",
+    "Старые замки.\n{display_name} снова в Heroes.\nDiscord всё видит.",
+    "Ход начат тихо.\n{display_name} ищет рудник.\nСессия открыта.",
+    "Пыль на картах спит.\n{display_name} будит скелетов.\nHeroes запущен.",
+    "Башни ждут приказ.\n{display_name} выбрал клетку.\nПошёл Discord-счёт.",
 ]
 
 OLDEN_START_HAIKUS = [
-    "Новая эра.\n<@{user_id}> снова проверит.\nDiscord начал счёт.",
-    "Старый дух шуршит.\n<@{user_id}> в Olden Era.\nСессия открыта.",
-    "Ностальгии звон.\n<@{user_id}> ищет чудо.\nТройка ждёт судей.",
+    "Новая эра.\n{display_name} снова проверит.\nDiscord начал счёт.",
+    "Старый дух шуршит.\n{display_name} в Olden Era.\nСессия открыта.",
+    "Ностальгии звон.\n{display_name} ищет чудо.\nТройка ждёт судей.",
 ]
 
 GENERIC_END_HAIKUS = [
-    "Ход окончен, тишь.\n<@{user_id}> вышел из Heroes.\nDiscord-сессия: {duration}.",
-    "Замок опустел.\n<@{user_id}> вернулся к людям.\nHeroes открыт: {duration}.",
-    "Последний мувпойнт.\n<@{user_id}> покинул карту.\nПо Discord: {duration}.",
+    "Ход окончен, тишь.\n{display_name} вышел из Heroes.\nDiscord-сессия: {duration}.",
+    "Замок опустел.\n{display_name} вернулся к людям.\nHeroes открыт: {duration}.",
+    "Последний мувпойнт.\n{display_name} покинул карту.\nПо Discord: {duration}.",
 ]
 
 OLDEN_END_HAIKUS = [
-    "Эра стихает.\n<@{user_id}> вышел из споров.\nDiscord-сессия: {duration}.",
-    "Новая эра.\n<@{user_id}> вернулся в чат.\nHeroes открыт: {duration}.",
+    "Эра стихает.\n{display_name} вышел из споров.\nDiscord-сессия: {duration}.",
+    "Новая эра.\n{display_name} вернулся в чат.\nHeroes открыт: {duration}.",
 ]
 
 
@@ -228,23 +228,35 @@ class HeroesTroll(commands.Cog):
             conn.commit()
         return session
 
-    def _pick_message(self, user_id: int, game_name: str, pool: list[str], *, duration: str | None = None) -> str:
+    def _pick_message(
+        self,
+        user_id: int,
+        game_name: str,
+        pool: list[str],
+        *,
+        display_name: str,
+        duration: str | None = None,
+    ) -> str:
         base = pool[hash((user_id, game_name, datetime.now(UTC).hour, duration or "")) % len(pool)]
-        payload = {"user_id": user_id, "duration": duration or "недолго"}
+        payload = {"display_name": display_name, "duration": duration or "недолго"}
         return base.format(**payload)
 
     async def _send_troll(self, guild: discord.Guild, user_id: int, game_name: str, *, duration: str | None = None, ended: bool = False):
+        if self.bot.get_cog("ActivityTracker") is not None:
+            return
         channel = _pick_channel(guild)
         if channel is None:
             return
+        member = guild.get_member(user_id)
+        display_name = member.display_name if member else f"участник {user_id}"
         olden = _is_olden_era(game_name)
         if ended:
             pool = OLDEN_END_HAIKUS if olden else GENERIC_END_HAIKUS
         else:
             pool = OLDEN_START_HAIKUS if olden else GENERIC_START_HAIKUS
-        message = self._pick_message(user_id, game_name, pool, duration=duration)
+        message = self._pick_message(user_id, game_name, pool, display_name=display_name, duration=duration)
         try:
-            await channel.send(message, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+            await channel.send(message, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             pass
 

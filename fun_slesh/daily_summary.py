@@ -21,6 +21,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from utils.logger import log as _base_log
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 MSG_DB  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "messages.db"))
@@ -28,6 +29,7 @@ UTC     = timezone.utc
 MSK     = ZoneInfo("Europe/Moscow")
 
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+log = _base_log.bind(src="daily_summary")
 
 # ── Фолбэк хокку (если GPT недоступен) ───────────────────────────────────────
 FALLBACK_HAIKU = [
@@ -56,6 +58,14 @@ def _ensure_tables():
                 guild_id  INTEGER PRIMARY KEY,
                 channel_id INTEGER,
                 enabled   INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS summary_post_log (
+                guild_id     INTEGER NOT NULL,
+                summary_type TEXT    NOT NULL,
+                period_key   TEXT    NOT NULL,
+                posted_at    TEXT    NOT NULL,
+                PRIMARY KEY (guild_id, summary_type, period_key)
             );
         """)
 
@@ -276,6 +286,38 @@ def _get_weekly_stats(guild_id: int) -> dict:
                 datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
             ),
         ) if _table_exists(conn, "heroes_sessions") else []
+        top_activities = _top_rows(
+            conn,
+            """
+            SELECT activity_name, activity_type, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<?
+            GROUP BY activity_name, activity_type
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 5
+            """,
+            (
+                guild_id,
+                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+            ),
+        ) if _table_exists(conn, "activity_sessions") else []
+        top_activity_users = _top_rows(
+            conn,
+            """
+            SELECT user_id, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<?
+            GROUP BY user_id
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 5
+            """,
+            (
+                guild_id,
+                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+            ),
+        ) if _table_exists(conn, "activity_sessions") else []
 
     return {
         "since": since,
@@ -289,6 +331,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
         "top_rep": top_rep,
         "top_toxic": top_toxic,
         "top_heroes": top_heroes,
+        "top_activities": top_activities,
+        "top_activity_users": top_activity_users,
         "total_msgs": total_msgs,
         "total_voice_s": total_voice,
     }
@@ -298,7 +342,7 @@ def _member_name(guild: discord.Guild, user_id: int) -> str:
     member = guild.get_member(int(user_id))
     if member:
         return member.display_name
-    return f"<@{user_id}>"
+    return f"участник {user_id}"
 
 
 def _format_rank_lines(
@@ -353,6 +397,7 @@ def _build_winner_congrats(guild: discord.Guild, stats: dict) -> str:
         ("серии", stats["top_streaks"]),
         ("репа", stats["top_rep"]),
         ("герои", stats["top_heroes"]),
+        ("активности", stats.get("top_activity_users", [])),
     ]
 
     for label, rows in category_sources:
@@ -507,8 +552,37 @@ async def _post_daily_summary(bot: commands.Bot):
         emb   = await _build_summary_embed(guild, stats)
         try:
             await ch.send(embed=emb)
-        except Exception:
-            pass
+        except Exception as e:
+            log.bind(guild_id=guild_id, channel_id=ch_id).error(f"daily summary post failed: {e}")
+
+
+def _weekly_period_key() -> str:
+    start_prev_week, start_this_week = _week_bounds_msk()
+    return f"{start_prev_week.isoformat()}_{start_this_week.isoformat()}"
+
+
+def _mark_posted(guild_id: int, summary_type: str, period_key: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO summary_post_log(guild_id, summary_type, period_key, posted_at)
+            VALUES(?,?,?,?)
+            """,
+            (guild_id, summary_type, period_key, datetime.now(UTC).isoformat()),
+        )
+        conn.commit()
+
+
+def _was_posted(guild_id: int, summary_type: str, period_key: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM summary_post_log
+            WHERE guild_id=? AND summary_type=? AND period_key=?
+            """,
+            (guild_id, summary_type, period_key),
+        ).fetchone()
+    return bool(row)
 
 
 async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embed:
@@ -542,6 +616,25 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
             value=_format_rank_lines(guild, stats["top_heroes"], "", value_formatter=_fmt_seconds),
             inline=False,
         )
+    if stats.get("top_activities"):
+        lines = []
+        labels = {
+            "game": "игра",
+            "streaming": "стрим",
+            "listening": "слушает",
+            "watching": "смотрит",
+            "competing": "соревнование",
+        }
+        for i, (name, activity_type, seconds) in enumerate(stats["top_activities"], start=1):
+            label = labels.get(activity_type, activity_type)
+            lines.append(f"**{i}.** {name} ({label}) — **{_fmt_seconds(int(seconds))}**")
+        emb.add_field(name="🎮 Топ активностей", value="\n".join(lines), inline=False)
+    if stats.get("top_activity_users"):
+        emb.add_field(
+            name="🕹️ Топ по активностям",
+            value=_format_rank_lines(guild, stats["top_activity_users"], "", value_formatter=_fmt_seconds),
+            inline=False,
+        )
     emb.add_field(name="💰 Топ баланса", value=_format_rank_lines(guild, stats["top_balance"], "монет"), inline=True)
     emb.add_field(name="🔥 Топ серий", value=_format_rank_lines(guild, stats["top_streaks"], "дн."), inline=True)
     emb.add_field(name="⭐ Топ репы", value=_format_rank_lines(guild, stats["top_rep"], "репы"), inline=False)
@@ -553,12 +646,15 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
 
 
 async def _post_weekly_summary(bot: commands.Bot):
+    period_key = _weekly_period_key()
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT guild_id, channel_id FROM daily_summary_config WHERE enabled=1 AND channel_id IS NOT NULL"
         ).fetchall()
 
     for guild_id, ch_id in rows:
+        if _was_posted(guild_id, "weekly", period_key):
+            continue
         guild = bot.get_guild(guild_id)
         channel = bot.get_channel(ch_id)
         if not guild or not channel:
@@ -567,8 +663,19 @@ async def _post_weekly_summary(bot: commands.Bot):
             stats = _get_weekly_stats(guild_id)
             emb = await _build_weekly_embed(guild, stats)
             await channel.send(embed=emb)
-        except Exception:
-            pass
+            _mark_posted(guild_id, "weekly", period_key)
+        except Exception as e:
+            log.bind(guild_id=guild_id, channel_id=ch_id).error(f"weekly summary post failed: {e}")
+
+
+async def _catch_up_weekly_summary(bot: commands.Bot):
+    await bot.wait_until_ready()
+    now_msk = datetime.now(MSK)
+    start_this_week = now_msk.date() - timedelta(days=now_msk.date().weekday())
+    catchup_until = datetime.combine(start_this_week + timedelta(days=2), datetime.min.time(), MSK)
+    if now_msk >= catchup_until:
+        return
+    await _post_weekly_summary(bot)
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -580,6 +687,7 @@ class DailySummary(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._weekly_catchup_started = False
         _ensure_tables()
         if not scheduler.running:
             scheduler.start()
@@ -587,13 +695,20 @@ class DailySummary(commands.Cog):
         scheduler.add_job(
             _post_daily_summary, "cron",
             hour=23, minute=59, timezone=MSK,
-            args=[bot], id="daily_summary", replace_existing=True
+            args=[bot], id="daily_summary", replace_existing=True, misfire_grace_time=3600
         )
         scheduler.add_job(
             _post_weekly_summary, "cron",
             day_of_week="mon", hour=0, minute=0, timezone=MSK,
-            args=[bot], id="weekly_summary", replace_existing=True
+            args=[bot], id="weekly_summary", replace_existing=True, misfire_grace_time=48 * 3600
         )
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if self._weekly_catchup_started:
+            return
+        self._weekly_catchup_started = True
+        asyncio.create_task(_catch_up_weekly_summary(self.bot))
 
     # ── /итог_дня ─────────────────────────────────────────────────────────────
     @summary_group.command(name="день",
