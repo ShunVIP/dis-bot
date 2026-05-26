@@ -9,6 +9,7 @@ game haiku without real user mentions.
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import random
 import re
@@ -26,6 +27,10 @@ DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebas
 UTC = timezone.utc
 MSK = ZoneInfo("Europe/Moscow")
 WIKI_HEADERS = {"User-Agent": "ViPikBot/1.0 (Discord bot; private server)"}
+SEARCH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; ViPikBot/1.0; Discord private server)",
+    "Accept-Language": "ru,en;q=0.8",
+}
 
 TRACKED_TYPES = {
     discord.ActivityType.playing: "game",
@@ -80,64 +85,56 @@ GENERIC_ENDINGS = [
     "Тень легла на HUD.",
 ]
 
-GAME_STYLE_RULES = [
-    (
-        ("league of legends", "lol"),
-        {
-            "openings": ["Рифт раскрыт туманом.", "Миньоны идут строем.", "Вард горит в кустах."],
-            "actions": ["{display_name} выходит на линию.", "{display_name} ждёт ганка.", "{game} зовёт к Нексусу."],
-            "endings": ["Барон дышит в темноте.", "Пинг летит через карту.", "Башня считает ошибки."],
-        },
-    ),
-    (
-        ("blade & soul", "blade and soul", "bns"),
-        {
-            "openings": ["Клинок ловит ветер.", "Ци шумит под кожей.", "Арена ждёт прыжка."],
-            "actions": ["{display_name} входит в танец стали.", "{display_name} крутит комбо.", "{game} шепчет о дуэли."],
-            "endings": ["Удар тает в воздухе.", "Шёлк и сталь молчат.", "Босс считает фреймы."],
-        },
-    ),
-    (
-        ("neverness to everness",),
-        {
-            "openings": ["Город не спит неоном.", "Аномалия шепчет.", "Асфальт блестит дождём."],
-            "actions": ["{display_name} сворачивает в странность.", "{display_name} ловит сбой реальности.", "{game} открывает дверь."],
-            "endings": ["Фонари дрожат в луже.", "Реальность снова мягкая.", "Ночь меняет правила."],
-        },
-    ),
-    (
-        ("arknights", "endfield"),
-        {
-            "openings": ["База смотрит в пустошь.", "Оператор ждёт приказ.", "Пыль садится на броню."],
-            "actions": ["{display_name} строит маршрут.", "{display_name} выводит отряд.", "{game} зовёт в экспедицию."],
-            "endings": ["Дрон чертит круги.", "Терминал греет ладонь.", "Поле держит тишину."],
-        },
-    ),
-    (
-        ("clair obscur", "expedition 33"),
-        {
-            "openings": ["Краска темнеет в небе.", "Экспедиция молчит.", "Цифра дрожит на стене."],
-            "actions": ["{display_name} идёт сквозь мазок.", "{display_name} держит ритм удара.", "{game} раскрывает боль."],
-            "endings": ["Мир сохнет на холсте.", "Парирование как вдох.", "Свет гаснет красиво."],
-        },
-    ),
-    (
-        ("forza", "horizon"),
-        {
-            "openings": ["Асфальт блестит жарой.", "Мотор будит рассвет.", "Пыль летит за спойлером."],
-            "actions": ["{display_name} давит газ.", "{display_name} ловит апекс.", "{game} зовёт на трассу."],
-            "endings": ["Шины пишут хайку.", "Финиш пахнет бензином.", "Радар мигает вдали."],
-        },
-    ),
-    (
-        ("heroes of might", "might & magic", "olden era", "homm"),
-        {
-            "openings": ["Замок проснулся в тумане.", "Герой считает клетки.", "Рудник звенит под луной."],
-            "actions": ["{display_name} ведёт караван.", "{display_name} копит мувпойнты.", "{game} зовёт к старой карте."],
-            "endings": ["Скелеты ждут приказ.", "Ход уходит в песок.", "Грифон стерёг рассвет."],
-        },
-    ),
-]
+GENRE_STYLES = {
+    "moba": {
+        "needles": ("moba", "моба", "league of legends", "dota", "нексус", "линия", "чемпион"),
+        "openings": ["Линия встала туманом.", "Вард горит в кустах.", "Миньоны идут строем."],
+        "actions": ["{display_name} ловит тайминг.", "{display_name} держит линию.", "{game} зовёт к командной драке."],
+        "endings": ["Карта мигает тревогой.", "Объект ждёт ошибки.", "Пинг летит через реку."],
+    },
+    "racing": {
+        "needles": ("гонк", "racing", "race", "forza", "horizon", "машин", "авто", "трасс"),
+        "openings": ["Асфальт блестит жарой.", "Мотор будит рассвет.", "Пыль летит за спойлером."],
+        "actions": ["{display_name} давит газ.", "{display_name} ловит апекс.", "{game} зовёт на трассу."],
+        "endings": ["Шины пишут дугу.", "Финиш пахнет бензином.", "Радар мигает вдали."],
+    },
+    "strategy": {
+        "needles": ("стратег", "strategy", "пошаг", "тактик", "heroes of might", "homm", "цивилизац"),
+        "openings": ["Карта проснулась в тумане.", "Ход считает клетки.", "Ресурсы звенят под луной."],
+        "actions": ["{display_name} строит план.", "{display_name} ведёт отряд.", "{game} зовёт к долгому ходу."],
+        "endings": ["Флаг ждёт приказа.", "Очередь хода темнеет.", "Разведчик исчез за лесом."],
+    },
+    "rpg": {
+        "needles": ("rpg", "ролевая", "jrpg", "action rpg", "персонаж", "сюжет", "квест"),
+        "openings": ["Квест дрожит на карте.", "Инвентарь шуршит тихо.", "Город хранит побочный путь."],
+        "actions": ["{display_name} выбирает судьбу.", "{display_name} входит в историю.", "{game} раскрывает журнал."],
+        "endings": ["Диалог ждёт ответа.", "Сейв светится у двери.", "Лор ложится на ладонь."],
+    },
+    "shooter": {
+        "needles": ("шутер", "shooter", "fps", "стрел", "оруж", "тактический"),
+        "openings": ["Прицел режет дым.", "Шаги глохнут в коридоре.", "Раунд встаёт на паузу."],
+        "actions": ["{display_name} проверяет угол.", "{display_name} держит прицел.", "{game} зовёт на точку."],
+        "endings": ["Гильза стынет у стены.", "Радар молчит секунду.", "Пульс считает раунд."],
+    },
+    "anime": {
+        "needles": ("аниме", "anime", "gacha", "гача", "оператор", "отряд", "персонажи"),
+        "openings": ["Баннер мерцает в неоне.", "Отряд ждёт приказ.", "Арт сияет на экране."],
+        "actions": ["{display_name} собирает команду.", "{display_name} листает судьбу.", "{game} зовёт новых героев."],
+        "endings": ["Редкость шепчет из света.", "Скилл уходит в кулдаун.", "Меню пахнет надеждой."],
+    },
+    "horror": {
+        "needles": ("хоррор", "horror", "ужас", "страх", "выживание"),
+        "openings": ["Дверь скрипит без ветра.", "Фонарь дрожит в руке.", "Тень стоит за экраном."],
+        "actions": ["{display_name} идёт на звук.", "{display_name} экономит патроны.", "{game} прячет дыхание."],
+        "endings": ["Сейв далеко за спиной.", "Шорох гасит чат.", "Темнота считает шаги."],
+    },
+    "mmo": {
+        "needles": ("mmo", "мморпг", "mmorpg", "онлайн", "рейд", "гильд", "массовая"),
+        "openings": ["Город шумит никами.", "Рейд собирает голоса.", "Аукцион спит в углу."],
+        "actions": ["{display_name} входит в мир.", "{display_name} ищет пати.", "{game} открывает сервер."],
+        "endings": ["Чат торговли мерцает.", "Босс ждёт отката.", "Гильдия зовёт в ночь."],
+    },
+}
 
 
 def _ensure_tables():
@@ -182,6 +179,16 @@ def _ensure_tables():
                 url           TEXT,
                 fetched_at    TEXT NOT NULL,
                 PRIMARY KEY (activity_name, lang)
+            );
+
+            CREATE TABLE IF NOT EXISTS activity_game_profiles (
+                activity_name TEXT PRIMARY KEY,
+                title         TEXT,
+                genre         TEXT,
+                keywords      TEXT,
+                source_text   TEXT,
+                source_url    TEXT,
+                fetched_at    TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS activity_notice_log (
@@ -245,28 +252,48 @@ def _member_name(guild: discord.Guild, user_id: int) -> str:
     return member.display_name if member else f"участник {user_id}"
 
 
-def _style_for_game(game_name: str) -> dict:
-    normalized = game_name.lower()
+def _infer_genre(text: str) -> str:
+    normalized = text.lower()
+    scores: dict[str, int] = {}
+    for genre, style in GENRE_STYLES.items():
+        score = sum(1 for needle in style["needles"] if needle in normalized)
+        if score:
+            scores[genre] = score
+    if not scores:
+        return "generic"
+    return max(scores.items(), key=lambda item: item[1])[0]
+
+
+def _style_for_profile(profile: dict | None) -> dict:
     merged = {
         "openings": list(GENERIC_OPENINGS),
         "actions": list(GENERIC_ACTIONS),
         "endings": list(GENERIC_ENDINGS),
     }
-    for patterns, style in GAME_STYLE_RULES:
-        if any(pattern in normalized for pattern in patterns):
-            merged["openings"] = style["openings"] + merged["openings"]
-            merged["actions"] = style["actions"] + merged["actions"]
-            merged["endings"] = style["endings"] + merged["endings"]
-            break
+    genre = (profile or {}).get("genre")
+    style = GENRE_STYLES.get(genre or "")
+    if style:
+        merged["openings"] = style["openings"] + merged["openings"]
+        merged["actions"] = style["actions"] + merged["actions"]
+        merged["endings"] = style["endings"] + merged["endings"]
     return merged
 
 
-def _article_words(article: dict | None) -> list[str]:
-    if not article:
+def _profile_words(profile: dict | None) -> list[str]:
+    if not profile:
         return []
-    text = " ".join(str(article.get(key) or "") for key in ("title", "extract"))
+    raw_keywords = profile.get("keywords") or []
+    if isinstance(raw_keywords, str):
+        raw_keywords = [w.strip() for w in raw_keywords.split(",") if w.strip()]
+    if raw_keywords:
+        return list(dict.fromkeys(str(w).lower() for w in raw_keywords))[:5]
+
+    text = " ".join(str(profile.get(key) or "") for key in ("title", "source_text"))
     words = re.findall(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9-]{3,}", text)
-    blocked = {"игра", "video", "game", "часть", "серия", "который", "которая", "после", "была", "были"}
+    blocked = {
+        "игра", "игры", "video", "game", "games", "часть", "серия", "который", "которая",
+        "после", "была", "были", "это", "для", "with", "from", "обзор", "прохождение",
+    }
     result = []
     for word in words:
         clean = word.strip(".,:;!?()[]{}").lower()
@@ -278,23 +305,23 @@ def _article_words(article: dict | None) -> list[str]:
     return result
 
 
-def _compose_fallback_haiku(game_name: str, display_name: str, article: dict | None) -> str:
+def _compose_fallback_haiku(game_name: str, display_name: str, profile: dict | None) -> str:
     rng = random.SystemRandom()
-    style = _style_for_game(game_name)
+    style = _style_for_profile(profile)
     openings = list(style["openings"])
     actions = list(style["actions"])
     endings = list(style["endings"])
 
-    words = _article_words(article)
+    words = _profile_words(profile)
     if words:
         openings.extend([
             f"{words[0].capitalize()} в тумане.",
-            f"Вики шепчет: {words[0]}.",
+            f"Поиск шепчет: {words[0]}.",
         ])
     if len(words) > 1:
         endings.extend([
             f"{words[1].capitalize()} ждёт в углу.",
-            f"Лор меняет дыхание.",
+            "Лор меняет дыхание.",
         ])
 
     return "\n".join(
@@ -378,6 +405,158 @@ async def _fetch_wiki_article(game_name: str) -> dict | None:
     return article
 
 
+def _clean_search_text(value: str) -> str:
+    value = html.unescape(value or "")
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+async def _fetch_ru_search_snippets(game_name: str) -> list[dict]:
+    query = f"{game_name} игра обзор геймплей"
+    url = "https://duckduckgo.com/html/"
+    params = {"q": query, "kl": "ru-ru"}
+    timeout = aiohttp.ClientTimeout(total=12)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=SEARCH_HEADERS) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                text = await resp.text()
+    except Exception:
+        return []
+
+    results = []
+    blocks = re.findall(r'<div class="result__body">(.*?)</div>\s*</div>', text, flags=re.S)
+    if not blocks:
+        blocks = re.findall(r'<div class="result results_links.*?">(.*?)</div>\s*</div>', text, flags=re.S)
+    for block in blocks[:5]:
+        title_match = re.search(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, flags=re.S)
+        snippet_match = re.search(r'class="result__snippet"[^>]*>(.*?)</a>|class="result__snippet"[^>]*>(.*?)</div>', block, flags=re.S)
+        if not title_match:
+            continue
+        raw_url = html.unescape(title_match.group(1))
+        title = _clean_search_text(title_match.group(2))
+        snippet_raw = ""
+        if snippet_match:
+            snippet_raw = snippet_match.group(1) or snippet_match.group(2) or ""
+        snippet = _clean_search_text(snippet_raw)
+        if title or snippet:
+            results.append({"title": title, "snippet": snippet, "url": raw_url})
+    return results
+
+
+def _extract_keywords(text: str, limit: int = 8) -> list[str]:
+    blocked = {
+        "игра", "игры", "игру", "игре", "игрой", "обзор", "геймплей", "прохождение",
+        "дата", "релиз", "трейлер", "скачать", "официальный", "official", "video",
+        "game", "games", "для", "или", "это", "как", "что", "with", "from", "about",
+        "steam", "страница", "сайт", "новости",
+    }
+    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9-]{3,}", (text or "").lower())
+    counts: dict[str, int] = {}
+    for word in words:
+        word = word.strip("-_")
+        if word in blocked or len(word) < 4:
+            continue
+        counts[word] = counts.get(word, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return [word for word, _ in ranked[:limit]]
+
+
+def _profile_from_cache(game_name: str) -> dict | None:
+    cache_key = game_name.lower()
+    fresh_after = datetime.now(UTC) - timedelta(days=14)
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT title, genre, keywords, source_text, source_url, fetched_at
+            FROM activity_game_profiles
+            WHERE activity_name=?
+            """,
+            (cache_key,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        fetched_at = datetime.fromisoformat(row[5])
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=UTC)
+    except Exception:
+        return None
+    if fetched_at < fresh_after:
+        return None
+    keywords = [w.strip() for w in (row[2] or "").split(",") if w.strip()]
+    return {
+        "title": row[0] or game_name,
+        "genre": row[1] or "generic",
+        "keywords": keywords,
+        "source_text": row[3] or "",
+        "source_url": row[4],
+    }
+
+
+def _save_profile(game_name: str, profile: dict):
+    cache_key = game_name.lower()
+    keywords = profile.get("keywords") or []
+    if not isinstance(keywords, str):
+        keywords = ", ".join(str(word) for word in keywords[:8])
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO activity_game_profiles(activity_name, title, genre, keywords, source_text, source_url, fetched_at)
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(activity_name) DO UPDATE SET
+                title=excluded.title,
+                genre=excluded.genre,
+                keywords=excluded.keywords,
+                source_text=excluded.source_text,
+                source_url=excluded.source_url,
+                fetched_at=excluded.fetched_at
+            """,
+            (
+                cache_key,
+                profile.get("title") or game_name,
+                profile.get("genre") or "generic",
+                keywords,
+                (profile.get("source_text") or "")[:1600],
+                profile.get("source_url"),
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        conn.commit()
+
+
+async def _fetch_game_profile(game_name: str) -> dict:
+    cached = _profile_from_cache(game_name)
+    if cached:
+        return cached
+
+    article = await _fetch_wiki_article(game_name)
+    snippets = await _fetch_ru_search_snippets(game_name)
+    snippet_text = " ".join(
+        f"{item.get('title', '')}. {item.get('snippet', '')}" for item in snippets
+    )
+    source_text = " ".join(
+        part for part in [
+            article.get("title", "") if article else "",
+            article.get("extract", "") if article else "",
+            snippet_text,
+        ] if part
+    )
+    title = (article or {}).get("title") or (snippets[0]["title"] if snippets else game_name)
+    source_url = (article or {}).get("url") or (snippets[0]["url"] if snippets else None)
+    profile = {
+        "title": title,
+        "genre": _infer_genre(f"{game_name} {source_text}"),
+        "keywords": _extract_keywords(source_text),
+        "source_text": source_text[:1600],
+        "source_url": source_url,
+    }
+    _save_profile(game_name, profile)
+    return profile
+
+
 def _call_gpt_haiku(prompt: str) -> str | None:
     try:
         import fun_slesh.parody_gpt as pgpt
@@ -421,14 +600,22 @@ def _remember_haiku(guild_id: int, game_name: str, haiku: str):
         conn.commit()
 
 
-async def _generate_game_haiku(guild_id: int, game_name: str, display_name: str, article: dict | None) -> str:
+async def _generate_game_haiku(guild_id: int, game_name: str, display_name: str, profile: dict | None) -> str:
     context = ""
-    if article and article.get("extract"):
-        context = f" Связанная статья: {article['title']}: {article['extract'][:500]}"
+    if profile and profile.get("source_text"):
+        keywords = ", ".join(profile.get("keywords") or [])
+        context = (
+            f" Русскоязычный контекст/сниппеты: {profile.get('title') or game_name}; "
+            f"жанр/тип: {profile.get('genre') or 'неизвестно'}; "
+            f"ключевые слова: {keywords or 'нет'}; "
+            f"описание: {profile['source_text'][:700]}"
+        )
     prompt = (
         "Напиши короткое русское хокку в три строки о том, что участник Discord "
         f"{display_name} запустил игру {game_name}.{context} "
-        "Адаптируй образы под конкретную игру, без тегов, без пояснений, только три строки."
+        "Адаптируй образы под конкретную игру, её жанр, сеттинг и лексику. "
+        "Не используй шаблонные строки про пиксели, курсор и монитор, если контекст позволяет точнее. "
+        "Без тегов, без пояснений, только три строки."
     )
     result = await asyncio.get_event_loop().run_in_executor(None, _call_gpt_haiku, prompt)
     if result:
@@ -438,12 +625,12 @@ async def _generate_game_haiku(guild_id: int, game_name: str, display_name: str,
     recent = _recent_haikus(guild_id, game_name)
     haiku = ""
     for _ in range(16):
-        candidate = _compose_fallback_haiku(game_name, display_name, article)
+        candidate = _compose_fallback_haiku(game_name, display_name, profile)
         if candidate not in recent:
             haiku = candidate
             break
     if not haiku:
-        haiku = _compose_fallback_haiku(game_name, display_name, article)
+        haiku = _compose_fallback_haiku(game_name, display_name, profile)
     _remember_haiku(guild_id, game_name, haiku)
     return haiku
 
@@ -612,17 +799,17 @@ class ActivityTracker(commands.Cog):
         channel = self._pick_channel(member.guild, cfg)
         if channel is None:
             return
-        article = await _fetch_wiki_article(name) if cfg["article_lookup"] else None
-        haiku = await _generate_game_haiku(member.guild.id, name, member.display_name, article)
+        profile = await _fetch_game_profile(name) if cfg["article_lookup"] else {"title": name, "genre": "generic", "keywords": []}
+        haiku = await _generate_game_haiku(member.guild.id, name, member.display_name, profile)
         embed = discord.Embed(
             title=f"{member.display_name} запустил {name}",
             description=f"*{haiku}*",
             color=discord.Color.dark_teal(),
         )
-        if article and article.get("url"):
+        if profile and profile.get("source_url"):
             embed.add_field(
-                name="Связанная статья",
-                value=f"[{article.get('title') or name}]({article['url']})",
+                name="Контекст",
+                value=f"[{profile.get('title') or name}]({profile['source_url']}) · {profile.get('genre') or 'игра'}",
                 inline=False,
             )
         try:
