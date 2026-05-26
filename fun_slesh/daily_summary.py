@@ -302,6 +302,54 @@ def _get_weekly_stats(guild_id: int) -> dict:
                 datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
             ),
         ) if _table_exists(conn, "activity_sessions") else []
+        top_games = _top_rows(
+            conn,
+            """
+            SELECT activity_name, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
+            GROUP BY activity_name
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 5
+            """,
+            (
+                guild_id,
+                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+            ),
+        ) if _table_exists(conn, "activity_sessions") else []
+        top_game_users = _top_rows(
+            conn,
+            """
+            SELECT user_id, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
+            GROUP BY user_id
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 5
+            """,
+            (
+                guild_id,
+                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+            ),
+        ) if _table_exists(conn, "activity_sessions") else []
+        top_other_activities = _top_rows(
+            conn,
+            """
+            SELECT activity_name, activity_type, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type<>'game'
+            GROUP BY activity_name, activity_type
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 5
+            """,
+            (
+                guild_id,
+                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+            ),
+        ) if _table_exists(conn, "activity_sessions") else []
         top_activity_users = _top_rows(
             conn,
             """
@@ -332,6 +380,9 @@ def _get_weekly_stats(guild_id: int) -> dict:
         "top_toxic": top_toxic,
         "top_heroes": top_heroes,
         "top_activities": top_activities,
+        "top_games": top_games,
+        "top_game_users": top_game_users,
+        "top_other_activities": top_other_activities,
         "top_activity_users": top_activity_users,
         "total_msgs": total_msgs,
         "total_voice_s": total_voice,
@@ -397,6 +448,7 @@ def _build_winner_congrats(guild: discord.Guild, stats: dict) -> str:
         ("серии", stats["top_streaks"]),
         ("репа", stats["top_rep"]),
         ("герои", stats["top_heroes"]),
+        ("игры", stats.get("top_game_users", [])),
         ("активности", stats.get("top_activity_users", [])),
     ]
 
@@ -616,22 +668,34 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
             value=_format_rank_lines(guild, stats["top_heroes"], "", value_formatter=_fmt_seconds),
             inline=False,
         )
-    if stats.get("top_activities"):
+    labels = {
+        "game": "игра",
+        "streaming": "стрим",
+        "listening": "слушает",
+        "watching": "смотрит",
+        "competing": "соревнование",
+    }
+    if stats.get("top_games"):
+        lines = [
+            f"**{i}.** {name} — **{_fmt_seconds(int(seconds))}**"
+            for i, (name, seconds) in enumerate(stats["top_games"], start=1)
+        ]
+        emb.add_field(name="🎮 Топ игр", value="\n".join(lines), inline=False)
+    if stats.get("top_game_users"):
+        emb.add_field(
+            name="🕹️ Топ игроков по играм",
+            value=_format_rank_lines(guild, stats["top_game_users"], "", value_formatter=_fmt_seconds),
+            inline=False,
+        )
+    if stats.get("top_other_activities"):
         lines = []
-        labels = {
-            "game": "игра",
-            "streaming": "стрим",
-            "listening": "слушает",
-            "watching": "смотрит",
-            "competing": "соревнование",
-        }
-        for i, (name, activity_type, seconds) in enumerate(stats["top_activities"], start=1):
+        for i, (name, activity_type, seconds) in enumerate(stats["top_other_activities"], start=1):
             label = labels.get(activity_type, activity_type)
             lines.append(f"**{i}.** {name} ({label}) — **{_fmt_seconds(int(seconds))}**")
-        emb.add_field(name="🎮 Топ активностей", value="\n".join(lines), inline=False)
+        emb.add_field(name="📡 Другие активности", value="\n".join(lines), inline=False)
     if stats.get("top_activity_users"):
         emb.add_field(
-            name="🕹️ Топ по активностям",
+            name="📊 Все активности по участникам",
             value=_format_rank_lines(guild, stats["top_activity_users"], "", value_formatter=_fmt_seconds),
             inline=False,
         )

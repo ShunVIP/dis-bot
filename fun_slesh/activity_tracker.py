@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import re
 import sqlite3
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -42,11 +43,100 @@ TYPE_LABELS = {
     "competing": "соревнование",
 }
 
-FALLBACK_GAME_HAIKU = [
-    "{game} мерцает.\n{display_name} входит в вечер.\nКурсор как луна.",
-    "Пиксели дышат.\n{display_name} запускает {game}.\nЧат на миг притих.",
-    "Экран оживает.\n{display_name} берёт свой маршрут.\n{game} ждёт шагов.",
-    "Ночь у монитора.\n{game} зовёт без слов.\n{display_name} отвечает.",
+GENERIC_OPENINGS = [
+    "Ночь у монитора.",
+    "Свет дрожит на клавишах.",
+    "Пиксели проснулись.",
+    "Тихий старт клиента.",
+    "Экран набирает дыхание.",
+    "Вечер стал загрузкой.",
+    "Курсор режет сумрак.",
+    "Сервер ловит искру.",
+    "Лаунчер щёлкнул тихо.",
+    "В окне растёт другой мир.",
+]
+
+GENERIC_ACTIONS = [
+    "{display_name} входит в {game}.",
+    "{display_name} открывает {game}.",
+    "{display_name} выбирает путь.",
+    "{display_name} снова в игре.",
+    "{game} зовёт {display_name}.",
+    "{display_name} ловит первый кадр.",
+    "{display_name} нажал продолжить.",
+    "{display_name} уходит за экран.",
+]
+
+GENERIC_ENDINGS = [
+    "Чат на миг притих.",
+    "Время пошло по кругу.",
+    "Discord всё записал.",
+    "Карта ждёт следов.",
+    "Сейв ещё впереди.",
+    "Шум кулеров как дождь.",
+    "Миникарта светится.",
+    "Ночь получила квест.",
+    "Пати ищет голос.",
+    "Тень легла на HUD.",
+]
+
+GAME_STYLE_RULES = [
+    (
+        ("league of legends", "lol"),
+        {
+            "openings": ["Рифт раскрыт туманом.", "Миньоны идут строем.", "Вард горит в кустах."],
+            "actions": ["{display_name} выходит на линию.", "{display_name} ждёт ганка.", "{game} зовёт к Нексусу."],
+            "endings": ["Барон дышит в темноте.", "Пинг летит через карту.", "Башня считает ошибки."],
+        },
+    ),
+    (
+        ("blade & soul", "blade and soul", "bns"),
+        {
+            "openings": ["Клинок ловит ветер.", "Ци шумит под кожей.", "Арена ждёт прыжка."],
+            "actions": ["{display_name} входит в танец стали.", "{display_name} крутит комбо.", "{game} шепчет о дуэли."],
+            "endings": ["Удар тает в воздухе.", "Шёлк и сталь молчат.", "Босс считает фреймы."],
+        },
+    ),
+    (
+        ("neverness to everness",),
+        {
+            "openings": ["Город не спит неоном.", "Аномалия шепчет.", "Асфальт блестит дождём."],
+            "actions": ["{display_name} сворачивает в странность.", "{display_name} ловит сбой реальности.", "{game} открывает дверь."],
+            "endings": ["Фонари дрожат в луже.", "Реальность снова мягкая.", "Ночь меняет правила."],
+        },
+    ),
+    (
+        ("arknights", "endfield"),
+        {
+            "openings": ["База смотрит в пустошь.", "Оператор ждёт приказ.", "Пыль садится на броню."],
+            "actions": ["{display_name} строит маршрут.", "{display_name} выводит отряд.", "{game} зовёт в экспедицию."],
+            "endings": ["Дрон чертит круги.", "Терминал греет ладонь.", "Поле держит тишину."],
+        },
+    ),
+    (
+        ("clair obscur", "expedition 33"),
+        {
+            "openings": ["Краска темнеет в небе.", "Экспедиция молчит.", "Цифра дрожит на стене."],
+            "actions": ["{display_name} идёт сквозь мазок.", "{display_name} держит ритм удара.", "{game} раскрывает боль."],
+            "endings": ["Мир сохнет на холсте.", "Парирование как вдох.", "Свет гаснет красиво."],
+        },
+    ),
+    (
+        ("forza", "horizon"),
+        {
+            "openings": ["Асфальт блестит жарой.", "Мотор будит рассвет.", "Пыль летит за спойлером."],
+            "actions": ["{display_name} давит газ.", "{display_name} ловит апекс.", "{game} зовёт на трассу."],
+            "endings": ["Шины пишут хайку.", "Финиш пахнет бензином.", "Радар мигает вдали."],
+        },
+    ),
+    (
+        ("heroes of might", "might & magic", "olden era", "homm"),
+        {
+            "openings": ["Замок проснулся в тумане.", "Герой считает клетки.", "Рудник звенит под луной."],
+            "actions": ["{display_name} ведёт караван.", "{display_name} копит мувпойнты.", "{game} зовёт к старой карте."],
+            "endings": ["Скелеты ждут приказ.", "Ход уходит в песок.", "Грифон стерёг рассвет."],
+        },
+    ),
 ]
 
 
@@ -94,10 +184,27 @@ def _ensure_tables():
                 PRIMARY KEY (activity_name, lang)
             );
 
+            CREATE TABLE IF NOT EXISTS activity_notice_log (
+                guild_id      INTEGER NOT NULL,
+                user_id       INTEGER NOT NULL,
+                activity_name TEXT    NOT NULL,
+                posted_at     TEXT    NOT NULL,
+                PRIMARY KEY (guild_id, user_id, activity_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS activity_haiku_history (
+                guild_id      INTEGER NOT NULL,
+                activity_name TEXT    NOT NULL,
+                haiku_text    TEXT    NOT NULL,
+                created_at    TEXT    NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_activity_sessions_guild_started
                 ON activity_sessions(guild_id, started_at);
             CREATE INDEX IF NOT EXISTS idx_activity_sessions_guild_user
                 ON activity_sessions(guild_id, user_id);
+            CREATE INDEX IF NOT EXISTS idx_activity_haiku_history_game
+                ON activity_haiku_history(guild_id, activity_name, created_at);
             """
         )
         conn.commit()
@@ -138,12 +245,65 @@ def _member_name(guild: discord.Guild, user_id: int) -> str:
     return member.display_name if member else f"участник {user_id}"
 
 
-def _fallback_haiku(game_name: str, display_name: str, article: dict | None) -> str:
-    seed = f"{game_name}:{display_name}:{datetime.now(MSK).date().isoformat()}"
-    template = FALLBACK_GAME_HAIKU[hash(seed) % len(FALLBACK_GAME_HAIKU)]
-    if article and article.get("title") and article["title"].lower() != game_name.lower():
-        template = "Статья шепнула.\n{display_name} открыл {game}.\nЛор лёг на ладонь."
-    return template.format(game=game_name, display_name=display_name)
+def _style_for_game(game_name: str) -> dict:
+    normalized = game_name.lower()
+    merged = {
+        "openings": list(GENERIC_OPENINGS),
+        "actions": list(GENERIC_ACTIONS),
+        "endings": list(GENERIC_ENDINGS),
+    }
+    for patterns, style in GAME_STYLE_RULES:
+        if any(pattern in normalized for pattern in patterns):
+            merged["openings"] = style["openings"] + merged["openings"]
+            merged["actions"] = style["actions"] + merged["actions"]
+            merged["endings"] = style["endings"] + merged["endings"]
+            break
+    return merged
+
+
+def _article_words(article: dict | None) -> list[str]:
+    if not article:
+        return []
+    text = " ".join(str(article.get(key) or "") for key in ("title", "extract"))
+    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9-]{3,}", text)
+    blocked = {"игра", "video", "game", "часть", "серия", "который", "которая", "после", "была", "были"}
+    result = []
+    for word in words:
+        clean = word.strip(".,:;!?()[]{}").lower()
+        if clean in blocked or clean in result:
+            continue
+        result.append(clean)
+        if len(result) >= 5:
+            break
+    return result
+
+
+def _compose_fallback_haiku(game_name: str, display_name: str, article: dict | None) -> str:
+    rng = random.SystemRandom()
+    style = _style_for_game(game_name)
+    openings = list(style["openings"])
+    actions = list(style["actions"])
+    endings = list(style["endings"])
+
+    words = _article_words(article)
+    if words:
+        openings.extend([
+            f"{words[0].capitalize()} в тумане.",
+            f"Вики шепчет: {words[0]}.",
+        ])
+    if len(words) > 1:
+        endings.extend([
+            f"{words[1].capitalize()} ждёт в углу.",
+            f"Лор меняет дыхание.",
+        ])
+
+    return "\n".join(
+        [
+            rng.choice(openings),
+            rng.choice(actions).format(game=game_name, display_name=display_name),
+            rng.choice(endings),
+        ]
+    )
 
 
 async def _fetch_wiki_article(game_name: str) -> dict | None:
@@ -234,7 +394,34 @@ def _call_gpt_haiku(prompt: str) -> str | None:
     return None
 
 
-async def _generate_game_haiku(game_name: str, display_name: str, article: dict | None) -> str:
+def _recent_haikus(guild_id: int, game_name: str, limit: int = 20) -> set[str]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT haiku_text FROM activity_haiku_history
+            WHERE guild_id=? AND activity_name=?
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (guild_id, game_name, limit),
+        ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _remember_haiku(guild_id: int, game_name: str, haiku: str):
+    cutoff = (datetime.now(UTC) - timedelta(days=14)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO activity_haiku_history(guild_id, activity_name, haiku_text, created_at)
+            VALUES(?,?,?,?)
+            """,
+            (guild_id, game_name, haiku, datetime.now(UTC).isoformat()),
+        )
+        conn.execute("DELETE FROM activity_haiku_history WHERE created_at<?", (cutoff,))
+        conn.commit()
+
+
+async def _generate_game_haiku(guild_id: int, game_name: str, display_name: str, article: dict | None) -> str:
     context = ""
     if article and article.get("extract"):
         context = f" Связанная статья: {article['title']}: {article['extract'][:500]}"
@@ -244,7 +431,21 @@ async def _generate_game_haiku(game_name: str, display_name: str, article: dict 
         "Адаптируй образы под конкретную игру, без тегов, без пояснений, только три строки."
     )
     result = await asyncio.get_event_loop().run_in_executor(None, _call_gpt_haiku, prompt)
-    return result or _fallback_haiku(game_name, display_name, article)
+    if result:
+        _remember_haiku(guild_id, game_name, result)
+        return result
+
+    recent = _recent_haikus(guild_id, game_name)
+    haiku = ""
+    for _ in range(16):
+        candidate = _compose_fallback_haiku(game_name, display_name, article)
+        if candidate not in recent:
+            haiku = candidate
+            break
+    if not haiku:
+        haiku = _compose_fallback_haiku(game_name, display_name, article)
+    _remember_haiku(guild_id, game_name, haiku)
+    return haiku
 
 
 class ActivityTracker(commands.Cog):
@@ -369,15 +570,50 @@ class ActivityTracker(commands.Cog):
             return channel
         return guild.system_channel
 
+    def _notice_recently_posted(self, guild_id: int, user_id: int, name: str, cooldown_minutes: int = 90) -> bool:
+        fresh_after = datetime.now(UTC) - timedelta(minutes=cooldown_minutes)
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                """
+                SELECT posted_at FROM activity_notice_log
+                WHERE guild_id=? AND user_id=? AND activity_name=?
+                """,
+                (guild_id, user_id, name),
+            ).fetchone()
+            if not row:
+                return False
+            try:
+                posted_at = datetime.fromisoformat(row[0])
+                if posted_at.tzinfo is None:
+                    posted_at = posted_at.replace(tzinfo=UTC)
+            except Exception:
+                return False
+        return posted_at >= fresh_after
+
+    def _remember_notice(self, guild_id: int, user_id: int, name: str):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO activity_notice_log(guild_id, user_id, activity_name, posted_at)
+                VALUES(?,?,?,?)
+                ON CONFLICT(guild_id, user_id, activity_name) DO UPDATE SET
+                    posted_at=excluded.posted_at
+                """,
+                (guild_id, user_id, name, datetime.now(UTC).isoformat()),
+            )
+            conn.commit()
+
     async def _send_start_notice(self, member: discord.Member, name: str, activity_type: str):
         cfg = self._config(member.guild.id)
         if not cfg["enabled"] or not cfg["notify_starts"] or activity_type != "game":
+            return
+        if self._notice_recently_posted(member.guild.id, member.id, name):
             return
         channel = self._pick_channel(member.guild, cfg)
         if channel is None:
             return
         article = await _fetch_wiki_article(name) if cfg["article_lookup"] else None
-        haiku = await _generate_game_haiku(name, member.display_name, article)
+        haiku = await _generate_game_haiku(member.guild.id, name, member.display_name, article)
         embed = discord.Embed(
             title=f"{member.display_name} запустил {name}",
             description=f"*{haiku}*",
@@ -391,6 +627,7 @@ class ActivityTracker(commands.Cog):
             )
         try:
             await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            self._remember_notice(member.guild.id, member.id, name)
         except Exception:
             pass
 
@@ -509,17 +746,37 @@ class ActivityTracker(commands.Cog):
         await interaction.response.defer()
         since = (datetime.now(UTC) - timedelta(days=int(дней))).isoformat()
         with sqlite3.connect(DB_PATH) as conn:
-            top_activities = conn.execute(
+            top_games = conn.execute(
+                """
+                SELECT activity_name, SUM(seconds) AS total
+                FROM activity_sessions
+                WHERE guild_id=? AND started_at>=? AND activity_type='game'
+                GROUP BY activity_name
+                ORDER BY total DESC LIMIT 10
+                """,
+                (interaction.guild.id, since),
+            ).fetchall()
+            top_game_users = conn.execute(
+                """
+                SELECT user_id, SUM(seconds) AS total
+                FROM activity_sessions
+                WHERE guild_id=? AND started_at>=? AND activity_type='game'
+                GROUP BY user_id
+                ORDER BY total DESC LIMIT 10
+                """,
+                (interaction.guild.id, since),
+            ).fetchall()
+            other_activities = conn.execute(
                 """
                 SELECT activity_name, activity_type, SUM(seconds) AS total
                 FROM activity_sessions
-                WHERE guild_id=? AND started_at>=?
+                WHERE guild_id=? AND started_at>=? AND activity_type<>'game'
                 GROUP BY activity_name, activity_type
                 ORDER BY total DESC LIMIT 10
                 """,
                 (interaction.guild.id, since),
             ).fetchall()
-            top_users = conn.execute(
+            top_all_users = conn.execute(
                 """
                 SELECT user_id, SUM(seconds) AS total
                 FROM activity_sessions
@@ -530,25 +787,37 @@ class ActivityTracker(commands.Cog):
                 (interaction.guild.id, since),
             ).fetchall()
 
-        if not top_activities and not top_users:
+        if not top_games and not top_game_users and not other_activities and not top_all_users:
             await interaction.followup.send("📭 Пока нет завершённых активностей за выбранный период.")
             return
 
-        def activity_line(i: int, row: tuple) -> str:
+        def other_activity_line(i: int, row: tuple) -> str:
             name, activity_type, total = row
             label = TYPE_LABELS.get(activity_type, activity_type)
             return f"**{i}.** {name} ({label}) — **{_fmt_seconds(int(total))}**"
 
-        activity_lines = [activity_line(i, row) for i, row in enumerate(top_activities, start=1)]
-        user_lines = [
+        game_lines = [
+            f"**{i}.** {name} — **{_fmt_seconds(int(total))}**"
+            for i, (name, total) in enumerate(top_games, start=1)
+        ]
+        game_user_lines = [
             f"**{i}.** {_member_name(interaction.guild, int(user_id))} — **{_fmt_seconds(int(total))}**"
-            for i, (user_id, total) in enumerate(top_users, start=1)
+            for i, (user_id, total) in enumerate(top_game_users, start=1)
+        ]
+        other_lines = [other_activity_line(i, row) for i, row in enumerate(other_activities, start=1)]
+        all_user_lines = [
+            f"**{i}.** {_member_name(interaction.guild, int(user_id))} — **{_fmt_seconds(int(total))}**"
+            for i, (user_id, total) in enumerate(top_all_users, start=1)
         ]
         embed = discord.Embed(title=f"🎮 Активности за {дней} дн.", color=discord.Color.teal())
-        if activity_lines:
-            embed.add_field(name="По активностям", value="\n".join(activity_lines), inline=False)
-        if user_lines:
-            embed.add_field(name="По участникам", value="\n".join(user_lines), inline=False)
+        if game_lines:
+            embed.add_field(name="Топ игр", value="\n".join(game_lines), inline=False)
+        if game_user_lines:
+            embed.add_field(name="Топ игроков по играм", value="\n".join(game_user_lines), inline=False)
+        if other_lines:
+            embed.add_field(name="Другие активности", value="\n".join(other_lines), inline=False)
+        if all_user_lines:
+            embed.add_field(name="Все активности по участникам", value="\n".join(all_user_lines), inline=False)
         await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
