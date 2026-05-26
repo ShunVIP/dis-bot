@@ -73,6 +73,12 @@ def _ensure_tables():
 # ── Сбор статистики за день ───────────────────────────────────────────────────
 def _get_today_stats(guild_id: int) -> dict:
     today = datetime.now(MSK).date().isoformat()
+    start_today_utc = datetime.combine(datetime.now(MSK).date(), datetime.min.time(), MSK).astimezone(UTC).isoformat()
+    start_tomorrow_utc = (
+        datetime.combine(datetime.now(MSK).date() + timedelta(days=1), datetime.min.time(), MSK)
+        .astimezone(UTC)
+        .isoformat()
+    )
 
     with sqlite3.connect(DB_PATH) as conn:
         # Топ активных по сообщениям
@@ -133,13 +139,46 @@ def _get_today_stats(guild_id: int) -> dict:
         rep_events = conn.execute(
             "SELECT COUNT(*) FROM reputation WHERE date=?", (today,)
         ).fetchone()[0] if _table_exists(conn, "reputation") else 0
+        top_games = conn.execute(
+            """
+            SELECT activity_name, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
+            GROUP BY activity_name
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 5
+            """,
+            (guild_id, start_today_utc, start_tomorrow_utc),
+        ).fetchall() if _table_exists(conn, "activity_sessions") else []
+        top_game_users = conn.execute(
+            """
+            SELECT user_id, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
+            GROUP BY user_id
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 5
+            """,
+            (guild_id, start_today_utc, start_tomorrow_utc),
+        ).fetchall() if _table_exists(conn, "activity_sessions") else []
+        total_game_s = conn.execute(
+            """
+            SELECT COALESCE(SUM(seconds), 0)
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
+            """,
+            (guild_id, start_today_utc, start_tomorrow_utc),
+        ).fetchone()[0] if _table_exists(conn, "activity_sessions") else 0
 
     return {
         "date":          today,
         "total_msgs":    total_msgs,
         "total_voice_s": total_voice,
+        "total_game_s":  total_game_s,
         "top_chatters":  msg_rows,
         "top_voice":     voice_rows,
+        "top_games":      top_games,
+        "top_game_users": top_game_users,
         "voice_channels": [r[0] for r in voice_channels],
         "toxic_count":   game_events,
         "rep_events":    rep_events,
@@ -484,6 +523,11 @@ async def _generate_haiku(stats: dict, guild: discord.Guild) -> str:
             context_parts.append(f"написано {stats['total_msgs']} сообщений")
         if stats["total_voice_s"]:
             context_parts.append(f"проведено в войсе {_fmt_seconds(stats['total_voice_s'])}")
+        if stats.get("total_game_s"):
+            context_parts.append(f"Discord-активности игр заняли {_fmt_seconds(stats['total_game_s'])}")
+        if stats.get("top_games"):
+            games = ", ".join(name for name, _seconds in stats["top_games"][:3])
+            context_parts.append(f"главные игры дня: {games}")
 
         # Голосовые каналы → авто-теги
         game_tags = []
@@ -547,12 +591,14 @@ async def _build_summary_embed(guild: discord.Guild, stats: dict) -> discord.Emb
     )
 
     # Статистика
-    if stats["total_msgs"] or stats["total_voice_s"]:
+    if stats["total_msgs"] or stats["total_voice_s"] or stats.get("total_game_s"):
         stat_parts = []
         if stats["total_msgs"]:
             stat_parts.append(f"💬 {stats['total_msgs']} сообщений")
         if stats["total_voice_s"]:
             stat_parts.append(f"🎙️ {_fmt_seconds(stats['total_voice_s'])} в войсе")
+        if stats.get("total_game_s"):
+            stat_parts.append(f"🎮 {_fmt_seconds(stats['total_game_s'])} в играх")
         emb.add_field(name="За день", value=" · ".join(stat_parts), inline=False)
 
     # Авто-теги: кто во что играл
@@ -573,6 +619,26 @@ async def _build_summary_embed(guild: discord.Guild, stats: dict) -> discord.Emb
     if stats["top_voice"]:
         lines = [f"<@{uid}> — {_fmt_seconds(int(sec))}" for uid, sec in stats["top_voice"][:3]]
         emb.add_field(name="🎙️ Топ войса", value="\n".join(lines), inline=True)
+
+    if stats.get("top_games"):
+        lines = [
+            f"**{i}.** {name} — **{_fmt_seconds(int(sec))}**"
+            for i, (name, sec) in enumerate(stats["top_games"][:5], start=1)
+        ]
+        emb.add_field(name="🎮 Игры дня", value="\n".join(lines), inline=False)
+
+    if stats.get("top_game_users"):
+        lines = [
+            f"{['🥇', '🥈', '🥉'][i - 1] if i <= 3 else f'**{i}.**'} {_member_name(guild, int(uid))} — **{_fmt_seconds(int(sec))}**"
+            for i, (uid, sec) in enumerate(stats["top_game_users"][:5], start=1)
+        ]
+        winner_id, winner_seconds = stats["top_game_users"][0]
+        emb.add_field(name="🕹️ Топ игроков дня", value="\n".join(lines), inline=False)
+        emb.add_field(
+            name="🏆 Игровой победитель дня",
+            value=f"{_member_name(guild, int(winner_id))} — **{_fmt_seconds(int(winner_seconds))}**",
+            inline=False,
+        )
 
     # Мелочи дня
     misc = []
@@ -603,7 +669,7 @@ async def _post_daily_summary(bot: commands.Bot):
         stats = _get_today_stats(guild_id)
         emb   = await _build_summary_embed(guild, stats)
         try:
-            await ch.send(embed=emb)
+            await ch.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
         except Exception as e:
             log.bind(guild_id=guild_id, channel_id=ch_id).error(f"daily summary post failed: {e}")
 
@@ -726,7 +792,7 @@ async def _post_weekly_summary(bot: commands.Bot):
         try:
             stats = _get_weekly_stats(guild_id)
             emb = await _build_weekly_embed(guild, stats)
-            await channel.send(embed=emb)
+            await channel.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
             _mark_posted(guild_id, "weekly", period_key)
         except Exception as e:
             log.bind(guild_id=guild_id, channel_id=ch_id).error(f"weekly summary post failed: {e}")
@@ -781,7 +847,7 @@ class DailySummary(commands.Cog):
         await interaction.response.defer(thinking=True)
         stats = _get_today_stats(interaction.guild.id)
         emb   = await _build_summary_embed(interaction.guild, stats)
-        await interaction.followup.send(embed=emb)
+        await interaction.followup.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
 
     @summary_group.command(name="канал",
                            description="(Админ) Канал для авто-постинга итогов")
@@ -821,7 +887,7 @@ class DailySummary(commands.Cog):
         await interaction.response.defer(thinking=True)
         stats = _get_weekly_stats(interaction.guild.id)
         emb = await _build_weekly_embed(interaction.guild, stats)
-        await interaction.followup.send(embed=emb)
+        await interaction.followup.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(DailySummary(bot))

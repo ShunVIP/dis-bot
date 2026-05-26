@@ -146,7 +146,7 @@ def _ensure_tables():
                 guild_id       INTEGER PRIMARY KEY,
                 channel_id     INTEGER,
                 enabled        INTEGER NOT NULL DEFAULT 1,
-                notify_starts  INTEGER NOT NULL DEFAULT 1,
+                notify_starts  INTEGER NOT NULL DEFAULT 0,
                 notify_ends    INTEGER NOT NULL DEFAULT 0,
                 article_lookup INTEGER NOT NULL DEFAULT 1
             );
@@ -909,7 +909,7 @@ class ActivityTracker(commands.Cog):
     async def активности_посты(
         self,
         interaction: discord.Interaction,
-        старты_игр: bool = True,
+        старты_игр: bool = False,
         окончания: bool = False,
         статьи: bool = True,
     ):
