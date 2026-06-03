@@ -530,6 +530,17 @@ class SocialChat(commands.Cog):
     def _mark_troll(self, guild_id: int, user_id: int):
         self._troll_cooldowns[(guild_id, user_id)] = datetime.now(UTC)
 
+    async def _send_troll_later(self, message: discord.Message, reply: str):
+        await asyncio.sleep(random.randint(5 * 60, 60 * 60))
+        try:
+            await message.reply(
+                reply,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+
     async def _maybe_build_meme(self, message: discord.Message, kind: str) -> discord.File | None:
         if kind not in {"chaos", "ambient", "talk", "direct", "question"}:
             return None
@@ -582,20 +593,14 @@ class SocialChat(commands.Cog):
                 hours_silent = self._troll_hours_silent(guild_id, message.author.id)
                 should_troll = False
                 if len(message.content.split()) >= 4:
-                    if hours_silent >= 5:
-                        should_troll = True
-                    elif random.random() < 0.08:
+                    if hours_silent >= 24:
                         should_troll = True
 
                 if should_troll:
                     try:
                         troll_reply = await self._build_model_troll_reply(message)
                         self._mark_troll(guild_id, message.author.id)
-                        await message.reply(
-                            troll_reply,
-                            mention_author=False,
-                            allowed_mentions=discord.AllowedMentions.none(),
-                        )
+                        asyncio.create_task(self._send_troll_later(message, troll_reply))
                     except Exception:
                         pass
                 return

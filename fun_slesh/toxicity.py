@@ -229,10 +229,17 @@ class Toxicity(commands.Cog):
         key = (guild_id, user_id)
         last = self._cooldowns.get(key)
         now  = datetime.now(UTC)
-        if last and (now - last).total_seconds() < 120:  # 2 минуты
+        if last and (now - last).total_seconds() < 24 * 3600:
             return False
         self._cooldowns[key] = now
         return True
+
+    async def _delayed_troll_reply(self, message: discord.Message, response: str):
+        await asyncio.sleep(random.randint(5 * 60, 45 * 60))
+        try:
+            await message.reply(response, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -290,10 +297,7 @@ class Toxicity(commands.Cog):
             parody=parody
         )
 
-        try:
-            await message.reply(response, mention_author=False)
-        except Exception:
-            pass
+        asyncio.create_task(self._delayed_troll_reply(message, response))
 
     # ── /токсики ──────────────────────────────────────────────────────────────
     @toxicity_group.command(name="топ",

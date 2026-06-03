@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import hashlib
 import os
 import random
 import re
@@ -21,6 +22,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import discord
 from discord import app_commands
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from discord.ext import commands
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
@@ -31,6 +33,10 @@ SEARCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ViPikBot/1.0; Discord private server)",
     "Accept-Language": "ru,en;q=0.8",
 }
+scheduler = AsyncIOScheduler(timezone=MSK)
+HABIT_MIN_DAYS = 4
+HABIT_WINDOW_MINUTES = 90
+HABIT_REMINDER_GRACE_MINUTES = 35
 
 TRACKED_TYPES = {
     discord.ActivityType.playing: "game",
@@ -206,12 +212,27 @@ def _ensure_tables():
                 created_at    TEXT    NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS activity_game_habits (
+                guild_id        INTEGER NOT NULL,
+                user_id         INTEGER NOT NULL,
+                activity_name   TEXT    NOT NULL,
+                expected_minute INTEGER NOT NULL,
+                sample_days     INTEGER NOT NULL,
+                active_from     TEXT    NOT NULL,
+                last_seen_date  TEXT,
+                last_reminded_date TEXT,
+                updated_at      TEXT    NOT NULL,
+                PRIMARY KEY (guild_id, user_id, activity_name)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_activity_sessions_guild_started
                 ON activity_sessions(guild_id, started_at);
             CREATE INDEX IF NOT EXISTS idx_activity_sessions_guild_user
                 ON activity_sessions(guild_id, user_id);
             CREATE INDEX IF NOT EXISTS idx_activity_haiku_history_game
                 ON activity_haiku_history(guild_id, activity_name, created_at);
+            CREATE INDEX IF NOT EXISTS idx_activity_game_habits_active
+                ON activity_game_habits(guild_id, active_from);
             """
         )
         conn.commit()
@@ -600,6 +621,124 @@ def _remember_haiku(guild_id: int, game_name: str, haiku: str):
         conn.commit()
 
 
+def _msk_minute_of_day(dt: datetime) -> int:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    local = dt.astimezone(MSK)
+    return local.hour * 60 + local.minute
+
+
+def _fmt_clock(minute_of_day: int) -> str:
+    minute_of_day %= 24 * 60
+    return f"{minute_of_day // 60:02d}:{minute_of_day % 60:02d} MSK"
+
+
+def _stable_daily_offset(guild_id: int, user_id: int, game_name: str, day: str) -> int:
+    seed = f"{guild_id}:{user_id}:{game_name}:{day}".encode("utf-8", errors="ignore")
+    digest = hashlib.sha256(seed).hexdigest()
+    return int(digest[:8], 16) % (HABIT_REMINDER_GRACE_MINUTES + 1)
+
+
+def _mark_habit_seen(guild_id: int, user_id: int, game_name: str):
+    today = datetime.now(MSK).date().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE activity_game_habits
+            SET last_seen_date=?, updated_at=?
+            WHERE guild_id=? AND user_id=? AND activity_name=?
+            """,
+            (today, datetime.now(UTC).isoformat(), guild_id, user_id, game_name),
+        )
+        conn.commit()
+
+
+def _detect_game_habits_for_guild(guild_id: int):
+    now_msk = datetime.now(MSK)
+    today = now_msk.date()
+    start_utc = datetime.combine(today - timedelta(days=7), datetime.min.time(), MSK).astimezone(UTC).isoformat()
+    end_utc = datetime.combine(today, datetime.min.time(), MSK).astimezone(UTC).isoformat()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT user_id, activity_name, started_at
+            FROM activity_sessions
+            WHERE guild_id=? AND activity_type='game' AND started_at>=? AND started_at<?
+            ORDER BY user_id, activity_name, started_at
+            """,
+            (guild_id, start_utc, end_utc),
+        ).fetchall()
+
+        grouped: dict[tuple[int, str], dict[str, int]] = {}
+        for user_id, game_name, started_at in rows:
+            try:
+                dt = datetime.fromisoformat(started_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+            except Exception:
+                continue
+            local = dt.astimezone(MSK)
+            day = local.date().isoformat()
+            minute = local.hour * 60 + local.minute
+            key = (int(user_id), str(game_name))
+            day_map = grouped.setdefault(key, {})
+            day_map.setdefault(day, minute)
+
+        for (user_id, game_name), day_map in grouped.items():
+            if len(day_map) < HABIT_MIN_DAYS:
+                continue
+            minutes = sorted(day_map.values())
+            if max(minutes) - min(minutes) > HABIT_WINDOW_MINUTES:
+                continue
+            expected = int(sum(minutes) / len(minutes))
+            active_from = (today + timedelta(days=7)).isoformat()
+            conn.execute(
+                """
+                INSERT INTO activity_game_habits(
+                    guild_id, user_id, activity_name, expected_minute, sample_days,
+                    active_from, last_seen_date, last_reminded_date, updated_at
+                )
+                VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(guild_id, user_id, activity_name) DO UPDATE SET
+                    expected_minute=excluded.expected_minute,
+                    sample_days=excluded.sample_days,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    guild_id,
+                    user_id,
+                    game_name,
+                    expected,
+                    len(day_map),
+                    active_from,
+                    None,
+                    None,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+        conn.commit()
+
+
+def _habit_joke(user_id: int, game_name: str) -> str:
+    try:
+        from fun_slesh.parody_engine import generate_phrase, model_exists
+        for quality in ("мем", "разум"):
+            if model_exists(user_id, quality):
+                phrase = generate_phrase(user_id, quality)
+                if phrase:
+                    return f"{game_name}: ты обычно уже там. Модель шепчет твоим стилем: «{phrase}»"
+    except Exception:
+        pass
+    fallbacks = [
+        f"{game_name}: расписание скучает. Где наш законный вечерний заход?",
+        f"{game_name}: сервер заметил пустой слот и сделал вид, что он календарь.",
+        f"{game_name}: привычка пришла, а игрока нет. Неловко вышло.",
+        f"{game_name}: этот таймслот уже прогрет, можно заходить.",
+    ]
+    return random.choice(fallbacks)
+
+
 async def _generate_game_haiku(guild_id: int, game_name: str, display_name: str, profile: dict | None) -> str:
     context = ""
     if profile and profile.get("source_text"):
@@ -646,6 +785,16 @@ class ActivityTracker(commands.Cog):
         self._active: dict[tuple[int, int, str, str], datetime] = {}
         _ensure_tables()
         self._load_active_sessions()
+        if not scheduler.running:
+            scheduler.start()
+        scheduler.add_job(
+            self._habit_tick,
+            "interval",
+            minutes=15,
+            id="activity_habit_tick",
+            replace_existing=True,
+            max_instances=1,
+        )
 
     def _load_active_sessions(self):
         with sqlite3.connect(DB_PATH) as conn:
@@ -680,6 +829,8 @@ class ActivityTracker(commands.Cog):
                 (guild_id, user_id, name, activity_type, now.isoformat()),
             )
             conn.commit()
+        if activity_type == "game":
+            _mark_habit_seen(guild_id, user_id, name)
 
     def _finish(self, guild_id: int, user_id: int, name: str, activity_type: str) -> int:
         key = (guild_id, user_id, name, activity_type)
@@ -834,8 +985,62 @@ class ActivityTracker(commands.Cog):
         except Exception:
             pass
 
+    async def _habit_tick(self):
+        await self.bot.wait_until_ready()
+        for guild in self.bot.guilds:
+            _detect_game_habits_for_guild(guild.id)
+            await self._send_due_habit_reminders(guild)
+
+    async def _send_due_habit_reminders(self, guild: discord.Guild):
+        cfg = self._config(guild.id)
+        if not cfg["enabled"]:
+            return
+        channel = self._pick_channel(guild, cfg)
+        if channel is None:
+            return
+
+        now_msk = datetime.now(MSK)
+        today = now_msk.date().isoformat()
+        minute_now = now_msk.hour * 60 + now_msk.minute
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                """
+                SELECT user_id, activity_name, expected_minute, last_seen_date, last_reminded_date
+                FROM activity_game_habits
+                WHERE guild_id=? AND active_from<=?
+                """,
+                (guild.id, today),
+            ).fetchall()
+
+        for user_id, game_name, expected_minute, last_seen_date, last_reminded_date in rows:
+            if last_seen_date == today or last_reminded_date == today:
+                continue
+            scheduled = (int(expected_minute) + _stable_daily_offset(guild.id, int(user_id), str(game_name), today)) % (24 * 60)
+            if minute_now < scheduled:
+                continue
+            member = guild.get_member(int(user_id))
+            display_name = member.display_name if member else f"участник {user_id}"
+            joke = _habit_joke(int(user_id), str(game_name))
+            content = f"**{game_name}** · {display_name}, обычно около {_fmt_clock(int(expected_minute))}.\n{joke}"
+            try:
+                await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute(
+                        """
+                        UPDATE activity_game_habits
+                        SET last_reminded_date=?, updated_at=?
+                        WHERE guild_id=? AND user_id=? AND activity_name=?
+                        """,
+                        (today, datetime.now(UTC).isoformat(), guild.id, int(user_id), str(game_name)),
+                    )
+                    conn.commit()
+            except Exception:
+                pass
+
     async def _reconcile_active_sessions(self):
         await self.bot.wait_until_ready()
+        for guild in self.bot.guilds:
+            _detect_game_habits_for_guild(guild.id)
         for guild in self.bot.guilds:
             for member in guild.members:
                 if member.bot:

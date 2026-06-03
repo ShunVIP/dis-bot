@@ -202,9 +202,10 @@ def _fmt_seconds(sec: int) -> str:
 
 def _week_bounds_msk() -> tuple[date, date]:
     today = datetime.now(MSK).date()
-    start_this_week = today - timedelta(days=today.weekday())
-    start_prev_week = start_this_week - timedelta(days=7)
-    return start_prev_week, start_this_week
+    start_current_week = today - timedelta(days=today.weekday())
+    if today.weekday() == 6:
+        return start_current_week, today + timedelta(days=1)
+    return start_current_week - timedelta(days=7), start_current_week
 
 
 def _top_rows(conn: sqlite3.Connection, query: str, params: tuple) -> list[tuple]:
@@ -215,7 +216,7 @@ def _get_weekly_stats(guild_id: int) -> dict:
     start_prev_week, start_this_week = _week_bounds_msk()
     since = start_prev_week.isoformat()
     until = start_this_week.isoformat()
-    last_week_code = (datetime.now(MSK) - timedelta(days=7)).strftime("%Y-W%W")
+    last_week_code = (start_this_week - timedelta(days=1)).strftime("%Y-W%W")
 
     with sqlite3.connect(DB_PATH) as conn:
         top_msgs = _top_rows(
@@ -711,7 +712,7 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
         title=f"🏆 Итоги недели — {start}–{end}",
         description=(
             "Автоматический еженедельный дайджест по главным топам сервера.\n"
-            "Собрано за прошлую неделю, постится по понедельникам в 00:00 МСК."
+            "Собрано за завершившуюся неделю, постится по воскресеньям в 23:59 MSK."
         ),
         color=discord.Color.gold(),
     )
@@ -801,9 +802,10 @@ async def _post_weekly_summary(bot: commands.Bot):
 async def _catch_up_weekly_summary(bot: commands.Bot):
     await bot.wait_until_ready()
     now_msk = datetime.now(MSK)
-    start_this_week = now_msk.date() - timedelta(days=now_msk.date().weekday())
-    catchup_until = datetime.combine(start_this_week + timedelta(days=2), datetime.min.time(), MSK)
-    if now_msk >= catchup_until:
+    start_current_week = now_msk.date() - timedelta(days=now_msk.date().weekday())
+    scheduled_at = datetime.combine(start_current_week + timedelta(days=6), datetime.min.time(), MSK).replace(hour=23, minute=59)
+    catchup_until = scheduled_at + timedelta(hours=48)
+    if now_msk < scheduled_at or now_msk >= catchup_until:
         return
     await _post_weekly_summary(bot)
 
@@ -829,7 +831,7 @@ class DailySummary(commands.Cog):
         )
         scheduler.add_job(
             _post_weekly_summary, "cron",
-            day_of_week="mon", hour=0, minute=0, timezone=MSK,
+            day_of_week="sun", hour=23, minute=59, timezone=MSK,
             args=[bot], id="weekly_summary", replace_existing=True, misfire_grace_time=48 * 3600
         )
 
@@ -863,7 +865,7 @@ class DailySummary(commands.Cog):
                 (interaction.guild.id, канал.id)
             )
         await interaction.response.send_message(
-            f"✅ Итоги будут постить в {канал.mention}: день — в 23:59 МСК, неделя — по понедельникам в 00:00 МСК.",
+            f"✅ Итоги будут постить в {канал.mention}: день — в 23:59 MSK, неделя — по воскресеньям в 23:59 MSK.",
             ephemeral=True)
 
     @summary_group.command(name="вкл",
