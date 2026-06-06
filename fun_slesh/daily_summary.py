@@ -454,6 +454,36 @@ def _format_rank_lines(
     return "\n".join(lines) if lines else "Пока пусто."
 
 
+def _tracked_daily_lines(stats: dict) -> str:
+    lines = ["💬 сообщения, слова и эмодзи"]
+    if stats.get("total_voice_s") or stats.get("top_voice"):
+        lines.append("🎙️ голосовые сессии")
+    if stats.get("total_game_s") or stats.get("top_games") or stats.get("top_game_users"):
+        lines.append("🎮 Discord-игры и игровые привычки")
+    if stats.get("rep_events"):
+        lines.append("⭐ репутация")
+    if stats.get("toxic_count"):
+        lines.append("☢️ токсичность")
+    return "\n".join(lines)
+
+
+def _tracked_weekly_lines(stats: dict) -> str:
+    lines = ["💬 сообщения, слова и эмодзи"]
+    if stats.get("total_voice_s") or stats.get("top_voice"):
+        lines.append("🎙️ голосовые сессии")
+    if stats.get("top_games") or stats.get("top_game_users") or stats.get("top_heroes"):
+        lines.append("🎮 Discord-игры и игровые привычки")
+    if stats.get("top_other_activities") or stats.get("top_activity_users"):
+        lines.append("📡 прочие Discord-активности")
+    if stats.get("top_balance") or stats.get("top_streaks"):
+        lines.append("💰 экономика и дэйлики")
+    if stats.get("top_rep"):
+        lines.append("⭐ репутация")
+    if stats.get("top_toxic"):
+        lines.append("☢️ токсичность")
+    return "\n".join(lines)
+
+
 def _winner_phrase(user_id: int) -> str | None:
     try:
         from fun_slesh.parody_engine import generate_phrase, model_exists
@@ -602,6 +632,8 @@ async def _build_summary_embed(guild: discord.Guild, stats: dict) -> discord.Emb
             stat_parts.append(f"🎮 {_fmt_seconds(stats['total_game_s'])} в играх")
         emb.add_field(name="За день", value=" · ".join(stat_parts), inline=False)
 
+    emb.add_field(name="Что трекалось", value=_tracked_daily_lines(stats), inline=False)
+
     # Авто-теги: кто во что играл
     game_tags = []
     for ch_id in stats["voice_channels"]:
@@ -721,6 +753,7 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
         value=f"💬 {stats['total_msgs']} сообщений\n🎙️ {_fmt_seconds(int(stats['total_voice_s']))} в войсе",
         inline=False,
     )
+    emb.add_field(name="Что трекалось", value=_tracked_weekly_lines(stats), inline=False)
     emb.add_field(name="🗣️ Топ активности", value=_format_rank_lines(guild, stats["top_msgs"], "сообщ."), inline=False)
     emb.add_field(name="📝 Топ слов", value=_format_rank_lines(guild, stats["top_words"], "слов"), inline=True)
     emb.add_field(name="😎 Топ эмодзи", value=_format_rank_lines(guild, stats["top_emojis"], "эмодзи"), inline=True)
