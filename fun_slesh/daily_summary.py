@@ -50,6 +50,12 @@ FALLBACK_HAIKU = [
      "Тишина пришла."),
 ]
 
+REIMI_HAIKU_REQUEST = (
+    "Рейми, напиши новое хокку.\n"
+    "Данных сегодня почти нет.\n"
+    "Сервер ждёт строки."
+)
+
 
 def _ensure_tables():
     with sqlite3.connect(DB_PATH) as conn:
@@ -72,10 +78,11 @@ def _ensure_tables():
 
 # ── Сбор статистики за день ───────────────────────────────────────────────────
 def _get_today_stats(guild_id: int) -> dict:
-    today = datetime.now(MSK).date().isoformat()
-    start_today_utc = datetime.combine(datetime.now(MSK).date(), datetime.min.time(), MSK).astimezone(UTC).isoformat()
+    today_date = datetime.now(MSK).date()
+    today = today_date.isoformat()
+    start_today_utc = datetime.combine(today_date, datetime.min.time(), MSK).astimezone(UTC).isoformat()
     start_tomorrow_utc = (
-        datetime.combine(datetime.now(MSK).date() + timedelta(days=1), datetime.min.time(), MSK)
+        datetime.combine(today_date + timedelta(days=1), datetime.min.time(), MSK)
         .astimezone(UTC)
         .isoformat()
     )
@@ -90,14 +97,27 @@ def _get_today_stats(guild_id: int) -> dict:
             (guild_id, today)
         ).fetchall()
 
-        # Топ слов
-        word_rows = conn.execute(
-            "SELECT user_id, SUM(words) as total"
-            " FROM msg_stats_daily"
-            " WHERE guild_id=? AND date=?"
-            " GROUP BY user_id ORDER BY total DESC LIMIT 3",
-            (guild_id, today)
-        ).fetchall()
+        top_words = conn.execute(
+            """
+            SELECT word, SUM(count) AS total
+            FROM msg_word_freq_daily
+            WHERE guild_id=? AND date=?
+            GROUP BY word
+            ORDER BY total DESC, word ASC LIMIT 3
+            """,
+            (guild_id, today),
+        ).fetchall() if _table_exists(conn, "msg_word_freq_daily") else []
+
+        top_emojis = conn.execute(
+            """
+            SELECT emoji, SUM(count) AS total
+            FROM msg_emoji_freq_daily
+            WHERE guild_id=? AND date=?
+            GROUP BY emoji
+            ORDER BY total DESC, emoji ASC LIMIT 3
+            """,
+            (guild_id, today),
+        ).fetchall() if _table_exists(conn, "msg_emoji_freq_daily") else []
 
         # Всего сообщений
         total_msgs = conn.execute(
@@ -129,11 +149,31 @@ def _get_today_stats(guild_id: int) -> dict:
             (guild_id, today)
         ).fetchall()
 
-        # Игровые события за день
-        game_events = conn.execute(
-            "SELECT COUNT(*) FROM toxicity_log WHERE guild_id=? AND DATE(logged_at)=?",
-            (guild_id, today)
+        toxic_count = conn.execute(
+            "SELECT COUNT(*) FROM toxicity_log WHERE guild_id=? AND logged_at>=? AND logged_at<?",
+            (guild_id, start_today_utc, start_tomorrow_utc),
         ).fetchone()[0] if _table_exists(conn, "toxicity_log") else 0
+        toxic_leader = conn.execute(
+            """
+            SELECT user_id, COUNT(*) AS total
+            FROM toxicity_log
+            WHERE guild_id=? AND logged_at>=? AND logged_at<?
+            GROUP BY user_id
+            ORDER BY total DESC LIMIT 1
+            """,
+            (guild_id, start_today_utc, start_tomorrow_utc),
+        ).fetchone() if _table_exists(conn, "toxicity_log") else None
+        toxic_quote = None
+        if toxic_leader:
+            toxic_quote = conn.execute(
+                """
+                SELECT msg_snippet
+                FROM toxicity_log
+                WHERE guild_id=? AND user_id=? AND logged_at>=? AND logged_at<?
+                ORDER BY level DESC, logged_at DESC LIMIT 1
+                """,
+                (guild_id, int(toxic_leader[0]), start_today_utc, start_tomorrow_utc),
+            ).fetchone()
 
         # Кто получил репу
         rep_events = conn.execute(
@@ -146,7 +186,7 @@ def _get_today_stats(guild_id: int) -> dict:
             WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
             GROUP BY activity_name
             HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 5
+            ORDER BY total_seconds DESC LIMIT 10
             """,
             (guild_id, start_today_utc, start_tomorrow_utc),
         ).fetchall() if _table_exists(conn, "activity_sessions") else []
@@ -157,7 +197,18 @@ def _get_today_stats(guild_id: int) -> dict:
             WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
             GROUP BY user_id
             HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 5
+            ORDER BY total_seconds DESC LIMIT 10
+            """,
+            (guild_id, start_today_utc, start_tomorrow_utc),
+        ).fetchall() if _table_exists(conn, "activity_sessions") else []
+        top_user_games = conn.execute(
+            """
+            SELECT user_id, activity_name, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
+            GROUP BY user_id, activity_name
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 10
             """,
             (guild_id, start_today_utc, start_tomorrow_utc),
         ).fetchall() if _table_exists(conn, "activity_sessions") else []
@@ -177,10 +228,15 @@ def _get_today_stats(guild_id: int) -> dict:
         "total_game_s":  total_game_s,
         "top_chatters":  msg_rows,
         "top_voice":     voice_rows,
+        "top_words":     top_words,
+        "top_emojis":    top_emojis,
         "top_games":      top_games,
         "top_game_users": top_game_users,
+        "top_user_games": top_user_games,
         "voice_channels": [r[0] for r in voice_channels],
-        "toxic_count":   game_events,
+        "toxic_count":   toxic_count,
+        "toxic_leader":  toxic_leader,
+        "toxic_quote":   toxic_quote[0] if toxic_quote else None,
         "rep_events":    rep_events,
     }
 
@@ -217,6 +273,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
     since = start_prev_week.isoformat()
     until = start_this_week.isoformat()
     last_week_code = (start_this_week - timedelta(days=1)).strftime("%Y-W%W")
+    start_week_utc = datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat()
+    end_week_utc = datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat()
 
     with sqlite3.connect(DB_PATH) as conn:
         top_msgs = _top_rows(
@@ -252,6 +310,28 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (guild_id, since, until),
         )
+        top_word_terms = _top_rows(
+            conn,
+            """
+            SELECT word, SUM(count) AS total
+            FROM msg_word_freq_daily
+            WHERE guild_id=? AND date>=? AND date<?
+            GROUP BY word
+            ORDER BY total DESC, word ASC LIMIT 3
+            """,
+            (guild_id, since, until),
+        ) if _table_exists(conn, "msg_word_freq_daily") else []
+        top_emoji_terms = _top_rows(
+            conn,
+            """
+            SELECT emoji, SUM(count) AS total
+            FROM msg_emoji_freq_daily
+            WHERE guild_id=? AND date>=? AND date<?
+            GROUP BY emoji
+            ORDER BY total DESC, emoji ASC LIMIT 3
+            """,
+            (guild_id, since, until),
+        ) if _table_exists(conn, "msg_emoji_freq_daily") else []
         total_msgs = conn.execute(
             "SELECT COALESCE(SUM(messages), 0) FROM msg_stats_daily WHERE guild_id=? AND date>=? AND date<?",
             (guild_id, since, until),
@@ -322,8 +402,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
-                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                start_week_utc,
+                end_week_utc,
             ),
         ) if _table_exists(conn, "heroes_sessions") else []
         top_activities = _top_rows(
@@ -338,8 +418,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
-                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                start_week_utc,
+                end_week_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
         top_games = _top_rows(
@@ -350,12 +430,12 @@ def _get_weekly_stats(guild_id: int) -> dict:
             WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
             GROUP BY activity_name
             HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 5
+            ORDER BY total_seconds DESC LIMIT 10
             """,
             (
                 guild_id,
-                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
-                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                start_week_utc,
+                end_week_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
         top_game_users = _top_rows(
@@ -366,14 +446,34 @@ def _get_weekly_stats(guild_id: int) -> dict:
             WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
             GROUP BY user_id
             HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 5
+            ORDER BY total_seconds DESC LIMIT 10
             """,
             (
                 guild_id,
-                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
-                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                start_week_utc,
+                end_week_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
+        top_user_games = _top_rows(
+            conn,
+            """
+            SELECT user_id, activity_name, COALESCE(SUM(seconds), 0) AS total_seconds
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
+            GROUP BY user_id, activity_name
+            HAVING total_seconds > 0
+            ORDER BY total_seconds DESC LIMIT 10
+            """,
+            (guild_id, start_week_utc, end_week_utc),
+        ) if _table_exists(conn, "activity_sessions") else []
+        total_game_s = conn.execute(
+            """
+            SELECT COALESCE(SUM(seconds), 0)
+            FROM activity_sessions
+            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
+            """,
+            (guild_id, start_week_utc, end_week_utc),
+        ).fetchone()[0] if _table_exists(conn, "activity_sessions") else 0
         top_other_activities = _top_rows(
             conn,
             """
@@ -386,8 +486,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
-                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                start_week_utc,
+                end_week_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
         top_activity_users = _top_rows(
@@ -402,10 +502,33 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
-                datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat(),
+                start_week_utc,
+                end_week_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
+        toxic_leader = _top_rows(
+            conn,
+            """
+            SELECT user_id, COUNT(*) AS total
+            FROM toxicity_log
+            WHERE guild_id=? AND logged_at>=? AND logged_at<?
+            GROUP BY user_id
+            ORDER BY total DESC LIMIT 1
+            """,
+            (guild_id, start_week_utc, end_week_utc),
+        ) if _table_exists(conn, "toxicity_log") else []
+        toxic_quote = None
+        if toxic_leader:
+            quote_row = conn.execute(
+                """
+                SELECT msg_snippet
+                FROM toxicity_log
+                WHERE guild_id=? AND user_id=? AND logged_at>=? AND logged_at<?
+                ORDER BY level DESC, logged_at DESC LIMIT 1
+                """,
+                (guild_id, int(toxic_leader[0][0]), start_week_utc, end_week_utc),
+            ).fetchone()
+            toxic_quote = quote_row[0] if quote_row else None
 
     return {
         "since": since,
@@ -413,19 +536,25 @@ def _get_weekly_stats(guild_id: int) -> dict:
         "top_msgs": top_msgs,
         "top_words": top_words,
         "top_emojis": top_emojis,
+        "top_word_terms": top_word_terms,
+        "top_emoji_terms": top_emoji_terms,
         "top_voice": top_voice,
         "top_balance": top_balance,
         "top_streaks": top_streaks,
         "top_rep": top_rep,
-        "top_toxic": top_toxic,
+        "top_toxic": top_toxic or toxic_leader,
         "top_heroes": top_heroes,
         "top_activities": top_activities,
         "top_games": top_games,
         "top_game_users": top_game_users,
+        "top_user_games": top_user_games,
         "top_other_activities": top_other_activities,
         "top_activity_users": top_activity_users,
+        "toxic_leader": toxic_leader[0] if toxic_leader else None,
+        "toxic_quote": toxic_quote,
         "total_msgs": total_msgs,
         "total_voice_s": total_voice,
+        "total_game_s": total_game_s,
     }
 
 
@@ -443,10 +572,11 @@ def _format_rank_lines(
     *,
     cast_int: bool = True,
     value_formatter=None,
+    limit: int = 5,
 ) -> str:
     medals = ["🥇", "🥈", "🥉"]
     lines = []
-    for i, (user_id, raw_value) in enumerate(rows[:5], start=1):
+    for i, (user_id, raw_value) in enumerate(rows[:limit], start=1):
         prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
         value = int(raw_value) if cast_int else raw_value
         shown = value_formatter(value) if value_formatter else f"{value} {suffix}"
@@ -454,8 +584,33 @@ def _format_rank_lines(
     return "\n".join(lines) if lines else "Пока пусто."
 
 
+def _format_term_lines(rows: list[tuple]) -> str:
+    if not rows:
+        return "Пока пусто."
+    return "\n".join(f"**{i}.** {term} — **{int(count)}**" for i, (term, count) in enumerate(rows[:3], start=1))
+
+
+def _fit_field(value: str, limit: int = 1024) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def _format_user_game_lines(guild: discord.Guild, rows: list[tuple], limit: int = 10) -> str:
+    if not rows:
+        return "Пока пусто."
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (user_id, game_name, seconds) in enumerate(rows[:limit], start=1):
+        prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
+        lines.append(
+            f"{prefix} {_member_name(guild, int(user_id))} — **{game_name}**, {_fmt_seconds(int(seconds))}"
+        )
+    return "\n".join(lines)
+
+
 def _tracked_daily_lines(stats: dict) -> str:
-    lines = ["💬 сообщения, слова и эмодзи"]
+    lines = ["💬 сообщения, слова и эмодзи: топ-3 слов и эмодзи длиннее 2 букв"]
     if stats.get("total_voice_s") or stats.get("top_voice"):
         lines.append("🎙️ голосовые сессии")
     if stats.get("total_game_s") or stats.get("top_games") or stats.get("top_game_users"):
@@ -468,7 +623,7 @@ def _tracked_daily_lines(stats: dict) -> str:
 
 
 def _tracked_weekly_lines(stats: dict) -> str:
-    lines = ["💬 сообщения, слова и эмодзи"]
+    lines = ["💬 сообщения, слова и эмодзи: топ-3 слов и эмодзи длиннее 2 букв"]
     if stats.get("total_voice_s") or stats.get("top_voice"):
         lines.append("🎙️ голосовые сессии")
     if stats.get("top_games") or stats.get("top_game_users") or stats.get("top_heroes"):
@@ -506,6 +661,36 @@ def _winner_haiku(display_name: str, categories: list[str]) -> str:
     )
 
 
+def _daily_winners(guild: discord.Guild, stats: dict) -> str:
+    lines = []
+    if stats.get("top_chatters"):
+        uid, total = stats["top_chatters"][0]
+        lines.append(f"💬 Чат: {_member_name(guild, int(uid))} — **{int(total)} сообщ.**")
+    if stats.get("top_voice"):
+        uid, seconds = stats["top_voice"][0]
+        lines.append(f"🎙️ Войс: {_member_name(guild, int(uid))} — **{_fmt_seconds(int(seconds))}**")
+    if stats.get("top_game_users"):
+        uid, seconds = stats["top_game_users"][0]
+        lines.append(f"🎮 Игры: {_member_name(guild, int(uid))} — **{_fmt_seconds(int(seconds))}**")
+    return "\n".join(lines) if lines else "Сегодня победители спрятались в тумане."
+
+
+def _weekly_champion_ids(stats: dict) -> list[int]:
+    sources = [
+        stats.get("top_msgs", []),
+        stats.get("top_voice", []),
+        stats.get("top_game_users", []),
+        stats.get("top_rep", []),
+    ]
+    result = []
+    for rows in sources:
+        if rows:
+            uid = int(rows[0][0])
+            if uid not in result:
+                result.append(uid)
+    return result[:5]
+
+
 def _build_winner_congrats(guild: discord.Guild, stats: dict) -> str:
     winners: dict[int, list[str]] = {}
 
@@ -536,7 +721,13 @@ def _build_winner_congrats(guild: discord.Guild, stats: dict) -> str:
         display = _member_name(guild, user_id)
         haiku = _winner_haiku(display, categories)
         phrase = _winner_phrase(user_id)
-        block = f"**{display}** — {', '.join(categories)}\n*{haiku}*"
+        meme = random.choice([
+            "сервер кивает как ведущий дешёвого шоу",
+            "таблица лидеров просит автограф",
+            "кубок сделан из чистого онлайна",
+            "статистика хлопает стоя, но тихо",
+        ])
+        block = f"**{display}** — {', '.join(categories)}\n*{haiku}*\n_{meme}_"
         if phrase:
             block += f"\n> {phrase}"
         blocks.append(block)
@@ -575,7 +766,7 @@ async def _generate_haiku(stats: dict, guild: discord.Guild) -> str:
             context_parts.append(f"раздали {stats['rep_events']} репы")
 
         if not context_parts:
-            return random.choice(FALLBACK_HAIKU)
+            return REIMI_HAIKU_REQUEST
 
         context = "; ".join(context_parts)
         prompt  = (
@@ -590,9 +781,9 @@ async def _generate_haiku(stats: dict, guild: discord.Guild) -> str:
         result = await asyncio.get_event_loop().run_in_executor(
             None, _call_gpt_haiku, prompt
         )
-        return result or random.choice(FALLBACK_HAIKU)
+        return result or REIMI_HAIKU_REQUEST
     except Exception:
-        return random.choice(FALLBACK_HAIKU)
+        return REIMI_HAIKU_REQUEST
 
 
 def _call_gpt_haiku(prompt: str) -> str | None:
@@ -645,42 +836,64 @@ async def _build_summary_embed(guild: discord.Guild, stats: dict) -> discord.Emb
 
     # Топ чаттеров
     if stats["top_chatters"]:
-        lines = [f"<@{uid}> — {cnt} сообщ." for uid, cnt in stats["top_chatters"][:3]]
+        medals = ["🥇", "🥈", "🥉"]
+        lines = [f"{medals[i]} {_member_name(guild, int(uid))} — {cnt} сообщ." for i, (uid, cnt) in enumerate(stats["top_chatters"][:3])]
         emb.add_field(name="🗣️ Самые активные", value="\n".join(lines), inline=True)
 
     # Топ войса
     if stats["top_voice"]:
-        lines = [f"<@{uid}> — {_fmt_seconds(int(sec))}" for uid, sec in stats["top_voice"][:3]]
+        medals = ["🥇", "🥈", "🥉"]
+        lines = [f"{medals[i]} {_member_name(guild, int(uid))} — {_fmt_seconds(int(sec))}" for i, (uid, sec) in enumerate(stats["top_voice"][:3])]
         emb.add_field(name="🎙️ Топ войса", value="\n".join(lines), inline=True)
+
+    if stats.get("top_words"):
+        emb.add_field(name="📝 Слова дня", value=_format_term_lines(stats["top_words"]), inline=True)
+
+    if stats.get("top_emojis"):
+        emb.add_field(name="😎 Эмодзи дня", value=_format_term_lines(stats["top_emojis"]), inline=True)
 
     if stats.get("top_games"):
         lines = [
             f"**{i}.** {name} — **{_fmt_seconds(int(sec))}**"
-            for i, (name, sec) in enumerate(stats["top_games"][:5], start=1)
+            for i, (name, sec) in enumerate(stats["top_games"][:10], start=1)
         ]
-        emb.add_field(name="🎮 Игры дня", value="\n".join(lines), inline=False)
+        emb.add_field(name="🎮 Игры дня", value=_fit_field("\n".join(lines)), inline=False)
+
+    if stats.get("top_user_games"):
+        emb.add_field(
+            name="🎮 Кто во что играл",
+            value=_fit_field(_format_user_game_lines(guild, stats["top_user_games"], limit=10)),
+            inline=False,
+        )
 
     if stats.get("top_game_users"):
         lines = [
             f"{['🥇', '🥈', '🥉'][i - 1] if i <= 3 else f'**{i}.**'} {_member_name(guild, int(uid))} — **{_fmt_seconds(int(sec))}**"
-            for i, (uid, sec) in enumerate(stats["top_game_users"][:5], start=1)
+            for i, (uid, sec) in enumerate(stats["top_game_users"][:10], start=1)
         ]
         winner_id, winner_seconds = stats["top_game_users"][0]
-        emb.add_field(name="🕹️ Топ игроков дня", value="\n".join(lines), inline=False)
+        emb.add_field(name="🕹️ Топ игроков дня", value=_fit_field("\n".join(lines)), inline=False)
         emb.add_field(
             name="🏆 Игровой победитель дня",
             value=f"{_member_name(guild, int(winner_id))} — **{_fmt_seconds(int(winner_seconds))}**",
             inline=False,
         )
 
+    emb.add_field(name="🏆 Победители дня", value=_daily_winners(guild, stats), inline=False)
+
     # Мелочи дня
     misc = []
     if stats["toxic_count"]:
         misc.append(f"☢️ Токсичных сообщений: {stats['toxic_count']}")
+        if stats.get("toxic_leader") and stats.get("toxic_quote"):
+            leader_id, leader_count = stats["toxic_leader"]
+            misc.append(
+                f"Лидер: {_member_name(guild, int(leader_id))} — {int(leader_count)} раз\n> {stats['toxic_quote']}"
+            )
     if stats["rep_events"]:
         misc.append(f"⭐ Репы выдано: {stats['rep_events']}")
     if misc:
-        emb.add_field(name="Прочее", value="\n".join(misc), inline=False)
+        emb.add_field(name="Прочее", value=_fit_field("\n".join(misc)), inline=False)
 
     emb.set_footer(text="Увидимся завтра 👋")
     return emb
@@ -750,13 +963,21 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
     )
     emb.add_field(
         name="За неделю",
-        value=f"💬 {stats['total_msgs']} сообщений\n🎙️ {_fmt_seconds(int(stats['total_voice_s']))} в войсе",
+        value=(
+            f"💬 {stats['total_msgs']} сообщений\n"
+            f"🎙️ {_fmt_seconds(int(stats['total_voice_s']))} в войсе\n"
+            f"🎮 {_fmt_seconds(int(stats.get('total_game_s', 0)))} в играх"
+        ),
         inline=False,
     )
     emb.add_field(name="Что трекалось", value=_tracked_weekly_lines(stats), inline=False)
     emb.add_field(name="🗣️ Топ активности", value=_format_rank_lines(guild, stats["top_msgs"], "сообщ."), inline=False)
     emb.add_field(name="📝 Топ слов", value=_format_rank_lines(guild, stats["top_words"], "слов"), inline=True)
     emb.add_field(name="😎 Топ эмодзи", value=_format_rank_lines(guild, stats["top_emojis"], "эмодзи"), inline=True)
+    if stats.get("top_word_terms"):
+        emb.add_field(name="📝 Слова недели", value=_format_term_lines(stats["top_word_terms"]), inline=True)
+    if stats.get("top_emoji_terms"):
+        emb.add_field(name="😎 Эмодзи недели", value=_format_term_lines(stats["top_emoji_terms"]), inline=True)
     emb.add_field(
         name="🎙️ Топ войса",
         value=_format_rank_lines(guild, stats["top_voice"], "", value_formatter=_fmt_seconds),
@@ -780,11 +1001,17 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
             f"**{i}.** {name} — **{_fmt_seconds(int(seconds))}**"
             for i, (name, seconds) in enumerate(stats["top_games"], start=1)
         ]
-        emb.add_field(name="🎮 Топ игр", value="\n".join(lines), inline=False)
+        emb.add_field(name="🎮 Топ игр", value=_fit_field("\n".join(lines)), inline=False)
     if stats.get("top_game_users"):
         emb.add_field(
             name="🕹️ Топ игроков по играм",
-            value=_format_rank_lines(guild, stats["top_game_users"], "", value_formatter=_fmt_seconds),
+            value=_format_rank_lines(guild, stats["top_game_users"], "", value_formatter=_fmt_seconds, limit=10),
+            inline=False,
+        )
+    if stats.get("top_user_games"):
+        emb.add_field(
+            name="🎮 Кто во что играл",
+            value=_fit_field(_format_user_game_lines(guild, stats["top_user_games"], limit=10)),
             inline=False,
         )
     if stats.get("top_other_activities"):
@@ -803,8 +1030,12 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
     emb.add_field(name="🔥 Топ серий", value=_format_rank_lines(guild, stats["top_streaks"], "дн."), inline=True)
     emb.add_field(name="⭐ Топ репы", value=_format_rank_lines(guild, stats["top_rep"], "репы"), inline=False)
     if stats["top_toxic"]:
-        emb.add_field(name="☢️ Топ токсиков", value=_format_rank_lines(guild, stats["top_toxic"], "раз"), inline=False)
-    emb.add_field(name="🎐 Поздравления чемпионам", value=_build_winner_congrats(guild, stats), inline=False)
+        toxic_text = _format_rank_lines(guild, stats["top_toxic"], "раз")
+        if stats.get("toxic_leader") and stats.get("toxic_quote"):
+            leader_id, leader_count = stats["toxic_leader"]
+            toxic_text += f"\n\nЛидер недели: {_member_name(guild, int(leader_id))} — {int(leader_count)} раз\n> {stats['toxic_quote']}"
+        emb.add_field(name="☢️ Топ токсиков", value=_fit_field(toxic_text), inline=False)
+    emb.add_field(name="🎐 Поздравления чемпионам", value=_fit_field(_build_winner_congrats(guild, stats)), inline=False)
     emb.set_footer(text="Если хочешь тише — можно вынести этот дайджест в отдельный канал.")
     return emb
 
@@ -826,7 +1057,14 @@ async def _post_weekly_summary(bot: commands.Bot):
         try:
             stats = _get_weekly_stats(guild_id)
             emb = await _build_weekly_embed(guild, stats)
-            await channel.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
+            champion_ids = _weekly_champion_ids(stats)
+            content = ""
+            allowed = discord.AllowedMentions.none()
+            if champion_ids:
+                mentions = " ".join(f"<@{uid}>" for uid in champion_ids)
+                content = f"🏆 Поздравляем чемпионов недели: {mentions}"
+                allowed = discord.AllowedMentions(users=True, roles=False, everyone=False)
+            await channel.send(content=content or None, embed=emb, allowed_mentions=allowed)
             _mark_posted(guild_id, "weekly", period_key)
         except Exception as e:
             log.bind(guild_id=guild_id, channel_id=ch_id).error(f"weekly summary post failed: {e}")

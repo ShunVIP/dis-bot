@@ -633,13 +633,13 @@ def _fmt_clock(minute_of_day: int) -> str:
     return f"{minute_of_day // 60:02d}:{minute_of_day % 60:02d} MSK"
 
 
-def _stable_daily_offset(guild_id: int, user_id: int, game_name: str, day: str) -> int:
-    seed = f"{guild_id}:{user_id}:{game_name}:{day}".encode("utf-8", errors="ignore")
+def _stable_daily_offset(guild_id: int, user_id: int, activity_name: str, day: str) -> int:
+    seed = f"{guild_id}:{user_id}:{activity_name}:{day}".encode("utf-8", errors="ignore")
     digest = hashlib.sha256(seed).hexdigest()
     return int(digest[:8], 16) % (HABIT_REMINDER_GRACE_MINUTES + 1)
 
 
-def _mark_habit_seen(guild_id: int, user_id: int, game_name: str):
+def _mark_habit_seen(guild_id: int, user_id: int, activity_name: str):
     today = datetime.now(MSK).date().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -648,12 +648,12 @@ def _mark_habit_seen(guild_id: int, user_id: int, game_name: str):
             SET last_seen_date=?, updated_at=?
             WHERE guild_id=? AND user_id=? AND activity_name=?
             """,
-            (today, datetime.now(UTC).isoformat(), guild_id, user_id, game_name),
+            (today, datetime.now(UTC).isoformat(), guild_id, user_id, activity_name),
         )
         conn.commit()
 
 
-def _detect_game_habits_for_guild(guild_id: int):
+def _detect_activity_habits_for_guild(guild_id: int):
     now_msk = datetime.now(MSK)
     today = now_msk.date()
     start_utc = datetime.combine(today - timedelta(days=7), datetime.min.time(), MSK).astimezone(UTC).isoformat()
@@ -662,16 +662,17 @@ def _detect_game_habits_for_guild(guild_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             """
-            SELECT user_id, activity_name, started_at
+            SELECT user_id, activity_name, activity_type, started_at
             FROM activity_sessions
-            WHERE guild_id=? AND activity_type='game' AND started_at>=? AND started_at<?
-            ORDER BY user_id, activity_name, started_at
+            WHERE guild_id=? AND started_at>=? AND started_at<?
+              AND activity_type IN ('game','streaming','listening','watching','competing')
+            ORDER BY user_id, activity_name, activity_type, started_at
             """,
             (guild_id, start_utc, end_utc),
         ).fetchall()
 
         grouped: dict[tuple[int, str], dict[str, int]] = {}
-        for user_id, game_name, started_at in rows:
+        for user_id, activity_name, activity_type, started_at in rows:
             try:
                 dt = datetime.fromisoformat(started_at)
                 if dt.tzinfo is None:
@@ -681,11 +682,13 @@ def _detect_game_habits_for_guild(guild_id: int):
             local = dt.astimezone(MSK)
             day = local.date().isoformat()
             minute = local.hour * 60 + local.minute
-            key = (int(user_id), str(game_name))
+            label = TYPE_LABELS.get(str(activity_type), str(activity_type))
+            display_name = str(activity_name) if str(activity_type) == "game" else f"{str(activity_name)} ({label})"
+            key = (int(user_id), display_name)
             day_map = grouped.setdefault(key, {})
             day_map.setdefault(day, minute)
 
-        for (user_id, game_name), day_map in grouped.items():
+        for (user_id, activity_name), day_map in grouped.items():
             if len(day_map) < HABIT_MIN_DAYS:
                 continue
             minutes = sorted(day_map.values())
@@ -708,7 +711,7 @@ def _detect_game_habits_for_guild(guild_id: int):
                 (
                     guild_id,
                     user_id,
-                    game_name,
+                    activity_name,
                     expected,
                     len(day_map),
                     active_from,
@@ -720,21 +723,21 @@ def _detect_game_habits_for_guild(guild_id: int):
         conn.commit()
 
 
-def _habit_joke(user_id: int, game_name: str) -> str:
+def _habit_joke(user_id: int, activity_name: str) -> str:
     try:
         from fun_slesh.parody_engine import generate_phrase, model_exists
         for quality in ("мем", "разум"):
             if model_exists(user_id, quality):
                 phrase = generate_phrase(user_id, quality)
                 if phrase:
-                    return f"{game_name}: ты обычно уже там. Модель шепчет твоим стилем: «{phrase}»"
+                    return f"{activity_name}: ты обычно уже там. Модель шепчет твоим стилем: «{phrase}»"
     except Exception:
         pass
     fallbacks = [
-        f"{game_name}: расписание скучает. Где наш законный вечерний заход?",
-        f"{game_name}: сервер заметил пустой слот и сделал вид, что он календарь.",
-        f"{game_name}: привычка пришла, а игрока нет. Неловко вышло.",
-        f"{game_name}: этот таймслот уже прогрет, можно заходить.",
+        f"{activity_name}: расписание скучает. Где наш законный вечерний заход?",
+        f"{activity_name}: сервер заметил пустой слот и сделал вид, что он календарь.",
+        f"{activity_name}: привычка пришла, а участника нет. Неловко вышло.",
+        f"{activity_name}: этот таймслот уже прогрет, можно заходить.",
     ]
     return random.choice(fallbacks)
 
@@ -829,8 +832,8 @@ class ActivityTracker(commands.Cog):
                 (guild_id, user_id, name, activity_type, now.isoformat()),
             )
             conn.commit()
-        if activity_type == "game":
-            _mark_habit_seen(guild_id, user_id, name)
+        habit_name = name if activity_type == "game" else f"{name} ({TYPE_LABELS.get(activity_type, activity_type)})"
+        _mark_habit_seen(guild_id, user_id, habit_name)
 
     def _finish(self, guild_id: int, user_id: int, name: str, activity_type: str) -> int:
         key = (guild_id, user_id, name, activity_type)
@@ -942,6 +945,8 @@ class ActivityTracker(commands.Cog):
             conn.commit()
 
     async def _send_start_notice(self, member: discord.Member, name: str, activity_type: str):
+        # Activity starts are tracked silently; summaries and habit reminders carry the signal.
+        return
         cfg = self._config(member.guild.id)
         if not cfg["enabled"] or not cfg["notify_starts"] or activity_type != "game":
             return
@@ -970,6 +975,8 @@ class ActivityTracker(commands.Cog):
             pass
 
     async def _send_end_notice(self, member: discord.Member, name: str, activity_type: str, seconds: int):
+        # Activity ends are tracked silently to keep the channel free of presence spam.
+        return
         cfg = self._config(member.guild.id)
         if not cfg["enabled"] or not cfg["notify_ends"]:
             return
@@ -988,7 +995,7 @@ class ActivityTracker(commands.Cog):
     async def _habit_tick(self):
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
-            _detect_game_habits_for_guild(guild.id)
+            _detect_activity_habits_for_guild(guild.id)
             await self._send_due_habit_reminders(guild)
 
     async def _send_due_habit_reminders(self, guild: discord.Guild):
@@ -1040,7 +1047,7 @@ class ActivityTracker(commands.Cog):
     async def _reconcile_active_sessions(self):
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
-            _detect_game_habits_for_guild(guild.id)
+            _detect_activity_habits_for_guild(guild.id)
         for guild in self.bot.guilds:
             for member in guild.members:
                 if member.bot:

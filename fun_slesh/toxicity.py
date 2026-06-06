@@ -234,8 +234,7 @@ class Toxicity(commands.Cog):
         self._cooldowns[key] = now
         return True
 
-    async def _delayed_troll_reply(self, message: discord.Message, response: str):
-        await asyncio.sleep(random.randint(5 * 60, 45 * 60))
+    async def _send_troll_reply(self, message: discord.Message, response: str):
         try:
             await message.reply(response, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
@@ -297,7 +296,7 @@ class Toxicity(commands.Cog):
             parody=parody
         )
 
-        asyncio.create_task(self._delayed_troll_reply(message, response))
+        await self._send_troll_reply(message, response)
 
     # ── /токсики ──────────────────────────────────────────────────────────────
     @toxicity_group.command(name="топ",

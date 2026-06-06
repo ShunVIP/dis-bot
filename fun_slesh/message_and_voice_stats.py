@@ -24,6 +24,7 @@ import re
 import sqlite3
 import asyncio
 from datetime import datetime, timedelta, timezone, date
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 import discord
@@ -34,6 +35,7 @@ from core.economy import add_coins, get_balance
 # === Путь к общей БД проекта ===
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 UTC = timezone.utc
+MSK = ZoneInfo("Europe/Moscow")
 
 # -------------------------
 # Безопасные ответы для slash-команд
@@ -82,6 +84,26 @@ SCHEMA_SQL = [
         emojis      INTEGER NOT NULL DEFAULT 0,
         chars       INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (user_id, guild_id, channel_id, date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS msg_word_freq_daily (
+        guild_id    INTEGER NOT NULL,
+        channel_id  INTEGER NOT NULL,
+        date        TEXT    NOT NULL,  -- YYYY-MM-DD (MSK)
+        word        TEXT    NOT NULL,
+        count       INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, channel_id, date, word)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS msg_emoji_freq_daily (
+        guild_id    INTEGER NOT NULL,
+        channel_id  INTEGER NOT NULL,
+        date        TEXT    NOT NULL,  -- YYYY-MM-DD (MSK)
+        emoji       TEXT    NOT NULL,
+        count       INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, channel_id, date, emoji)
     )
     """,
     # чекпоинт по каждому текстовому каналу
@@ -168,6 +190,8 @@ _emoji_unic = re.compile(
     re.UNICODE,
 )
 _custom_emoji = re.compile(r"<a?:[A-Za-z0-9_~]+:[0-9]+>")
+_word_token = re.compile(r"[A-Za-zА-Яа-яЁё0-9]{3,}", re.UNICODE)
+_custom_emoji_name = re.compile(r"<a?:([A-Za-z0-9_~]+):[0-9]+>")
 
 
 def _count_words(text: str) -> int:
@@ -182,6 +206,24 @@ def _count_emojis(text: str) -> int:
         return 0
     return len(_emoji_unic.findall(text)) + len(_custom_emoji.findall(text))
 
+
+def _extract_words(text: str) -> list[str]:
+    if not text:
+        return []
+    words = []
+    for token in _word_token.findall(text.lower()):
+        if token.isdigit():
+            continue
+        words.append(token)
+    return words
+
+
+def _extract_emojis(text: str) -> list[str]:
+    if not text:
+        return []
+    custom = [f":{name}:" for name in _custom_emoji_name.findall(text)]
+    return custom + _emoji_unic.findall(text)
+
 # -------------------------
 # Core aggregations
 # -------------------------
@@ -190,6 +232,12 @@ def _utc_date_from_ts(ts: datetime) -> str:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=UTC)
     return ts.astimezone(UTC).date().isoformat()
+
+
+def _msk_date_from_ts(ts: datetime) -> str:
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(MSK).date().isoformat()
 
 
 def _accumulate_msg_row(cur: sqlite3.Cursor, *, user_id: int, guild_id: int, channel_id: int,
@@ -205,6 +253,73 @@ def _accumulate_msg_row(cur: sqlite3.Cursor, *, user_id: int, guild_id: int, cha
             chars    = chars    + excluded.chars
         """,
         (user_id, guild_id, channel_id, d_iso, messages, words, emojis, chars)
+    )
+
+
+def _accumulate_freq_row(
+    cur: sqlite3.Cursor,
+    *,
+    table: str,
+    guild_id: int,
+    channel_id: int,
+    d_iso: str,
+    value_column: str,
+    values: list[str],
+) -> None:
+    if not values:
+        return
+    counts: dict[str, int] = {}
+    for value in values:
+        clean = (value or "").strip()
+        if not clean:
+            continue
+        counts[clean] = counts.get(clean, 0) + 1
+    for value, count in counts.items():
+        cur.execute(
+            f"""
+            INSERT INTO {table}(guild_id,channel_id,date,{value_column},count)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(guild_id,channel_id,date,{value_column}) DO UPDATE SET
+                count = count + excluded.count
+            """,
+            (guild_id, channel_id, d_iso, value, count),
+        )
+
+
+def _accumulate_message_stats(cur: sqlite3.Cursor, message: discord.Message, guild_id: int, channel_id: int) -> None:
+    content = message.content or ""
+    words = _count_words(content)
+    emojis = _count_emojis(content)
+    chars = len(content)
+    _accumulate_msg_row(
+        cur,
+        user_id=message.author.id,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        d_iso=_utc_date_from_ts(message.created_at),
+        messages=1,
+        words=words,
+        emojis=emojis,
+        chars=chars,
+    )
+    msk_date = _msk_date_from_ts(message.created_at)
+    _accumulate_freq_row(
+        cur,
+        table="msg_word_freq_daily",
+        guild_id=guild_id,
+        channel_id=channel_id,
+        d_iso=msk_date,
+        value_column="word",
+        values=_extract_words(content),
+    )
+    _accumulate_freq_row(
+        cur,
+        table="msg_emoji_freq_daily",
+        guild_id=guild_id,
+        channel_id=channel_id,
+        d_iso=msk_date,
+        value_column="emoji",
+        values=_extract_emojis(content),
     )
 
 
@@ -271,20 +386,9 @@ class MessageAndVoiceStats(commands.Cog):
             if message.author.bot:
                 continue
 
-            content = message.content or ""
-            words = _count_words(content)
-            emojis = _count_emojis(content)
-            chars = len(content)
-            d_iso = _utc_date_from_ts(message.created_at)
-
             with sqlite3.connect(DB_PATH) as conn:
                 cur = conn.cursor()
-                _accumulate_msg_row(cur,
-                                    user_id=message.author.id,
-                                    guild_id=guild_id,
-                                    channel_id=channel.id,
-                                    d_iso=d_iso,
-                                    messages=1, words=words, emojis=emojis, chars=chars)
+                _accumulate_message_stats(cur, message, guild_id, channel.id)
                 new_rows += 1
                 processed += 1
                 last_processed_id = message.id
@@ -427,6 +531,12 @@ class MessageAndVoiceStats(commands.Cog):
             return
         guild_id = message.guild.id
         user_id  = message.author.id
+        channel_id = message.channel.id
+
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            _accumulate_message_stats(cur, message, guild_id, channel_id)
+            conn.commit()
 
         with sqlite3.connect(DB_PATH) as conn:
             cfg = conn.execute(
