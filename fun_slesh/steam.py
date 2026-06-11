@@ -2,11 +2,11 @@
 # fun_slesh/steam.py
 """
 Steam интеграция:
-  /стим_привязать   — привязать Steam профиль (URL / ник / SteamID64)
-  /стим_отвязать    — отвязать профиль
-  /стим             — посмотреть статистику (своё или чужое)
-  /стим_вишлист     — вишлист участника
-  /стим_общие       — общие игры с другим участником
+  /steam привязать  — привязать Steam профиль (URL / ник / SteamID64)
+  /steam отвязать   — отвязать профиль
+  /steam профиль    — посмотреть статистику (своё или чужое)
+  /steam вишлист    — Steam-вишлист участника
+  /steam общие      — общие игры с другим участником
   /релизы_проверить — (Админ) запустить проверку релизов/скидок вручную
   /релизы_канал     — (Админ) куда постить уведомления о релизах/скидках
 
@@ -265,21 +265,42 @@ def _mark_auto_log(user_id: int, kind: str, period_key: str, appid: int | None =
         conn.commit()
 
 
-async def _dm_or_channel(bot: commands.Bot, user_id: int, embed: discord.Embed, fallback_channel_id: int | None = None) -> bool:
+def _public_channel_for_user(bot: commands.Bot, user_id: int, preferred_channel_id: int | None = None) -> discord.TextChannel | None:
+    if preferred_channel_id:
+        channel = bot.get_channel(preferred_channel_id)
+        if isinstance(channel, discord.TextChannel):
+            return channel
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT guild_id, notify_channel FROM steam_config WHERE notify_channel IS NOT NULL"
+        ).fetchall()
+    for guild_id, channel_id in rows:
+        guild = bot.get_guild(int(guild_id))
+        if guild and guild.get_member(int(user_id)):
+            channel = bot.get_channel(int(channel_id))
+            if isinstance(channel, discord.TextChannel):
+                return channel
+    return None
+
+
+async def _public_or_dm(bot: commands.Bot, user_id: int, embed: discord.Embed, fallback_channel_id: int | None = None) -> bool:
+    channel = _public_channel_for_user(bot, user_id, fallback_channel_id)
+    if channel:
+        try:
+            await channel.send(
+                content=f"<@{user_id}>",
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+            return True
+        except Exception:
+            pass
     try:
         user = bot.get_user(user_id) or await bot.fetch_user(user_id)
         await user.send(embed=embed)
         return True
     except Exception:
         pass
-    if fallback_channel_id:
-        ch = bot.get_channel(fallback_channel_id)
-        if ch:
-            try:
-                await ch.send(content=f"<@{user_id}>", embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
-                return True
-            except Exception:
-                return False
     return False
 
 
@@ -446,8 +467,8 @@ async def _check_releases(bot: commands.Bot):
                 if details.get("header_image"):
                     emb.set_thumbnail(url=details["header_image"])
                 try:
-                    sent_dm = await _dm_or_channel(bot, user_id, emb, fallback_channel_id=notify_ch_id)
-                    if not sent_dm:
+                    sent_public = await _public_or_dm(bot, user_id, emb, fallback_channel_id=notify_ch_id)
+                    if not sent_public:
                         await ch.send(embed=emb)
                 except Exception:
                     pass
@@ -506,7 +527,7 @@ async def _send_daily_game_prompts(bot: commands.Bot):
             description="\n".join(lines),
             color=discord.Color.blurple(),
         )
-        sent = await _dm_or_channel(bot, int(user_id), emb, fallback_channel_id=fallback_channel_id)
+        sent = await _public_or_dm(bot, int(user_id), emb, fallback_channel_id=fallback_channel_id)
         if sent:
             _mark_auto_log(int(user_id), "daily_prompt", today_key, appid)
 
@@ -551,7 +572,7 @@ async def _send_weekly_backlog_prompts(bot: commands.Bot):
             url=f"https://store.steampowered.com/app/{appid}",
             color=discord.Color.dark_gold(),
         )
-        sent = await _dm_or_channel(bot, int(user_id), emb, fallback_channel_id=fallback_channel_id)
+        sent = await _public_or_dm(bot, int(user_id), emb, fallback_channel_id=fallback_channel_id)
         if sent:
             _mark_auto_log(int(user_id), "backlog", week_key, appid)
 
@@ -633,7 +654,8 @@ class Steam(commands.Cog):
             title="✅ Steam профиль привязан",
             description=(
                 f"**{name}**\nSteamID64: `{steam_id}`\n\n"
-                "Автоматически включены: скидки watchlist, рандом-игра, челленджи и мягкий бэклог."
+                "Автоматически включены: скидки watchlist, рандом-игра, челленджи и мягкий бэклог. "
+                "Пинки будут видны в общем Steam-канале, если он настроен."
             ),
             color=discord.Color.blue()
         )
@@ -720,35 +742,14 @@ class Steam(commands.Cog):
             conn.commit()
         await interaction.response.send_message("✅ Steam профиль отвязан.", ephemeral=True)
 
-    # ── /стим_привязать ───────────────────────────────────────────────────────
-    @app_commands.command(name="стим_привязать",
-                          description="Привязать Steam профиль")
-    @app_commands.describe(
-        профиль="Ссылка на профиль, vanity-URL или SteamID64"
-    )
-    async def стим_привязать(self, interaction: discord.Interaction, профиль: str):
-        await self._link_profile(interaction, профиль)
-
     @steam_group.command(name="привязать", description="Привязать Steam профиль по ссылке, vanity или SteamID64")
     @app_commands.describe(профиль="Ссылка Steam, vanity-ник или SteamID64")
     async def steam_привязать(self, interaction: discord.Interaction, профиль: str):
         await self._link_profile(interaction, профиль)
 
-    # ── /стим_отвязать ────────────────────────────────────────────────────────
-    @app_commands.command(name="стим_отвязать", description="Отвязать Steam профиль")
-    async def стим_отвязать(self, interaction: discord.Interaction):
-        await self._unlink_profile(interaction)
-
     @steam_group.command(name="отвязать", description="Отвязать Steam профиль")
     async def steam_отвязать(self, interaction: discord.Interaction):
         await self._unlink_profile(interaction)
-
-    # ── /стим ─────────────────────────────────────────────────────────────────
-    @app_commands.command(name="стим", description="Статистика Steam профиля")
-    @app_commands.describe(пользователь="Чей профиль посмотреть (по умолчанию свой)")
-    async def стим(self, interaction: discord.Interaction,
-                   пользователь: discord.Member | None = None):
-        await self._send_profile(interaction, пользователь)
 
     @steam_group.command(name="профиль", description="Показать Steam-профиль")
     @app_commands.describe(пользователь="Чей профиль посмотреть")
@@ -819,8 +820,8 @@ class Steam(commands.Cog):
 
     @steam_group.command(name="настройки", description="Настроить автоматические Steam-пинки")
     @app_commands.describe(
-        рандом="Автоматическая рандом-игра в личку",
-        челленджи="Автоматические челленджи в личку",
+        рандом="Автоматическая рандом-игра в общий Steam-канал",
+        челленджи="Автоматические челленджи в общий Steam-канал",
         бэклог="Еженедельный бэклог-пинок",
         тон="Тон бэклога"
     )
@@ -861,55 +862,56 @@ class Steam(commands.Cog):
 
     @steam_group.command(name="рандом", description="Выдать случайную игру из твоей Steam-библиотеки")
     async def steam_рандом(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         api_key = _get_api_key()
         if not api_key:
-            await interaction.followup.send("❌ Steam API ключ не настроен.", ephemeral=True)
+            await interaction.followup.send("❌ Steam API ключ не настроен.")
             return
         with sqlite3.connect(DB_PATH) as conn:
             row = conn.execute("SELECT steam_id FROM steam_profiles WHERE user_id=?", (interaction.user.id,)).fetchone()
         if not row:
-            await interaction.followup.send("❌ Сначала привяжи Steam через `/steam привязать`.", ephemeral=True)
+            await interaction.followup.send("❌ Сначала привяжи Steam через `/steam привязать`.")
             return
         games = await _sync_owned_games(interaction.user.id, row[0], api_key)
         candidates = [g for g in games if int(g.get("appid", 0)) > 0]
         if not candidates:
-            await interaction.followup.send("📭 Не вижу игр в библиотеке. Возможно, профиль закрыт.", ephemeral=True)
+            await interaction.followup.send("📭 Не вижу игр в библиотеке. Возможно, профиль закрыт.")
             return
         picked = random.choice(candidates)
         appid = int(picked.get("appid", 0))
         name = picked.get("name") or f"App {appid}"
         await interaction.followup.send(
-            f"🎲 Сегодня выпала **{name}**\nhttps://store.steampowered.com/app/{appid}",
-            ephemeral=True,
+            f"🎲 Для {interaction.user.mention} сегодня выпала **{name}**\nhttps://store.steampowered.com/app/{appid}",
+            allowed_mentions=discord.AllowedMentions(users=True),
         )
 
     @steam_group.command(name="челлендж", description="Выдать игровой челлендж по Steam-библиотеке")
     async def steam_челлендж(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         api_key = _get_api_key()
         if not api_key:
-            await interaction.followup.send("❌ Steam API ключ не настроен.", ephemeral=True)
+            await interaction.followup.send("❌ Steam API ключ не настроен.")
             return
         with sqlite3.connect(DB_PATH) as conn:
             row = conn.execute("SELECT steam_id FROM steam_profiles WHERE user_id=?", (interaction.user.id,)).fetchone()
         if not row:
-            await interaction.followup.send("❌ Сначала привяжи Steam через `/steam привязать`.", ephemeral=True)
+            await interaction.followup.send("❌ Сначала привяжи Steam через `/steam привязать`.")
             return
         games = await _sync_owned_games(interaction.user.id, row[0], api_key)
         candidates = [g for g in games if int(g.get("appid", 0)) > 0]
         if not candidates:
-            await interaction.followup.send("📭 Не вижу игр в библиотеке. Возможно, профиль закрыт.", ephemeral=True)
+            await interaction.followup.send("📭 Не вижу игр в библиотеке. Возможно, профиль закрыт.")
             return
         picked = random.choice(candidates)
         name = picked.get("name") or "случайную игру"
-        await interaction.followup.send(f"⚔️ {_challenge_text(name)}", ephemeral=True)
+        await interaction.followup.send(
+            f"⚔️ Челлендж для {interaction.user.mention}: {_challenge_text(name)}",
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
-    # ── /стим_вишлист ─────────────────────────────────────────────────────────
-    @app_commands.command(name="стим_вишлист",
-                          description="Вишлист Steam участника")
+    @steam_group.command(name="вишлист", description="Показать Steam-вишлист участника")
     @app_commands.describe(пользователь="Чей вишлист (по умолчанию свой)")
-    async def стим_вишлист(self, interaction: discord.Interaction,
+    async def steam_вишлист(self, interaction: discord.Interaction,
                             пользователь: discord.Member | None = None):
         await interaction.response.defer(thinking=True)
         target = пользователь or interaction.user
@@ -948,11 +950,9 @@ class Steam(commands.Cog):
         emb.set_footer(text=f"Показано {len(items)} из {len(wishlist)} игр")
         await interaction.followup.send(embed=emb)
 
-    # ── /стим_общие ───────────────────────────────────────────────────────────
-    @app_commands.command(name="стим_общие",
-                          description="Общие игры с другим участником")
+    @steam_group.command(name="общие", description="Общие Steam-игры с другим участником")
     @app_commands.describe(пользователь="С кем сравнить библиотеку")
-    async def стим_общие(self, interaction: discord.Interaction,
+    async def steam_общие(self, interaction: discord.Interaction,
                           пользователь: discord.Member):
         await interaction.response.defer(thinking=True)
         api_key = _get_api_key()
