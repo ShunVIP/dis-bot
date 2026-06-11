@@ -14,8 +14,9 @@ Steam интеграция:
 или скидка ≥ настроенного порога → постит в канал.
 """
 
-import os, sqlite3, json, re
+import os, sqlite3, json, re, random
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
@@ -25,6 +26,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 UTC     = timezone.utc
+MSK     = ZoneInfo("Europe/Moscow")
 
 STEAM_API_BASE = "https://api.steampowered.com"
 STORE_API_BASE = "https://store.steampowered.com/api"
@@ -58,6 +60,42 @@ def _ensure_tables():
                 price_rub  INTEGER NOT NULL DEFAULT 0,
                 checked_at TEXT    NOT NULL,
                 PRIMARY KEY (user_id, appid)
+            );
+
+            CREATE TABLE IF NOT EXISTS steam_manual_watchlist (
+                user_id    INTEGER NOT NULL,
+                appid      INTEGER NOT NULL,
+                name       TEXT    NOT NULL,
+                added_at   TEXT    NOT NULL,
+                PRIMARY KEY (user_id, appid)
+            );
+
+            CREATE TABLE IF NOT EXISTS steam_owned_games_cache (
+                user_id          INTEGER NOT NULL,
+                appid            INTEGER NOT NULL,
+                name             TEXT    NOT NULL,
+                playtime_forever INTEGER NOT NULL DEFAULT 0,
+                playtime_2weeks  INTEGER NOT NULL DEFAULT 0,
+                last_played      INTEGER NOT NULL DEFAULT 0,
+                checked_at       TEXT    NOT NULL,
+                PRIMARY KEY (user_id, appid)
+            );
+
+            CREATE TABLE IF NOT EXISTS steam_auto_settings (
+                user_id           INTEGER PRIMARY KEY,
+                random_enabled    INTEGER NOT NULL DEFAULT 1,
+                challenge_enabled INTEGER NOT NULL DEFAULT 1,
+                backlog_enabled   INTEGER NOT NULL DEFAULT 1,
+                backlog_tone      TEXT    NOT NULL DEFAULT 'soft'
+            );
+
+            CREATE TABLE IF NOT EXISTS steam_auto_log (
+                user_id    INTEGER NOT NULL,
+                kind       TEXT    NOT NULL,
+                appid      INTEGER,
+                period_key TEXT    NOT NULL,
+                sent_at    TEXT    NOT NULL,
+                PRIMARY KEY (user_id, kind, period_key)
             );
         """)
 
@@ -154,6 +192,32 @@ async def _get_app_details(appid: int) -> dict | None:
     return entry.get("data")
 
 
+async def _search_store_app(query: str) -> dict | None:
+    query = (query or "").strip()
+    if not query:
+        return None
+    if re.match(r"^\d+$", query):
+        details = await _get_app_details(int(query))
+        if details:
+            return {"appid": int(query), "name": details.get("name") or f"App {query}"}
+        return None
+    url = "https://store.steampowered.com/api/storesearch/"
+    async with aiohttp.ClientSession() as s:
+        async with s.get(
+            url,
+            params={"term": query, "cc": "ru", "l": "russian"},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status != 200:
+                return None
+            data = await r.json(content_type=None)
+    items = data.get("items") or []
+    if not items:
+        return None
+    best = items[0]
+    return {"appid": int(best["id"]), "name": best.get("name") or query}
+
+
 def _get_api_key() -> str:
     """Берём ключ из config.py или переменной окружения."""
     try:
@@ -170,6 +234,109 @@ def _fmt_minutes(minutes: int) -> str:
     if h == 0:
         return f"{m}м"
     return f"{h}ч {m}м" if m else f"{h}ч"
+
+
+def _period_key(kind: str, now: datetime | None = None) -> str:
+    now = now or datetime.now(MSK)
+    if kind == "backlog":
+        year, week, _ = now.isocalendar()
+        return f"{year}-W{week:02d}"
+    return now.date().isoformat()
+
+
+def _auto_log_exists(user_id: int, kind: str, period_key: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM steam_auto_log WHERE user_id=? AND kind=? AND period_key=?",
+            (user_id, kind, period_key),
+        ).fetchone()
+    return bool(row)
+
+
+def _mark_auto_log(user_id: int, kind: str, period_key: str, appid: int | None = None):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO steam_auto_log(user_id, kind, appid, period_key, sent_at)
+            VALUES(?,?,?,?,?)
+            """,
+            (user_id, kind, appid, period_key, datetime.now(UTC).isoformat()),
+        )
+        conn.commit()
+
+
+async def _dm_or_channel(bot: commands.Bot, user_id: int, embed: discord.Embed, fallback_channel_id: int | None = None) -> bool:
+    try:
+        user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        await user.send(embed=embed)
+        return True
+    except Exception:
+        pass
+    if fallback_channel_id:
+        ch = bot.get_channel(fallback_channel_id)
+        if ch:
+            try:
+                await ch.send(content=f"<@{user_id}>", embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
+                return True
+            except Exception:
+                return False
+    return False
+
+
+async def _sync_owned_games(user_id: int, steam_id: str, api_key: str) -> list[dict]:
+    games = await _get_owned_games(steam_id, api_key)
+    now_str = datetime.now(UTC).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        for game in games:
+            conn.execute(
+                """
+                INSERT INTO steam_owned_games_cache(
+                    user_id, appid, name, playtime_forever, playtime_2weeks, last_played, checked_at
+                )
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(user_id, appid) DO UPDATE SET
+                    name=excluded.name,
+                    playtime_forever=excluded.playtime_forever,
+                    playtime_2weeks=excluded.playtime_2weeks,
+                    last_played=excluded.last_played,
+                    checked_at=excluded.checked_at
+                """,
+                (
+                    user_id,
+                    int(game.get("appid", 0)),
+                    game.get("name") or f"App {game.get('appid', '?')}",
+                    int(game.get("playtime_forever", 0)),
+                    int(game.get("playtime_2weeks", 0)),
+                    int(game.get("rtime_last_played", 0)),
+                    now_str,
+                ),
+            )
+        conn.commit()
+    return games
+
+
+def _challenge_text(game_name: str) -> str:
+    templates = [
+        f"Запусти **{game_name}** хотя бы на 30 минут и не называй это тестом лаунчера.",
+        f"Сделай один честный заход в **{game_name}** и выйди до того, как игра начнёт жить в голове.",
+        f"Найди в **{game_name}** один момент, за который её можно похвалить. Даже если придётся копать.",
+        f"Сыграй в **{game_name}** без альт-таба первые 20 минут. Босс этого челленджа — внимание.",
+    ]
+    return random.choice(templates)
+
+
+def _backlog_text(game_name: str, tone: str) -> str:
+    if tone == "hard":
+        variants = [
+            f"**{game_name}** лежит в библиотеке почти нетронутой. Покупка была, прохождения не было. Классика жанра.",
+            f"**{game_name}** смотрит из бэклога и тихо спрашивает, зачем её вообще спасали скидкой.",
+        ]
+    else:
+        variants = [
+            f"**{game_name}** давно ждёт первого нормального запуска. Можно дать ей один вечер и посмотреть, зацепит ли.",
+            f"В бэклоге мягко светится **{game_name}**. Не срочно, но игра явно просит шанс.",
+        ]
+    return random.choice(variants)
 
 
 # ── Проверка релизов / скидок ─────────────────────────────────────────────────
@@ -192,17 +359,26 @@ async def _check_releases(bot: commands.Bot):
 
     for user_id, steam_id in profiles:
         wishlist = await _get_wishlist(steam_id)
-        if not wishlist:
-            continue
+        with sqlite3.connect(DB_PATH) as conn:
+            manual_items = conn.execute(
+                "SELECT appid, name FROM steam_manual_watchlist WHERE user_id=?",
+                (user_id,),
+            ).fetchall()
 
-        for appid_str, info in list(wishlist.items())[:50]:  # лимит 50 игр
+        watch_items: dict[int, str] = {}
+        for appid_str, info in (wishlist or {}).items():
             try:
                 appid = int(appid_str)
             except ValueError:
                 continue
+            watch_items[appid] = info.get("name", f"App {appid}")
+        for appid, name in manual_items:
+            watch_items[int(appid)] = str(name)
 
-            name = info.get("name", f"App {appid}")
+        if not watch_items:
+            continue
 
+        for appid, name in list(watch_items.items())[:80]:
             # Тянем детали из стора
             details = await _get_app_details(appid)
             if not details:
@@ -270,13 +446,122 @@ async def _check_releases(bot: commands.Bot):
                 if details.get("header_image"):
                     emb.set_thumbnail(url=details["header_image"])
                 try:
-                    await ch.send(embed=emb)
+                    sent_dm = await _dm_or_channel(bot, user_id, emb, fallback_channel_id=notify_ch_id)
+                    if not sent_dm:
+                        await ch.send(embed=emb)
                 except Exception:
                     pass
 
 
+async def _send_daily_game_prompts(bot: commands.Bot):
+    api_key = _get_api_key()
+    if not api_key:
+        return
+    today_key = _period_key("daily")
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT p.user_id, p.steam_id, s.random_enabled, s.challenge_enabled
+            FROM steam_profiles p
+            LEFT JOIN steam_auto_settings s ON s.user_id=p.user_id
+            WHERE COALESCE(s.random_enabled, 1)=1 OR COALESCE(s.challenge_enabled, 1)=1
+            """
+        ).fetchall()
+        fallback_channels = {
+            int(guild_id): channel_id
+            for guild_id, channel_id in conn.execute(
+                "SELECT guild_id, notify_channel FROM steam_config WHERE notify_channel IS NOT NULL"
+            ).fetchall()
+        }
+
+    fallback_channel_id = next(iter(fallback_channels.values()), None)
+    for user_id, steam_id, random_enabled, challenge_enabled in rows:
+        if _auto_log_exists(int(user_id), "daily_prompt", today_key):
+            continue
+        games = await _sync_owned_games(int(user_id), str(steam_id), api_key)
+        candidates = [
+            g for g in games
+            if int(g.get("playtime_forever", 0)) >= 30 and int(g.get("appid", 0)) > 0
+        ] or [g for g in games if int(g.get("appid", 0)) > 0]
+        if not candidates:
+            continue
+        weights = []
+        for game in candidates:
+            played = int(game.get("playtime_forever", 0))
+            recent = int(game.get("playtime_2weeks", 0))
+            weights.append(max(1, 3000 - min(played, 3000) + recent))
+        picked = random.choices(candidates, weights=weights, k=1)[0]
+        appid = int(picked.get("appid", 0))
+        name = picked.get("name") or f"App {appid}"
+        store_url = f"https://store.steampowered.com/app/{appid}"
+
+        lines = []
+        if random_enabled is None or int(random_enabled):
+            lines.append(f"🎲 Сегодня выпала [{name}]({store_url}).")
+            lines.append("Причина: она есть в библиотеке и подходит для внезапного захода.")
+        if challenge_enabled is None or int(challenge_enabled):
+            lines.append(f"⚔️ Челлендж: {_challenge_text(name)}")
+        emb = discord.Embed(
+            title="Steam-пинок дня",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        sent = await _dm_or_channel(bot, int(user_id), emb, fallback_channel_id=fallback_channel_id)
+        if sent:
+            _mark_auto_log(int(user_id), "daily_prompt", today_key, appid)
+
+
+async def _send_weekly_backlog_prompts(bot: commands.Bot):
+    api_key = _get_api_key()
+    if not api_key:
+        return
+    week_key = _period_key("backlog")
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT p.user_id, p.steam_id, COALESCE(s.backlog_enabled, 1), COALESCE(s.backlog_tone, 'soft')
+            FROM steam_profiles p
+            LEFT JOIN steam_auto_settings s ON s.user_id=p.user_id
+            WHERE COALESCE(s.backlog_enabled, 1)=1
+            """
+        ).fetchall()
+        fallback_channels = [
+            row[0] for row in conn.execute(
+                "SELECT notify_channel FROM steam_config WHERE notify_channel IS NOT NULL"
+            ).fetchall()
+        ]
+    fallback_channel_id = fallback_channels[0] if fallback_channels else None
+
+    for user_id, steam_id, backlog_enabled, tone in rows:
+        if not backlog_enabled or _auto_log_exists(int(user_id), "backlog", week_key):
+            continue
+        games = await _sync_owned_games(int(user_id), str(steam_id), api_key)
+        backlog = [
+            g for g in games
+            if int(g.get("appid", 0)) > 0 and int(g.get("playtime_forever", 0)) <= 30
+        ]
+        if not backlog:
+            continue
+        picked = random.choice(backlog)
+        appid = int(picked.get("appid", 0))
+        name = picked.get("name") or f"App {appid}"
+        emb = discord.Embed(
+            title="Бэклог-позор недели",
+            description=_backlog_text(name, str(tone)),
+            url=f"https://store.steampowered.com/app/{appid}",
+            color=discord.Color.dark_gold(),
+        )
+        sent = await _dm_or_channel(bot, int(user_id), emb, fallback_channel_id=fallback_channel_id)
+        if sent:
+            _mark_auto_log(int(user_id), "backlog", week_key, appid)
+
+
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class Steam(commands.Cog):
+    steam_group = app_commands.Group(
+        name="steam",
+        description="Steam-профиль, watchlist, рандом-игра и челленджи"
+    )
     releases_group = app_commands.Group(
         name="релизы",
         description="Уведомления о релизах и скидках Steam"
@@ -291,23 +576,29 @@ class Steam(commands.Cog):
             _check_releases, "interval", hours=6,
             args=[bot], id="steam_releases", replace_existing=True
         )
+        scheduler.add_job(
+            _send_daily_game_prompts, "cron",
+            hour=20, minute=30, timezone=MSK,
+            args=[bot], id="steam_daily_prompts", replace_existing=True,
+            misfire_grace_time=3 * 3600
+        )
+        scheduler.add_job(
+            _send_weekly_backlog_prompts, "cron",
+            day_of_week="sun", hour=18, minute=40, timezone=MSK,
+            args=[bot], id="steam_weekly_backlog", replace_existing=True,
+            misfire_grace_time=24 * 3600
+        )
 
-    # ── /стим_привязать ───────────────────────────────────────────────────────
-    @app_commands.command(name="стим_привязать",
-                          description="Привязать Steam профиль")
-    @app_commands.describe(
-        профиль="Ссылка на профиль, vanity-URL или SteamID64"
-    )
-    async def стим_привязать(self, interaction: discord.Interaction, профиль: str):
+    async def _link_profile(self, interaction: discord.Interaction, profile: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
         api_key = _get_api_key()
         if not api_key:
             await interaction.followup.send(
-                "❌ Steam API ключ не настроен. Добавь `STEAM_API_KEY` в `config.py`.",
+                "❌ Steam API ключ не настроен. Добавь `STEAM_API_KEY` в `KGTD.env`.",
                 ephemeral=True)
             return
 
-        steam_id = await _resolve_steam_id(профиль, api_key)
+        steam_id = await _resolve_steam_id(profile, api_key)
         if not steam_id:
             await interaction.followup.send(
                 "❌ Не удалось найти профиль. Попробуй:\n"
@@ -319,7 +610,8 @@ class Steam(commands.Cog):
         player = await _get_player_summary(steam_id, api_key)
         if not player:
             await interaction.followup.send(
-                "❌ Профиль найден, но недоступен (закрытый?)", ephemeral=True)
+                "❌ Профиль найден, но недоступен. Проверь приватность Steam.",
+                ephemeral=True)
             return
 
         with sqlite3.connect(DB_PATH) as conn:
@@ -328,44 +620,34 @@ class Steam(commands.Cog):
                 " ON CONFLICT(user_id) DO UPDATE SET steam_id=excluded.steam_id, added_at=excluded.added_at",
                 (interaction.user.id, steam_id, datetime.now(UTC).isoformat())
             )
+            conn.execute(
+                "INSERT OR IGNORE INTO steam_auto_settings(user_id) VALUES(?)",
+                (interaction.user.id,),
+            )
+            conn.commit()
+        await _sync_owned_games(interaction.user.id, steam_id, api_key)
 
         name = player.get("personaname", "Неизвестно")
         avatar = player.get("avatarfull", "")
         emb = discord.Embed(
             title="✅ Steam профиль привязан",
-            description=f"**{name}**\nSteamID64: `{steam_id}`",
+            description=(
+                f"**{name}**\nSteamID64: `{steam_id}`\n\n"
+                "Автоматически включены: скидки watchlist, рандом-игра, челленджи и мягкий бэклог."
+            ),
             color=discord.Color.blue()
         )
         if avatar:
             emb.set_thumbnail(url=avatar)
         await interaction.followup.send(embed=emb, ephemeral=True)
 
-    # ── /стим_отвязать ────────────────────────────────────────────────────────
-    @app_commands.command(name="стим_отвязать", description="Отвязать Steam профиль")
-    async def стим_отвязать(self, interaction: discord.Interaction):
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT steam_id FROM steam_profiles WHERE user_id=?",
-                (interaction.user.id,)
-            ).fetchone()
-            if not row:
-                await interaction.response.send_message(
-                    "❌ У тебя нет привязанного профиля.", ephemeral=True)
-                return
-            conn.execute(
-                "DELETE FROM steam_profiles WHERE user_id=?", (interaction.user.id,))
-            conn.execute(
-                "DELETE FROM steam_wishlist_cache WHERE user_id=?", (interaction.user.id,))
-        await interaction.response.send_message("✅ Steam профиль отвязан.", ephemeral=True)
-
-    # ── /стим ─────────────────────────────────────────────────────────────────
-    @app_commands.command(name="стим", description="Статистика Steam профиля")
-    @app_commands.describe(пользователь="Чей профиль посмотреть (по умолчанию свой)")
-    async def стим(self, interaction: discord.Interaction,
-                   пользователь: discord.Member | None = None):
+    async def _send_profile(self, interaction: discord.Interaction, пользователь: discord.Member | None = None):
         await interaction.response.defer(thinking=True)
         target = пользователь or interaction.user
         api_key = _get_api_key()
+        if not api_key:
+            await interaction.followup.send("❌ Steam API ключ не настроен.", ephemeral=True)
+            return
 
         with sqlite3.connect(DB_PATH) as conn:
             row = conn.execute(
@@ -375,22 +657,20 @@ class Steam(commands.Cog):
             name = "у тебя" if target == interaction.user else f"у {target.display_name}"
             await interaction.followup.send(
                 f"❌ Steam профиль не привязан {name}.\n"
-                f"Используй `/стим_привязать`", ephemeral=True)
+                f"Используй `/steam привязать`", ephemeral=True)
             return
 
         steam_id = row[0]
-        player   = await _get_player_summary(steam_id, api_key)
-        games    = await _get_owned_games(steam_id, api_key)
+        player = await _get_player_summary(steam_id, api_key)
+        games = await _sync_owned_games(target.id, steam_id, api_key) if api_key else []
 
         if not player:
             await interaction.followup.send("❌ Не удалось получить данные профиля.")
             return
 
-        # Топ-5 по часам
         games_sorted = sorted(games, key=lambda g: g.get("playtime_forever", 0), reverse=True)
         top5 = games_sorted[:5]
 
-        # Статус онлайн
         persona_state = {0:"⚫ Оффлайн", 1:"🟢 Онлайн", 2:"🔵 Занят",
                          3:"🟡 Отошёл",  4:"🟡 Сплю",   5:"🟣 Ищу обмен", 6:"🔴 Играю"}
         state = persona_state.get(player.get("personastate", 0), "⚫")
@@ -404,10 +684,10 @@ class Steam(commands.Cog):
             color=discord.Color.blue()
         )
         emb.set_thumbnail(url=player.get("avatarfull", ""))
-        emb.add_field(name="Статус",    value=f"{state}{f' · {game_now}' if game_now else ''}", inline=False)
-        emb.add_field(name="Игр",       value=f"**{len(games)}**",   inline=True)
+        emb.add_field(name="Статус", value=f"{state}{f' · {game_now}' if game_now else ''}", inline=False)
+        emb.add_field(name="Игр", value=f"**{len(games)}**", inline=True)
         emb.add_field(name="Всего часов", value=f"**{total_hours}ч**", inline=True)
-        emb.add_field(name="SteamID64", value=f"`{steam_id}`",        inline=True)
+        emb.add_field(name="SteamID64", value=f"`{steam_id}`", inline=True)
 
         if top5:
             lines = [
@@ -417,6 +697,213 @@ class Steam(commands.Cog):
             emb.add_field(name="Топ игр по часам", value="\n".join(lines), inline=False)
 
         await interaction.followup.send(embed=emb)
+
+    async def _unlink_profile(self, interaction: discord.Interaction):
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT steam_id FROM steam_profiles WHERE user_id=?",
+                (interaction.user.id,)
+            ).fetchone()
+            if not row:
+                await interaction.response.send_message(
+                    "❌ У тебя нет привязанного профиля.", ephemeral=True)
+                return
+            for table in (
+                "steam_profiles",
+                "steam_wishlist_cache",
+                "steam_manual_watchlist",
+                "steam_owned_games_cache",
+                "steam_auto_settings",
+                "steam_auto_log",
+            ):
+                conn.execute(f"DELETE FROM {table} WHERE user_id=?", (interaction.user.id,))
+            conn.commit()
+        await interaction.response.send_message("✅ Steam профиль отвязан.", ephemeral=True)
+
+    # ── /стим_привязать ───────────────────────────────────────────────────────
+    @app_commands.command(name="стим_привязать",
+                          description="Привязать Steam профиль")
+    @app_commands.describe(
+        профиль="Ссылка на профиль, vanity-URL или SteamID64"
+    )
+    async def стим_привязать(self, interaction: discord.Interaction, профиль: str):
+        await self._link_profile(interaction, профиль)
+
+    @steam_group.command(name="привязать", description="Привязать Steam профиль по ссылке, vanity или SteamID64")
+    @app_commands.describe(профиль="Ссылка Steam, vanity-ник или SteamID64")
+    async def steam_привязать(self, interaction: discord.Interaction, профиль: str):
+        await self._link_profile(interaction, профиль)
+
+    # ── /стим_отвязать ────────────────────────────────────────────────────────
+    @app_commands.command(name="стим_отвязать", description="Отвязать Steam профиль")
+    async def стим_отвязать(self, interaction: discord.Interaction):
+        await self._unlink_profile(interaction)
+
+    @steam_group.command(name="отвязать", description="Отвязать Steam профиль")
+    async def steam_отвязать(self, interaction: discord.Interaction):
+        await self._unlink_profile(interaction)
+
+    # ── /стим ─────────────────────────────────────────────────────────────────
+    @app_commands.command(name="стим", description="Статистика Steam профиля")
+    @app_commands.describe(пользователь="Чей профиль посмотреть (по умолчанию свой)")
+    async def стим(self, interaction: discord.Interaction,
+                   пользователь: discord.Member | None = None):
+        await self._send_profile(interaction, пользователь)
+
+    @steam_group.command(name="профиль", description="Показать Steam-профиль")
+    @app_commands.describe(пользователь="Чей профиль посмотреть")
+    async def steam_профиль(self, interaction: discord.Interaction, пользователь: discord.Member | None = None):
+        await self._send_profile(interaction, пользователь)
+
+    @steam_group.command(name="watchlist", description="Ручной watchlist скидок: добавить, удалить или показать")
+    @app_commands.describe(
+        действие="Что сделать",
+        игра="Название игры или appid для добавления/удаления"
+    )
+    @app_commands.choices(действие=[
+        app_commands.Choice(name="добавить", value="add"),
+        app_commands.Choice(name="удалить", value="remove"),
+        app_commands.Choice(name="список", value="list"),
+    ])
+    async def steam_watchlist(self, interaction: discord.Interaction, действие: str, игра: str | None = None):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if действие in {"add", "remove"} and not игра:
+            await interaction.followup.send("❌ Укажи название игры или appid.", ephemeral=True)
+            return
+
+        if действие == "list":
+            with sqlite3.connect(DB_PATH) as conn:
+                rows = conn.execute(
+                    "SELECT appid, name FROM steam_manual_watchlist WHERE user_id=? ORDER BY added_at DESC LIMIT 25",
+                    (interaction.user.id,),
+                ).fetchall()
+            if not rows:
+                await interaction.followup.send("📭 Ручной watchlist пуст.", ephemeral=True)
+                return
+            lines = [f"**{i}.** [{name}](https://store.steampowered.com/app/{appid})" for i, (appid, name) in enumerate(rows, start=1)]
+            await interaction.followup.send(
+                embed=discord.Embed(title="Steam watchlist", description="\n".join(lines), color=discord.Color.gold()),
+                ephemeral=True,
+            )
+            return
+
+        app = await _search_store_app(игра or "")
+        if not app:
+            await interaction.followup.send("❌ Не нашёл игру в Steam Store.", ephemeral=True)
+            return
+
+        if действие == "add":
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO steam_manual_watchlist(user_id, appid, name, added_at)
+                    VALUES(?,?,?,?)
+                    ON CONFLICT(user_id, appid) DO UPDATE SET name=excluded.name, added_at=excluded.added_at
+                    """,
+                    (interaction.user.id, app["appid"], app["name"], datetime.now(UTC).isoformat()),
+                )
+                conn.commit()
+            await interaction.followup.send(
+                f"✅ Добавил **{app['name']}** в watchlist скидок. Если будет скидка/релиз, напишу автоматически.",
+                ephemeral=True,
+            )
+            return
+
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "DELETE FROM steam_manual_watchlist WHERE user_id=? AND appid=?",
+                (interaction.user.id, app["appid"]),
+            )
+            conn.commit()
+        await interaction.followup.send(f"✅ Убрал **{app['name']}** из watchlist.", ephemeral=True)
+
+    @steam_group.command(name="настройки", description="Настроить автоматические Steam-пинки")
+    @app_commands.describe(
+        рандом="Автоматическая рандом-игра в личку",
+        челленджи="Автоматические челленджи в личку",
+        бэклог="Еженедельный бэклог-пинок",
+        тон="Тон бэклога"
+    )
+    @app_commands.choices(тон=[
+        app_commands.Choice(name="мягко", value="soft"),
+        app_commands.Choice(name="жёстко", value="hard"),
+    ])
+    async def steam_настройки(
+        self,
+        interaction: discord.Interaction,
+        рандом: bool | None = None,
+        челленджи: bool | None = None,
+        бэклог: bool | None = None,
+        тон: str | None = None,
+    ):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("INSERT OR IGNORE INTO steam_auto_settings(user_id) VALUES(?)", (interaction.user.id,))
+            if рандом is not None:
+                conn.execute("UPDATE steam_auto_settings SET random_enabled=? WHERE user_id=?", (int(рандом), interaction.user.id))
+            if челленджи is not None:
+                conn.execute("UPDATE steam_auto_settings SET challenge_enabled=? WHERE user_id=?", (int(челленджи), interaction.user.id))
+            if бэклог is not None:
+                conn.execute("UPDATE steam_auto_settings SET backlog_enabled=? WHERE user_id=?", (int(бэклог), interaction.user.id))
+            if тон is not None:
+                conn.execute("UPDATE steam_auto_settings SET backlog_tone=? WHERE user_id=?", (тон, interaction.user.id))
+            row = conn.execute(
+                "SELECT random_enabled, challenge_enabled, backlog_enabled, backlog_tone FROM steam_auto_settings WHERE user_id=?",
+                (interaction.user.id,),
+            ).fetchone()
+            conn.commit()
+        status = (
+            f"🎲 Рандом: {'вкл' if row[0] else 'выкл'}\n"
+            f"⚔️ Челленджи: {'вкл' if row[1] else 'выкл'}\n"
+            f"📚 Бэклог: {'вкл' if row[2] else 'выкл'}\n"
+            f"Тон: {'жёстко' if row[3] == 'hard' else 'мягко'}"
+        )
+        await interaction.response.send_message(status, ephemeral=True)
+
+    @steam_group.command(name="рандом", description="Выдать случайную игру из твоей Steam-библиотеки")
+    async def steam_рандом(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        api_key = _get_api_key()
+        if not api_key:
+            await interaction.followup.send("❌ Steam API ключ не настроен.", ephemeral=True)
+            return
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT steam_id FROM steam_profiles WHERE user_id=?", (interaction.user.id,)).fetchone()
+        if not row:
+            await interaction.followup.send("❌ Сначала привяжи Steam через `/steam привязать`.", ephemeral=True)
+            return
+        games = await _sync_owned_games(interaction.user.id, row[0], api_key)
+        candidates = [g for g in games if int(g.get("appid", 0)) > 0]
+        if not candidates:
+            await interaction.followup.send("📭 Не вижу игр в библиотеке. Возможно, профиль закрыт.", ephemeral=True)
+            return
+        picked = random.choice(candidates)
+        appid = int(picked.get("appid", 0))
+        name = picked.get("name") or f"App {appid}"
+        await interaction.followup.send(
+            f"🎲 Сегодня выпала **{name}**\nhttps://store.steampowered.com/app/{appid}",
+            ephemeral=True,
+        )
+
+    @steam_group.command(name="челлендж", description="Выдать игровой челлендж по Steam-библиотеке")
+    async def steam_челлендж(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        api_key = _get_api_key()
+        if not api_key:
+            await interaction.followup.send("❌ Steam API ключ не настроен.", ephemeral=True)
+            return
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT steam_id FROM steam_profiles WHERE user_id=?", (interaction.user.id,)).fetchone()
+        if not row:
+            await interaction.followup.send("❌ Сначала привяжи Steam через `/steam привязать`.", ephemeral=True)
+            return
+        games = await _sync_owned_games(interaction.user.id, row[0], api_key)
+        candidates = [g for g in games if int(g.get("appid", 0)) > 0]
+        if not candidates:
+            await interaction.followup.send("📭 Не вижу игр в библиотеке. Возможно, профиль закрыт.", ephemeral=True)
+            return
+        picked = random.choice(candidates)
+        name = picked.get("name") or "случайную игру"
+        await interaction.followup.send(f"⚔️ {_challenge_text(name)}", ephemeral=True)
 
     # ── /стим_вишлист ─────────────────────────────────────────────────────────
     @app_commands.command(name="стим_вишлист",
