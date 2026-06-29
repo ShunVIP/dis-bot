@@ -2,8 +2,12 @@
 import os
 import sys
 import time
+import types
 import discord
 from discord.ext import commands
+from discord.app_commands import Command, CommandAlreadyRegistered, CommandLimitReached, ContextMenu, Group
+from discord.app_commands.tree import _retrieve_guild_ids
+from discord.utils import MISSING
 from config import TOKEN
 from core.admin_panel import start_admin_panel
 
@@ -23,6 +27,40 @@ intents.presences       = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 PUBLIC_MENU_COMMANDS = {"команды", "админ"}
+SKIP_EXTENSION_FILES = {"parody_channel_settings.py"}
+
+
+def enable_menu_catalog_command_tree():
+    """Allow collecting a large local command catalog before syncing only menu roots."""
+    original_add_command = bot.tree.add_command
+
+    def add_command_with_catalog_limit(self, command, /, *, guild=MISSING, guilds=MISSING, override=False):
+        try:
+            return original_add_command(command, guild=guild, guilds=guilds, override=override)
+        except CommandLimitReached:
+            if isinstance(command, ContextMenu):
+                raise
+            if not isinstance(command, (Command, Group)):
+                raise
+
+            guild_ids = _retrieve_guild_ids(command, guild, guilds)
+            root = command.root_parent or command
+            name = root.name
+
+            if guild_ids is None:
+                if name in self._global_commands and not override:
+                    raise CommandAlreadyRegistered(name, None)
+                self._global_commands[name] = root
+                return
+
+            for guild_id in guild_ids:
+                commands_map = self._guild_commands.setdefault(guild_id, {})
+                if name in commands_map and not override:
+                    raise CommandAlreadyRegistered(name, guild_id)
+                commands_map[name] = root
+
+    bot.tree.add_command = types.MethodType(add_command_with_catalog_limit, bot.tree)
+    bot.menu_catalog_command_tree_enabled = True
 
 
 def collapse_slash_commands_to_menu():
@@ -67,6 +105,7 @@ async def load_slash_modules():
     files = sorted(f for f in os.listdir(folder)
                    if f.endswith(".py")
                    and f != "__init__.py"
+                   and f not in SKIP_EXTENSION_FILES
                    and not f.startswith("_"))
 
     total   = len(files)
@@ -111,6 +150,7 @@ async def load_slash_modules():
 @bot.event
 async def setup_hook():
     _print_banner()
+    enable_menu_catalog_command_tree()
     await load_slash_modules()
     collapse_slash_commands_to_menu()
     await start_admin_panel(bot, log)
