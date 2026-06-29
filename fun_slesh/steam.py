@@ -594,21 +594,16 @@ class Steam(commands.Cog):
         if not scheduler.running:
             scheduler.start()
         scheduler.add_job(
-            _check_releases, "interval", hours=6,
+            _check_releases, "interval", hours=12,
             args=[bot], id="steam_releases", replace_existing=True
         )
         scheduler.add_job(
             _send_daily_game_prompts, "cron",
-            hour=20, minute=30, timezone=MSK,
+            hour=12, minute=0, timezone=MSK,
             args=[bot], id="steam_daily_prompts", replace_existing=True,
             misfire_grace_time=3 * 3600
         )
-        scheduler.add_job(
-            _send_weekly_backlog_prompts, "cron",
-            day_of_week="sun", hour=18, minute=40, timezone=MSK,
-            args=[bot], id="steam_weekly_backlog", replace_existing=True,
-            misfire_grace_time=24 * 3600
-        )
+        # Weekly backlog prompts stay disabled for now; manual buttons still call steam_рандом and steam_челлендж.
 
     async def _link_profile(self, interaction: discord.Interaction, profile: str):
         await interaction.response.defer(ephemeral=True, thinking=True)

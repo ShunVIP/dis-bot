@@ -22,6 +22,7 @@ from discord.ext import commands
 from discord import app_commands
 
 from core.economy import add_coins, get_balance
+from core.economy_profile import currency_amount
 from utils.events_bus import emit
 
 UTC     = timezone.utc
@@ -108,6 +109,12 @@ def _rps_result(user: str, bot_pick: str) -> int:
                                       ("ножницы","бумага"),
                                       ("бумага","камень")} else -1
 
+def _money(user_id: int, amount: int) -> str:
+    return currency_amount(user_id, amount)
+
+def _balance_money(user_id: int) -> str:
+    return currency_amount(user_id, get_balance(user_id))
+
 # ── Виселица helpers ──────────────────────────────────────────────────────────
 HANGMAN_STAGES = [
     "```\n  +---+\n  |   |\n      |\n      |\n      |\n      |\n=========```",
@@ -172,7 +179,7 @@ class Games(commands.Cog):
         if res > 0:
             new_bal = add_coins(interaction.user.id, 10, "game_win", {"game":"rps"})
             await emit("game_win", user_id=interaction.user.id, game="rps")
-            txt   = f"✅ Победа! `{выбор}` vs `{bot_pick}`\n+10 монет → **{new_bal}**"
+            txt   = f"✅ Победа! `{выбор}` vs `{bot_pick}`\n+{_money(interaction.user.id, 10)} → **{_money(interaction.user.id, new_bal)}**"
             color = discord.Color.green()
         elif res == 0:
             txt   = f"🤝 Ничья! Оба: `{выбор}`"
@@ -194,26 +201,22 @@ class Games(commands.Cog):
         if оппонент.bot or оппонент.id == interaction.user.id:
             await interaction.response.send_message("❌ Неверный соперник.", ephemeral=True)
             return
-        now = datetime.now(UTC)
-        exp = now + timedelta(minutes=таймаут_мин)
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.execute(
-                "INSERT INTO rps_duels(guild_id,channel_id,initiator_id,opponent_id,"
-                "status,created_at,expires_at) VALUES(?,?,?,?,?,?,?)",
-                (interaction.guild.id, interaction.channel.id,
-                 interaction.user.id, оппонент.id,
-                 "open", now.isoformat(), exp.isoformat())
-            )
-            duel_id = cur.lastrowid
         emb = discord.Embed(
-            title="⚔️ Дуэль КНБ создана",
-            description=(f"ID: **{duel_id}**\n"
-                         f"{interaction.user.mention} vs {оппонент.mention}\n\n"
-                         f"Сделайте ход: `/кнб_ход дуэль:{duel_id}`\n"
-                         f"Истекает через {таймаут_мин} мин."),
+            title="⚔️ КНБ-дуэль",
+            description=(
+                f"{interaction.user.mention} вызывает {оппонент.mention}\n\n"
+                f"{оппонент.mention}, нажми **Принять**, чтобы начать. "
+                "После принятия оба игрока выбирают ход кнопками. "
+                "Выбор каждого скрыт до финального результата."
+            ),
             color=discord.Color.orange()
         )
-        await interaction.response.send_message(content=оппонент.mention, embed=emb)
+        await interaction.response.send_message(
+            content=оппонент.mention,
+            embed=emb,
+            view=RPSDuelInviteView(self, interaction.user, оппонент, таймаут_мин),
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
     @app_commands.command(name="кнб_ход", description="Сделать скрытый ход в PvP дуэли")
     @app_commands.describe(дуэль="ID дуэли", выбор="Твой выбор")
@@ -267,11 +270,11 @@ class Games(commands.Cog):
             if res > 0:
                 nb = add_coins(init_id, 20, "game_win", {"game":"rps_pvp"})
                 await emit("game_win", user_id=init_id, game="rps")
-                reward_txt = f"\n🏆 Победитель: <@{init_id}> +20 монет → **{nb}**"
+                reward_txt = f"\n🏆 Победитель: <@{init_id}> +{_money(init_id, 20)} → **{_money(init_id, nb)}**"
             elif res < 0:
                 nb = add_coins(opp_id, 20, "game_win", {"game":"rps_pvp"})
                 await emit("game_win", user_id=opp_id, game="rps")
-                reward_txt = f"\n🏆 Победитель: <@{opp_id}> +20 монет → **{nb}**"
+                reward_txt = f"\n🏆 Победитель: <@{opp_id}> +{_money(opp_id, 20)} → **{_money(opp_id, nb)}**"
             else:
                 reward_txt = "\n🤝 Ничья!"
             emb = discord.Embed(
@@ -307,7 +310,7 @@ class Games(commands.Cog):
     # ════════════════════════════════════════════════════════════
     #  Угадай число
     # ════════════════════════════════════════════════════════════
-    @app_commands.command(name="угадай", description="Угадай число — выиграй монеты")
+    @app_commands.command(name="угадай", description="Угадай число и получи персональную валюту")
     @app_commands.describe(число="Твоя попытка", до="Максимальное число (по умолчанию 10)")
     async def угадай(self, interaction: discord.Interaction,
                       число: app_commands.Range[int, 1, 10000],
@@ -323,7 +326,7 @@ class Games(commands.Cog):
             await emit("game_win", user_id=interaction.user.id, game="guess")
             emb = discord.Embed(
                 title="🎯 Угадал!",
-                description=f"Число было **{target}** — совпало!\n+{delta} монет → **{nb}**",
+                description=f"Число было **{target}** — совпало!\n+{_money(interaction.user.id, delta)} → **{_money(interaction.user.id, nb)}**",
                 color=discord.Color.green())
         else:
             diff = abs(число - target)
@@ -455,7 +458,7 @@ class Games(commands.Cog):
                 emb = _hangman_embed(word, new_guessed, wrong_str, "win")
                 emb.add_field(
                     name="🏆 Победитель",
-                    value=f"{interaction.user.mention} угадал последнюю букву!\n+{reward} монет → **{nb}**",
+                    value=f"{interaction.user.mention} угадал последнюю букву!\n+{_money(interaction.user.id, reward)} → **{_money(interaction.user.id, nb)}**",
                     inline=False)
                 await interaction.response.send_message(embed=emb)
                 return
@@ -492,13 +495,13 @@ class Games(commands.Cog):
     #  БЛЭКДЖЕК — соло против бота
     # ════════════════════════════════════════════════════════════
     @app_commands.command(name="бж", description="Блэкджек против бота со ставкой")
-    @app_commands.describe(ставка="Сколько монет поставить (минимум 5)")
+    @app_commands.describe(ставка="Сколько персональной валюты поставить (минимум 5)")
     async def бж(self, interaction: discord.Interaction,
                   ставка: app_commands.Range[int, 5, 10_000]):
         bal = get_balance(interaction.user.id)
         if bal < ставка:
             await interaction.response.send_message(
-                f"❌ Недостаточно монет. Баланс: **{bal}**", ephemeral=True)
+                f"❌ Недостаточно валюты. Баланс: **{_money(interaction.user.id, bal)}**", ephemeral=True)
             return
 
         deck       = _new_deck()
@@ -514,7 +517,7 @@ class Games(commands.Cog):
             else:
                 win = int(ставка * 1.5)
                 nb  = add_coins(interaction.user.id, win, "game_win", {"game":"bj"})
-                result_txt = f"🃏 Блэкджек! +{win} монет → **{nb}**"
+                result_txt = f"🃏 Блэкджек! +{_money(interaction.user.id, win)} → **{_money(interaction.user.id, nb)}**"
             emb = discord.Embed(title="🃏 Блэкджек", color=discord.Color.gold())
             emb.add_field(name=f"Твои карты ({p_total})", value=_hand_str(p_hand))
             emb.add_field(name=f"Карты бота ({d_total})", value=_hand_str(d_hand))
@@ -548,7 +551,7 @@ class Games(commands.Cog):
                            (соперник.id, соперник.display_name)]:
             if get_balance(uid) < ставка:
                 await interaction.response.send_message(
-                    f"❌ У {name} недостаточно монет (нужно {ставка}).", ephemeral=True)
+                    f"❌ У {name} недостаточно валюты (нужно {ставка}).", ephemeral=True)
                 return
 
         view = BJDuelView(
@@ -559,7 +562,7 @@ class Games(commands.Cog):
         emb = discord.Embed(
             title="🃏 Блэкджек — дуэль",
             description=(f"{interaction.user.mention} vs {соперник.mention}\n"
-                         f"Ставка: **{ставка}** монет каждый\n\n"
+                         f"Ставка: **{ставка}** персональной валюты каждый\n\n"
                          f"{соперник.mention}, подтверди участие!"),
             color=discord.Color.orange()
         )
@@ -570,6 +573,141 @@ class Games(commands.Cog):
 # ════════════════════════════════════════════════════════════════════════════════
 #  Views
 # ════════════════════════════════════════════════════════════════════════════════
+
+
+class RPSDuelInviteView(discord.ui.View):
+    def __init__(self, cog: Games, initiator: discord.Member, opponent: discord.Member, timeout_min: int):
+        super().__init__(timeout=timeout_min * 60)
+        self.cog = cog
+        self.initiator = initiator
+        self.opponent = opponent
+        self.accepted = False
+
+    @discord.ui.button(label="Принять", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("❌ Этот вызов адресован не тебе.", ephemeral=True)
+            return
+        self.accepted = True
+        for child in self.children:
+            child.disabled = True
+        embed = discord.Embed(
+            title="⚔️ КНБ-дуэль началась",
+            description=(
+                f"{self.initiator.mention} vs {self.opponent.mention}\n\n"
+                "Оба игрока выбирают ход кнопками ниже. До финала выборы скрыты."
+            ),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.edit_message(embed=embed, view=RPSDuelChoiceView(self.cog, self.initiator, self.opponent))
+        self.stop()
+
+    @discord.ui.button(label="Отказаться", style=discord.ButtonStyle.danger, emoji="❌")
+    async def decline(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id not in (self.initiator.id, self.opponent.id):
+            await interaction.response.send_message("❌ Это не твоя дуэль.", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        embed = discord.Embed(
+            title="❌ КНБ-дуэль отменена",
+            description=f"{interaction.user.mention} отменил дуэль.",
+            color=discord.Color.red(),
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        self.stop()
+
+
+class RPSDuelChoiceView(discord.ui.View):
+    def __init__(self, cog: Games, initiator: discord.Member, opponent: discord.Member):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.initiator = initiator
+        self.opponent = opponent
+        self.choices: dict[int, str] = {}
+        self.done = False
+
+    async def _choose(self, interaction: discord.Interaction, choice: str):
+        if interaction.user.id not in (self.initiator.id, self.opponent.id):
+            await interaction.response.send_message("❌ Это не твоя дуэль.", ephemeral=True)
+            return
+        if interaction.user.id in self.choices:
+            await interaction.response.send_message("🔒 Ты уже сделал ход.", ephemeral=True)
+            return
+        self.choices[interaction.user.id] = choice
+        await interaction.response.send_message(f"✅ Ход принят: **{choice}**", ephemeral=True)
+        if len(self.choices) == 2 and not self.done:
+            await self._finish(interaction)
+
+    async def _finish(self, interaction: discord.Interaction):
+        self.done = True
+        init_choice = self.choices[self.initiator.id]
+        opp_choice = self.choices[self.opponent.id]
+        result = _rps_result(init_choice, opp_choice)
+        reward_txt = ""
+        color = discord.Color.gold()
+        if result > 0:
+            nb = add_coins(self.initiator.id, 20, "game_win", {"game": "rps_pvp"})
+            await emit("game_win", user_id=self.initiator.id, game="rps")
+            reward_txt = f"\n🏆 Победитель: {self.initiator.mention} +{_money(self.initiator.id, 20)} → **{_money(self.initiator.id, nb)}**"
+            color = discord.Color.green()
+        elif result < 0:
+            nb = add_coins(self.opponent.id, 20, "game_win", {"game": "rps_pvp"})
+            await emit("game_win", user_id=self.opponent.id, game="rps")
+            reward_txt = f"\n🏆 Победитель: {self.opponent.mention} +{_money(self.opponent.id, 20)} → **{_money(self.opponent.id, nb)}**"
+            color = discord.Color.green()
+        else:
+            reward_txt = "\n🤝 Ничья. Никто не стал больше, зато все посмотрели."
+
+        for child in self.children:
+            child.disabled = True
+        embed = discord.Embed(
+            title="⚔️ Итог КНБ-дуэли",
+            description=(
+                f"{self.initiator.mention}: **{init_choice}**\n"
+                f"{self.opponent.mention}: **{opp_choice}**{reward_txt}"
+            ),
+            color=color,
+        )
+        await interaction.message.edit(embed=embed, view=self)
+        await emit("game_played", user_id=self.initiator.id, guild_id=interaction.guild.id, game="rps_pvp")
+        await emit("game_played", user_id=self.opponent.id, guild_id=interaction.guild.id, game="rps_pvp")
+        self.stop()
+
+    @discord.ui.button(label="Камень", style=discord.ButtonStyle.secondary, emoji="🪨")
+    async def rock(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self._choose(interaction, "камень")
+
+    @discord.ui.button(label="Ножницы", style=discord.ButtonStyle.secondary, emoji="✂️")
+    async def scissors(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self._choose(interaction, "ножницы")
+
+    @discord.ui.button(label="Бумага", style=discord.ButtonStyle.secondary, emoji="📄")
+    async def paper(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self._choose(interaction, "бумага")
+
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.danger, emoji="🛑")
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id not in (self.initiator.id, self.opponent.id):
+            await interaction.response.send_message("❌ Это не твоя дуэль.", ephemeral=True)
+            return
+        self.done = True
+        for child in self.children:
+            child.disabled = True
+        embed = discord.Embed(
+            title="🛑 КНБ-дуэль отменена",
+            description=f"{interaction.user.mention} отменил игру.",
+            color=discord.Color.red(),
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        self.stop()
+
 
 # ── Соло виселица кнопки ──────────────────────────────────────────────────────
 RU_ALPHABET = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
@@ -625,7 +763,7 @@ class HangmanSoloView(discord.ui.View):
                     reward = max(10, 50 - len(wrong) * 8)
                     nb = add_coins(self.uid, reward, "game_win", {"game":"hangman"})
                     emb = _hangman_embed(word, "".join(sorted(guessed)), "".join(l.upper() for l in wrong), "win")
-                    emb.add_field(name="🏆 Победа!", value=f"+{reward} монет → **{nb}**")
+                    emb.add_field(name="🏆 Победа!", value=f"+{_money(self.uid, reward)} → **{_money(self.uid, nb)}**")
                     await interaction.response.edit_message(embed=emb, view=None)
                     return
             else:
@@ -673,7 +811,7 @@ class BlackjackView(discord.ui.View):
                       value=_hand_str(self.p_hand), inline=False)
         emb.add_field(name=f"Карты бота ({'?' if not show_dealer_hole else d_total})",
                       value=d_str, inline=False)
-        emb.set_footer(text=f"Ставка: {self.bet} монет")
+        emb.set_footer(text=f"Ставка: {_money(self.user_id, self.bet)}")
         return emb
 
     async def _finish(self, interaction: discord.Interaction, reason: str = ""):
@@ -695,14 +833,14 @@ class BlackjackView(discord.ui.View):
 
         if result == "win":
             nb  = add_coins(self.user_id, self.bet, "game_win", {"game":"bj"})
-            txt = f"🏆 Победа! +{self.bet} монет → **{nb}**"
+            txt = f"🏆 Победа! +{_money(self.user_id, self.bet)} → **{_money(self.user_id, nb)}**"
             color = discord.Color.green()
         elif result == "push":
             txt   = "🤝 Ничья — ставка возвращена."
             color = discord.Color.blurple()
         else:
             nb  = add_coins(self.user_id, -self.bet, "game_lose", {"game":"bj"})
-            txt = f"💸 Поражение. -{self.bet} монет → **{get_balance(self.user_id)}**"
+            txt = f"💸 Поражение. -{_money(self.user_id, self.bet)} → **{_balance_money(self.user_id)}**"
             color = discord.Color.red()
             if result == "bust":
                 txt = "💥 Перебор! " + txt
@@ -748,7 +886,7 @@ class BlackjackView(discord.ui.View):
                 "❌ Удвоить можно только на первых двух картах.", ephemeral=True)
             return
         if get_balance(self.user_id) < self.bet:
-            await interaction.response.send_message("❌ Недостаточно монет.", ephemeral=True)
+            await interaction.response.send_message("❌ Недостаточно валюты.", ephemeral=True)
             return
         self.bet *= 2
         self.p_hand.append(self.deck.pop())
@@ -783,8 +921,12 @@ class BJDuelView(discord.ui.View):
         self.stop()
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(view=self)
-        await self._run_duel(interaction)
+        play_view = BJDuelPlayView(self.cog, self.p1, self.p2, self.bet)
+        await interaction.response.edit_message(
+            content=None,
+            embed=play_view.build_embed(),
+            view=play_view,
+        )
 
     @discord.ui.button(label="Отказаться", style=discord.ButtonStyle.danger, emoji="❌")
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -822,12 +964,12 @@ class BJDuelView(discord.ui.View):
             nb = add_coins(self.p1.id,  self.bet, "game_win",  {"game":"bj_duel"})
             add_coins(self.p2.id, -self.bet, "game_lose", {"game":"bj_duel"})
             emb.add_field(name="🏆 Победитель",
-                          value=f"{self.p1.mention} +{self.bet} монет → **{nb}**")
+                          value=f"{self.p1.mention} +{_money(self.p1.id, self.bet)} → **{_money(self.p1.id, nb)}**")
         elif s2 > s1:
             nb = add_coins(self.p2.id,  self.bet, "game_win",  {"game":"bj_duel"})
             add_coins(self.p1.id, -self.bet, "game_lose", {"game":"bj_duel"})
             emb.add_field(name="🏆 Победитель",
-                          value=f"{self.p2.mention} +{self.bet} монет → **{nb}**")
+                          value=f"{self.p2.mention} +{_money(self.p2.id, self.bet)} → **{_money(self.p2.id, nb)}**")
         else:
             emb.add_field(name="🤝 Ничья", value="Ставки возвращены.")
 
@@ -840,6 +982,130 @@ class BJDuelView(discord.ui.View):
                     f"⌛ {self.p2.mention} не ответил — дуэль отменена.")
             except Exception:
                 pass
+        self.stop()
+
+
+class BJDuelPlayView(discord.ui.View):
+    def __init__(self, cog: Games, p1: discord.Member, p2: discord.Member, bet: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.p1 = p1
+        self.p2 = p2
+        self.bet = bet
+        self.deck = _new_deck()
+        self.hands = {
+            p1.id: [self.deck.pop(), self.deck.pop()],
+            p2.id: [self.deck.pop(), self.deck.pop()],
+        }
+        self.stood: set[int] = set()
+        self.done = False
+
+    def _participants(self) -> tuple[int, int]:
+        return self.p1.id, self.p2.id
+
+    def _line_for(self, member: discord.Member) -> str:
+        total = _hand_total(self.hands[member.id])
+        state = "готов" if member.id in self.stood else "ходит"
+        if total > 21:
+            state = "перебор"
+        return f"{member.mention} ({total}) — {_hand_str(self.hands[member.id])}\n`{state}`"
+
+    def build_embed(self, result: str | None = None) -> discord.Embed:
+        embed = discord.Embed(
+            title="🃏 Блэкджек-дуэль",
+            description="Игроки жмут **Ещё** или **Хватит**. Итог виден всем.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name=self.p1.display_name, value=self._line_for(self.p1), inline=False)
+        embed.add_field(name=self.p2.display_name, value=self._line_for(self.p2), inline=False)
+        embed.set_footer(text=f"Ставка: {self.bet} персональной валюты каждый")
+        if result:
+            embed.add_field(name="Итог", value=result, inline=False)
+        return embed
+
+    async def _ensure_player(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in self._participants():
+            await interaction.response.send_message("❌ Это не твоя дуэль.", ephemeral=True)
+            return False
+        if self.done:
+            await interaction.response.send_message("⛔ Дуэль уже завершена.", ephemeral=True)
+            return False
+        if interaction.user.id in self.stood:
+            await interaction.response.send_message("🔒 Ты уже остановился.", ephemeral=True)
+            return False
+        return True
+
+    def _score(self, uid: int) -> int:
+        total = _hand_total(self.hands[uid])
+        return total if total <= 21 else 0
+
+    def _should_finish(self) -> bool:
+        ids = self._participants()
+        return all(uid in self.stood or _hand_total(self.hands[uid]) > 21 for uid in ids)
+
+    async def _finish(self, interaction: discord.Interaction):
+        self.done = True
+        p1_score = self._score(self.p1.id)
+        p2_score = self._score(self.p2.id)
+        if p1_score > p2_score:
+            nb = add_coins(self.p1.id, self.bet, "game_win", {"game": "bj_duel"})
+            add_coins(self.p2.id, -self.bet, "game_lose", {"game": "bj_duel"})
+            result = f"🏆 Победитель: {self.p1.mention} +{_money(self.p1.id, self.bet)} → **{_money(self.p1.id, nb)}**"
+        elif p2_score > p1_score:
+            nb = add_coins(self.p2.id, self.bet, "game_win", {"game": "bj_duel"})
+            add_coins(self.p1.id, -self.bet, "game_lose", {"game": "bj_duel"})
+            result = f"🏆 Победитель: {self.p2.mention} +{_money(self.p2.id, self.bet)} → **{_money(self.p2.id, nb)}**"
+        else:
+            result = "🤝 Ничья. Ставки остаются на месте."
+
+        for child in self.children:
+            child.disabled = True
+        embed = self.build_embed(result)
+        embed.color = discord.Color.gold()
+        await interaction.response.edit_message(embed=embed, view=self)
+        await emit("game_played", user_id=self.p1.id, guild_id=interaction.guild.id, game="bj_duel")
+        await emit("game_played", user_id=self.p2.id, guild_id=interaction.guild.id, game="bj_duel")
+        self.stop()
+
+    @discord.ui.button(label="Ещё", style=discord.ButtonStyle.primary, emoji="🃏")
+    async def hit(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_player(interaction):
+            return
+        self.hands[interaction.user.id].append(self.deck.pop())
+        if _hand_total(self.hands[interaction.user.id]) > 21:
+            self.stood.add(interaction.user.id)
+        if self._should_finish():
+            await self._finish(interaction)
+            return
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Хватит", style=discord.ButtonStyle.secondary, emoji="🛑")
+    async def stand(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._ensure_player(interaction):
+            return
+        self.stood.add(interaction.user.id)
+        if self._should_finish():
+            await self._finish(interaction)
+            return
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.danger, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id not in self._participants():
+            await interaction.response.send_message("❌ Это не твоя дуэль.", ephemeral=True)
+            return
+        self.done = True
+        for child in self.children:
+            child.disabled = True
+        embed = discord.Embed(
+            title="❌ Блэкджек-дуэль отменена",
+            description=f"{interaction.user.mention} отменил игру. Валюта не списана.",
+            color=discord.Color.red(),
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    async def on_timeout(self):
         self.stop()
 
 

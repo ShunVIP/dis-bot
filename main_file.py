@@ -7,6 +7,9 @@ from discord.ext import commands
 from config import TOKEN
 from core.admin_panel import start_admin_panel
 
+if not TOKEN:
+    raise ValueError("Discord bot token is missing. Set tok or DISCORD_BOT_TOKEN in KGTD.env")
+
 # ─── Логгер ───────────────────────────────────────────────────────────────────
 from utils.logger import log as _base_log
 log = _base_log.bind(src="main")
@@ -18,6 +21,34 @@ intents.message_content = True
 intents.presences       = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+PUBLIC_MENU_COMMANDS = {"команды", "админ"}
+
+
+def collapse_slash_commands_to_menu():
+    """Keep only /команды and /админ visible, but preserve all commands for menu UI."""
+    all_commands = list(bot.tree.get_commands())
+    bot.menu_catalog_commands = all_commands
+
+    hidden = []
+    kept = []
+    for cmd in all_commands:
+        if cmd.name in PUBLIC_MENU_COMMANDS:
+            kept.append(cmd.name)
+            continue
+
+        removed = bot.tree.remove_command(
+            cmd.name,
+            type=getattr(cmd, "type", discord.AppCommandType.chat_input),
+        )
+        if removed is not None:
+            hidden.append(cmd.name)
+
+    bot.menu_hidden_command_names = set(hidden)
+    bot.menu_commands_hidden_from_slash = True
+    log.bind(src="loader").info(
+        f"Slash-меню: видимые={sorted(kept)} | скрыто из /: {len(hidden)}"
+    )
 
 # ─── Баннер при старте ────────────────────────────────────────────────────────
 def _print_banner():
@@ -81,6 +112,7 @@ async def load_slash_modules():
 async def setup_hook():
     _print_banner()
     await load_slash_modules()
+    collapse_slash_commands_to_menu()
     await start_admin_panel(bot, log)
 
     log.bind(src="scheduler").info("Запуск планировщиков...")

@@ -8,6 +8,8 @@ KGTD.env
 secrets*.json
 config.local.*
 token*.txt
+.local_ssh/
+.tmp_incoming_botzip/
 
 # --- Python ---
 __pycache__/

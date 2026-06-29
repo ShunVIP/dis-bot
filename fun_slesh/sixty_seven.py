@@ -9,16 +9,20 @@
 from __future__ import annotations
 
 import html
+import os
 import random
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import discord
 from bs4 import BeautifulSoup
+from discord import app_commands
 from discord.ext import commands
 
 UTC = timezone.utc
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 GIPHY_SEARCH_URLS = (
     "https://giphy.com/search/67-meme",
     "https://giphy.com/search/67-brainrot",
@@ -56,6 +60,30 @@ FALLBACK_67_PAGES = [
     "https://giphy.com/gifs/67-1zSz5MVw4zKg0",
     "https://giphy.com/gifs/67-3orieLeZL5kyNqiLm",
 ]
+
+
+def _ensure_tables():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sixty_seven_excluded_channels (
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (guild_id, channel_id)
+            )
+            """
+        )
+        conn.commit()
+
+
+def _is_excluded(guild_id: int, channel_id: int) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sixty_seven_excluded_channels WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id),
+        ).fetchone()
+    return bool(row)
 
 
 def _normalize_media_url(gif_id: str) -> str:
@@ -176,6 +204,7 @@ class SixtySeven(commands.Cog):
         self._gif_cache: list[str] = []
         self._gif_cache_fetched_at: datetime | None = None
         self._last_sent: dict[int, str] = {}
+        _ensure_tables()
 
     async def _get_gif_pool(self) -> list[str]:
         now = datetime.now(UTC)
@@ -234,6 +263,8 @@ class SixtySeven(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not message.content:
             return
+        if _is_excluded(message.guild.id, message.channel.id):
+            return
         if not TRIGGER_RE.search(message.content):
             return
 
@@ -251,6 +282,34 @@ class SixtySeven(commands.Cog):
             )
         except Exception:
             pass
+
+    @app_commands.command(name="мем67_исключить", description="(Админ) Исключить канал из 67-мем-триггера")
+    @app_commands.describe(канал="Канал, где 67 не должен отвечать", причина="Короткая пометка для админов")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def мем67_исключить(self, interaction: discord.Interaction, канал: discord.TextChannel, причина: str = ""):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO sixty_seven_excluded_channels(guild_id, channel_id, reason)
+                VALUES(?,?,?)
+                ON CONFLICT(guild_id, channel_id) DO UPDATE SET reason=excluded.reason
+                """,
+                (interaction.guild.id, канал.id, причина.strip()[:120]),
+            )
+            conn.commit()
+        await interaction.response.send_message(f"✅ {канал.mention} исключен из 67-триггера.", ephemeral=True)
+
+    @app_commands.command(name="мем67_вернуть", description="(Админ) Вернуть канал в 67-мем-триггер")
+    @app_commands.describe(канал="Канал, где 67 снова может отвечать")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def мем67_вернуть(self, interaction: discord.Interaction, канал: discord.TextChannel):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "DELETE FROM sixty_seven_excluded_channels WHERE guild_id=? AND channel_id=?",
+                (interaction.guild.id, канал.id),
+            )
+            conn.commit()
+        await interaction.response.send_message(f"✅ {канал.mention} снова участвует в 67-триггере.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

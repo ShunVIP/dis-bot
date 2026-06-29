@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 UTC = timezone.utc
@@ -41,27 +42,27 @@ HEROES_PATTERNS = (
 )
 
 GENERIC_START_HAIKUS = [
-    "Старые замки.\n{display_name} снова в Heroes.\nDiscord всё видит.",
-    "Ход начат тихо.\n{display_name} ищет рудник.\nСессия открыта.",
-    "Пыль на картах спит.\n{display_name} будит скелетов.\nHeroes запущен.",
-    "Башни ждут приказ.\n{display_name} выбрал клетку.\nПошёл Discord-счёт.",
+    "{display_name} запустил Heroes. Где-то в аду один архидьявол устало сел и сказал: опять этот пошаговый цирк.",
+    "Heroes снова открыты. {display_name}, поздравляю: вечер официально списан в бухгалтерию сомнительных решений.",
+    "{display_name} ушел в Heroes. Если через час начнутся разговоры про руду, серу и цепочки героев — мы делаем вид, что не знакомы.",
+    "На карте появился {display_name}. Замки напряглись, нейтралы приготовились страдать, здравый смысл вышел из комнаты.",
 ]
 
 OLDEN_START_HAIKUS = [
-    "Новая эра.\n{display_name} снова проверит.\nDiscord начал счёт.",
-    "Старый дух шуршит.\n{display_name} в Olden Era.\nСессия открыта.",
-    "Ностальгии звон.\n{display_name} ищет чудо.\nТройка ждёт судей.",
+    "{display_name} запустил Olden Era. Ностальгия проснулась, потянулась и снова попросила денег.",
+    "Olden Era стартовала. {display_name} добровольно зашел туда, где надежды умирают медленнее, чем ход ИИ.",
+    "{display_name} проверяет Olden Era. Где-то Heroes III смотрит на это с выражением: ну давай, удиви меня.",
 ]
 
 GENERIC_END_HAIKUS = [
-    "Ход окончен, тишь.\n{display_name} вышел из Heroes.\nDiscord-сессия: {duration}.",
-    "Замок опустел.\n{display_name} вернулся к людям.\nHeroes открыт: {duration}.",
-    "Последний мувпойнт.\n{display_name} покинул карту.\nПо Discord: {duration}.",
+    "{display_name} вышел из Heroes спустя {duration}. Потери: время, достоинство, возможно один союзный стек по тупости.",
+    "Heroes закрыты. {display_name} продержался {duration}; психика сервера просит короткий перерыв.",
+    "{display_name} вернулся из Heroes. {duration} ушли туда, где караваны не ходят, а мораль падает сама.",
 ]
 
 OLDEN_END_HAIKUS = [
-    "Эра стихает.\n{display_name} вышел из споров.\nDiscord-сессия: {duration}.",
-    "Новая эра.\n{display_name} вернулся в чат.\nHeroes открыт: {duration}.",
+    "{display_name} вышел из Olden Era спустя {duration}. Эксперимент признан смелым, последствия — мутными.",
+    "Olden Era закрыта. {display_name} вернулся, и это уже лучший патч за сегодня.",
 ]
 
 
@@ -85,6 +86,11 @@ def _ensure_tables():
                 game_name TEXT NOT NULL,
                 started_at TEXT NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS heroes_troll_config (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER
             );
             """
         )
@@ -152,7 +158,22 @@ def _find_active_heroes(names: set[str]) -> str | None:
     return None
 
 
+def _configured_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT channel_id FROM heroes_troll_config WHERE guild_id=?",
+            (guild.id,),
+        ).fetchone()
+    channel = guild.get_channel(int(row[0])) if row and row[0] else None
+    if isinstance(channel, discord.TextChannel):
+        return channel
+    return None
+
+
 def _pick_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    configured = _configured_channel(guild)
+    if configured:
+        return configured
     me = guild.me
     if guild.system_channel and me:
         perms = guild.system_channel.permissions_for(me)
@@ -242,8 +263,6 @@ class HeroesTroll(commands.Cog):
         return base.format(**payload)
 
     async def _send_troll(self, guild: discord.Guild, user_id: int, game_name: str, *, duration: str | None = None, ended: bool = False):
-        if self.bot.get_cog("ActivityTracker") is not None:
-            return
         channel = _pick_channel(guild)
         if channel is None:
             return
@@ -259,6 +278,22 @@ class HeroesTroll(commands.Cog):
             await channel.send(message, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             pass
+
+    @app_commands.command(name="герои_канал", description="(Админ) Настроить канал Heroes troll")
+    @app_commands.describe(канал="Канал, куда бот будет писать Heroes troll")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def герои_канал(self, interaction: discord.Interaction, канал: discord.TextChannel):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO heroes_troll_config(guild_id, channel_id)
+                VALUES(?,?)
+                ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id
+                """,
+                (interaction.guild.id, канал.id),
+            )
+            conn.commit()
+        await interaction.response.send_message(f"✅ Heroes troll будет писать в {канал.mention}.", ephemeral=True)
 
     def _save_finished_session(self, guild_id: int, user_id: int, game_name: str, started_at: datetime, ended_at: datetime):
         seconds = int((ended_at - started_at).total_seconds())

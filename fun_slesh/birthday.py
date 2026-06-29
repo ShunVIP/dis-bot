@@ -17,7 +17,19 @@ def _ensure_table():
                 birthday TEXT NOT NULL
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS birthday_config (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER
+            )
+        """)
         conn.commit()
+
+
+def _birthday_channel_id(guild_id: int) -> int | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT channel_id FROM birthday_config WHERE guild_id=?", (guild_id,)).fetchone()
+    return int(row[0]) if row and row[0] else None
 
 class Birthday(commands.Cog):
     def __init__(self, bot):
@@ -65,6 +77,22 @@ class Birthday(commands.Cog):
             await interaction.response.send_message(f"✅ Установлен день рождения {пользователь.mention}: {дата}")
         except ValueError:
             await interaction.response.send_message("❌ Неверный формат даты. Используй: ДД.ММ")
+
+    @app_commands.command(name="др_канал", description="(Админ) Настроить канал поздравлений с днем рождения")
+    @app_commands.describe(канал="Канал, куда бот будет отправлять ежедневные поздравления")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def др_канал(self, interaction: discord.Interaction, канал: discord.TextChannel):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO birthday_config(guild_id, channel_id)
+                VALUES(?,?)
+                ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id
+                """,
+                (interaction.guild.id, канал.id),
+            )
+            conn.commit()
+        await interaction.response.send_message(f"✅ Поздравления с ДР будут отправляться в {канал.mention}.", ephemeral=True)
 
     @app_commands.command(name="д-р_ад", description="(Админ) Удалить день рождения выбранного пользователя")
     @app_commands.describe(пользователь="Пользователь, у которого удалить день рождения")

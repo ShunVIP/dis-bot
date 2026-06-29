@@ -17,6 +17,12 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+from fun_slesh.parody_channel_settings import (
+    clear_parody_channel_excluded,
+    filter_parody_channels,
+    get_parody_excluded_channel_ids,
+    set_parody_channel_excluded,
+)
 from fun_slesh.parody_filters import get_ignored_channels
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "messages.db"))
@@ -272,8 +278,10 @@ class ParodyCollector(commands.Cog):
         guild = interaction.guild
         all_channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history]
         _ignored = get_ignored_channels()
-        channels = [ch for ch in all_channels if ch.name.lower() not in _ignored]
-        skipped_names = [ch.name for ch in all_channels if ch.name.lower() in _ignored]
+        allowed_by_name = [ch for ch in all_channels if ch.name.lower() not in _ignored]
+        channels = filter_parody_channels(guild, allowed_by_name)
+        excluded_ids = get_parody_excluded_channel_ids(guild.id)
+        skipped_names = [ch.name for ch in all_channels if ch.name.lower() in _ignored or ch.id in excluded_ids]
 
         if not channels:
             await interaction.followup.send("❌ Нет доступных текстовых каналов.")
@@ -385,6 +393,34 @@ class ParodyCollector(commands.Cog):
             f"Следующий `/собрать_сообщения` перечитает все каналы с самого начала.",
             ephemeral=True
         )
+
+
+    @app_commands.command(name="пародия_исключить_канал", description="(Админ) Не собирать сообщения из канала для пародий")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def parody_exclude_channel(
+        self,
+        interaction: discord.Interaction,
+        канал: discord.TextChannel,
+        причина: str = "",
+    ):
+        set_parody_channel_excluded(interaction.guild.id, канал.id, причина)
+        await interaction.response.send_message(
+            f"✅ {канал.mention} исключён из обучения пародий.", ephemeral=True
+        )
+
+    @app_commands.command(name="пародия_вернуть_канал", description="(Админ) Снова собирать сообщения из канала для пародий")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def parody_include_channel(self, interaction: discord.Interaction, канал: discord.TextChannel):
+        deleted = clear_parody_channel_excluded(interaction.guild.id, канал.id)
+        text = f"✅ {канал.mention} снова участвует в обучении пародий." if deleted else "ℹ️ Этого канала не было в исключениях."
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @app_commands.command(name="пародия_исключения", description="(Админ) Показать каналы, исключённые из обучения пародий")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def parody_exclusions(self, interaction: discord.Interaction):
+        ids = get_parody_excluded_channel_ids(interaction.guild.id)
+        text = ", ".join(f"<#{cid}>" for cid in sorted(ids)) if ids else "Исключений нет."
+        await interaction.response.send_message(f"Каналы вне обучения пародий: {text}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

@@ -107,6 +107,13 @@ def _ensure_tables():
                 count     INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_id, guild_id, week)
             );
+
+            CREATE TABLE IF NOT EXISTS toxicity_excluded_channels (
+                guild_id   INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                reason     TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (guild_id, channel_id)
+            );
         """)
 
 
@@ -122,6 +129,24 @@ def _get_config(guild_id: int) -> tuple[bool, int, set[int]]:
         return True, 1, set()
     ch_ids = set(int(x) for x in row[2].split(",") if x.strip().isdigit())
     return bool(row[0]), row[1], ch_ids
+
+
+def _toxicity_excluded_channel_ids(guild_id: int) -> set[int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT channel_id FROM toxicity_excluded_channels WHERE guild_id=?",
+            (guild_id,),
+        ).fetchall()
+    return {int(row[0]) for row in rows}
+
+
+def _is_toxicity_channel_excluded(guild_id: int, channel_id: int) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM toxicity_excluded_channels WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id),
+        ).fetchone()
+    return row is not None
 
 
 def _detect_level(text: str) -> int:
@@ -252,6 +277,8 @@ class Toxicity(commands.Cog):
 
         enabled, threshold, ch_filter = _get_config(guild_id)
         if not enabled:
+            return
+        if _is_toxicity_channel_excluded(guild_id, message.channel.id):
             return
 
         # Фильтр по каналам
@@ -436,6 +463,45 @@ class Toxicity(commands.Cog):
             mentions = [f"<#{cid}>" for cid in current]
             msg = "✅ Мониторинг каналов: " + ", ".join(mentions)
         await interaction.response.send_message(msg, ephemeral=True)
+
+    @toxicity_group.command(name="исключить", description="(Админ) Исключить канал из детектора токсичности")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def toxicity_exclude_channel(
+        self,
+        interaction: discord.Interaction,
+        канал: discord.TextChannel,
+        причина: str = "",
+    ):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO toxicity_excluded_channels(guild_id, channel_id, reason)
+                VALUES(?, ?, ?)
+                ON CONFLICT(guild_id, channel_id) DO UPDATE SET reason=excluded.reason
+                """,
+                (interaction.guild.id, канал.id, причина[:200]),
+            )
+        await interaction.response.send_message(
+            f"✅ {канал.mention} исключён из детектора токсичности.", ephemeral=True
+        )
+
+    @toxicity_group.command(name="вернуть", description="(Админ) Вернуть канал в детектор токсичности")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def toxicity_include_channel(self, interaction: discord.Interaction, канал: discord.TextChannel):
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute(
+                "DELETE FROM toxicity_excluded_channels WHERE guild_id=? AND channel_id=?",
+                (interaction.guild.id, канал.id),
+            )
+        text = f"✅ {канал.mention} снова участвует в детекторе токсичности." if cur.rowcount else "ℹ️ Этого канала не было в исключениях."
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @toxicity_group.command(name="исключения", description="(Админ) Показать каналы, исключённые из токсичности")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def toxicity_excluded_channels(self, interaction: discord.Interaction):
+        ids = _toxicity_excluded_channel_ids(interaction.guild.id)
+        text = ", ".join(f"<#{cid}>" for cid in sorted(ids)) if ids else "Исключений нет."
+        await interaction.response.send_message(f"Каналы вне детектора токсичности: {text}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

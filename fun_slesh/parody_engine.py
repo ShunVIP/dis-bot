@@ -50,6 +50,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from fun_slesh.parody_channel_settings import filter_parody_channels
 from core.runtime_policy import (
     DAILY_MARKOV_RETRAIN_HOUR,
     DAILY_MARKOV_RETRAIN_MINUTE,
@@ -485,7 +486,10 @@ async def _do_full_retrain(guild: discord.Guild, collect: bool = False) -> dict:
 
     # 1. Сбор (если нужно)
     if collect_allowed:
-        channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history]
+        channels = filter_parody_channels(
+            guild,
+            [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history],
+        )
         for ch in channels:
             stats["collected"] += await collect_channel(ch, guild.id)
 
@@ -523,7 +527,10 @@ async def _do_safe_markov_refresh(guild: discord.Guild, collect: bool = True) ->
     stats = {"collected": 0, "markovify": 0}
 
     if collect:
-        channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history]
+        channels = filter_parody_channels(
+            guild,
+            [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history],
+        )
         for ch in channels:
             stats["collected"] += await collect_channel(ch, guild.id)
 
@@ -1290,7 +1297,10 @@ class ParodyEngine(commands.Cog):
 
         # Шаг 2: сбор сообщений
         guild = interaction.guild
-        channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history]
+        channels = filter_parody_channels(
+            guild,
+            [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history],
+        )
         total_collected = 0
         for ch in channels:
             total_collected += await collect_channel(ch, guild.id)

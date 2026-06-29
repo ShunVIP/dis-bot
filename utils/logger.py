@@ -47,17 +47,21 @@ log.add(
     enqueue=True,
 )
 
-# Файл — DEBUG и выше, ротация 5MB, 14 дней
-log.add(
-    _LOG_FILE,
-    format=_FILE_FMT,
-    level="DEBUG",
-    rotation="5 MB",
-    retention="14 days",
-    compression="zip",
-    encoding="utf-8",
-    enqueue=True,
-)
+# Файл — DEBUG и выше, ротация 5MB, 14 дней.
+# Если файл логов занят или недоступен, бот всё равно должен стартовать.
+try:
+    log.add(
+        _LOG_FILE,
+        format=_FILE_FMT,
+        level="DEBUG",
+        rotation="5 MB",
+        retention="14 days",
+        compression="zip",
+        encoding="utf-8",
+        enqueue=True,
+    )
+except OSError as exc:
+    log.bind(src="logger").warning(f"File logging disabled: {_LOG_FILE} ({exc})")
 
 # Дефолтный контекст
 log = log.bind(src="bot")

@@ -11,6 +11,19 @@ MSK = ZoneInfo("Europe/Moscow")
 # ── Путь к БД (birthdays.db) ──────────────────────────────────────────────────
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "birthdays.db"))
 
+
+def _birthday_channel_id(guild_id: int) -> int | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS birthday_config (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER
+            )
+        """)
+        row = conn.execute("SELECT channel_id FROM birthday_config WHERE guild_id=?", (guild_id,)).fetchone()
+        conn.commit()
+    return int(row[0]) if row and row[0] else None
+
 def setup_birthday_checker(bot: discord.Client):
     # Планировщик живёт в МСК, значит hour=9 → 09:00 МСК
     scheduler = AsyncIOScheduler(timezone=MSK)
@@ -44,7 +57,9 @@ def setup_birthday_checker(bot: discord.Client):
             return
 
         for guild in bot.guilds:
-            channel = discord.utils.get(guild.text_channels, name="flood") or guild.system_channel
+            configured_channel_id = _birthday_channel_id(guild.id)
+            configured_channel = guild.get_channel(configured_channel_id) if configured_channel_id else None
+            channel = configured_channel if isinstance(configured_channel, discord.TextChannel) else discord.utils.get(guild.text_channels, name="flood") or guild.system_channel
             print(f"[DEBUG] Сервер: {guild.name}, канал для поздравления: {getattr(channel, 'name', None)}")
             if not channel:
                 continue
@@ -58,7 +73,12 @@ def setup_birthday_checker(bot: discord.Client):
                     continue
 
                 try:
-                    await channel.send(f"🎉 С днём рождения, {user.mention}! Спасибо, что не умер в этом году! 🎂")
+                    await channel.send(
+                        f"🎉 {user.mention}, с днём рождения, хотя это грустный праздник, "
+                        "ведь каждый год делает тебя старше и приближает к неизбежному финалу. "
+                        "Желаю, чтобы этот путь был хотя бы не таким мучительным, "
+                        "а в жизни было поменьше дерьма."
+                    )
                     print(f"[DEBUG] ✅ Поздравление отправлено: {user.display_name}")
                 except Exception as e:
                     print(f"[DEBUG] ⚠️ Ошибка при отправке поздравления: {e}")

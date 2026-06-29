@@ -3,8 +3,8 @@
 """
 Экономика сервера:
   /дэйлик          — ежедневная награда
-  /баланс          — баланс монет
-  /перевод         — передать монеты игроку
+  /баланс          — баланс Сисек
+  /перевод         — передать Сиськи игроку
   /топ_баланс      — топ кошельков
   /топ_серии       — топ серий дэйлика
 
@@ -28,6 +28,16 @@ from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from core.economy import add_coins, get_balance
+from core.economy_profile import (
+    GENDER_FEMALE,
+    GENDER_MALE,
+    can_receive_currency,
+    currency_amount,
+    currency_name,
+    economy_profile_required_text,
+    get_economy_profile,
+    set_economy_profile,
+)
 from utils.events_bus import emit
 
 MSK  = ZoneInfo("Europe/Moscow")
@@ -151,8 +161,35 @@ class Daily(commands.Cog):
             args=[self.bot], id=job_id, replace_existing=True
         )
 
+    @app_commands.command(name="экономика_профиль", description="Заполнить профиль для получения валюты 18+")
+    @app_commands.describe(
+        пол="Как называть твою валюту",
+        подтверждаю_18="Подтверждаю, что мне есть 18 лет",
+    )
+    @app_commands.choices(пол=[
+        app_commands.Choice(name="Мужчина - валюта Пенис", value=GENDER_MALE),
+        app_commands.Choice(name="Девушка - валюта Сиськи", value=GENDER_FEMALE),
+    ])
+    async def economy_profile(
+        self,
+        interaction: discord.Interaction,
+        пол: app_commands.Choice[str],
+        подтверждаю_18: bool,
+    ):
+        if not подтверждаю_18:
+            await interaction.response.send_message(
+                "Без подтверждения 18+ валюта не начисляется.", ephemeral=True
+            )
+            return
+        set_economy_profile(interaction.user.id, пол.value, True)
+        await interaction.response.send_message(
+            f"Готово. Твоя валюта теперь: **{currency_name(interaction.user.id)}**. "
+            f"Репутация отображается как метафорический Размер.",
+            ephemeral=True,
+        )
+
     # ── /баланс ───────────────────────────────────────────────────────────────
-    @app_commands.command(name="баланс", description="Баланс монет (свой или другого участника)")
+    @app_commands.command(name="баланс", description="Баланс персональной валюты")
     @app_commands.describe(пользователь="Чей баланс посмотреть")
     async def баланс(self, interaction: discord.Interaction,
                      пользователь: discord.Member | None = None):
@@ -169,7 +206,7 @@ class Daily(commands.Cog):
 
         emb = discord.Embed(
             title=f"💰 Баланс: {target.display_name}",
-            description=f"**{bal}** монет",
+            description=f"**{currency_amount(target.id, bal)}**",
             color=discord.Color.gold()
         )
         if rows:
@@ -190,6 +227,9 @@ class Daily(commands.Cog):
     @app_commands.command(name="дэйлик", description="Забрать ежедневную награду (по МСК)")
     async def дэйлик(self, interaction: discord.Interaction):
         _ensure_tables()
+        if not can_receive_currency(interaction.user.id):
+            await interaction.response.send_message(economy_profile_required_text(), ephemeral=True)
+            return
         today_msk     = datetime.now(MSK).date()
         yesterday_msk = today_msk - timedelta(days=1)
 
@@ -236,7 +276,7 @@ class Daily(commands.Cog):
 
         bonus_note = ""
         if streak in (7, 14, 30, 60, 100):
-            bonus_note = f"\n🎉 Бонус за серию {streak} дней: **+25** монет!"
+            bonus_note = f"\n🎉 Бонус за серию {streak} дней: **{currency_amount(interaction.user.id, 25)}**!"
 
         tip = ("Ещё +5 к бонусу завтра." if streak < 7
                else "Серия на максимуме (+35/день).")
@@ -245,7 +285,7 @@ class Daily(commands.Cog):
             title="🎁 Ежедневная награда",
             color=discord.Color.teal()
         )
-        emb.add_field(name="Получено",  value=f"**{reward}** монет", inline=True)
+        emb.add_field(name="Получено",  value=f"**{currency_amount(interaction.user.id, reward)}**", inline=True)
         emb.add_field(name="Серия",     value=f"**{streak}** дней",  inline=True)
         emb.add_field(name="Баланс",    value=f"**{new_balance}**",  inline=True)
         if bonus_note:
@@ -254,10 +294,10 @@ class Daily(commands.Cog):
         await interaction.response.send_message(embed=emb)
 
     # ── /перевод ──────────────────────────────────────────────────────────────
-    @app_commands.command(name="перевод", description="Перевести монеты другому участнику")
+    @app_commands.command(name="перевод", description="Перевести персональную валюту другому участнику")
     @app_commands.describe(
         получатель="Кому переводить",
-        сумма="Сколько монет (минимум 1)",
+        сумма="Сколько валюты перевести (минимум 1)",
     )
     async def перевод(self, interaction: discord.Interaction,
                       получатель: discord.Member,
@@ -270,11 +310,17 @@ class Daily(commands.Cog):
             await interaction.response.send_message(
                 "❌ Нельзя переводить ботам.", ephemeral=True)
             return
+        if not can_receive_currency(получатель.id):
+            await interaction.response.send_message(
+                f"❌ {получатель.display_name} ещё не заполнил профиль 18+ и не может получать валюту.",
+                ephemeral=True,
+            )
+            return
 
         bal = get_balance(interaction.user.id)
         if bal < сумма:
             await interaction.response.send_message(
-                f"❌ Недостаточно монет. Баланс: **{bal}**.", ephemeral=True)
+                f"❌ Недостаточно {currency_name(interaction.user.id)}. Баланс: **{bal}**.", ephemeral=True)
             return
 
         add_coins(interaction.user.id, -сумма, "transfer_out",
@@ -288,7 +334,7 @@ class Daily(commands.Cog):
         )
         emb.add_field(name="От",     value=interaction.user.mention, inline=True)
         emb.add_field(name="Кому",   value=получатель.mention,       inline=True)
-        emb.add_field(name="Сумма",  value=f"**{сумма}** монет",     inline=True)
+        emb.add_field(name="Сумма",  value=f"**{currency_amount(получатель.id, сумма)}**",     inline=True)
         emb.add_field(name="Остаток отправителя",
                       value=f"**{get_balance(interaction.user.id)}**", inline=True)
         emb.add_field(name="Баланс получателя",
@@ -329,7 +375,7 @@ class Daily(commands.Cog):
         # Уведомляем участника в ЛС
         try:
             await участник.send(
-                f"⚖️ Вам выписан штраф **{actual}** монет на сервере.\n"
+                f"⚖️ Вам выписан штраф **{actual}** Сисек на сервере.\n"
                 f"Причина: {причина}\nОстаток: **{get_balance(участник.id)}**"
             )
         except Exception:
@@ -386,7 +432,7 @@ class Daily(commands.Cog):
         await interaction.response.send_message(embed=emb, ephemeral=True)
 
     # ── /магазин ──────────────────────────────────────────────────────────────
-    @app_commands.command(name="магазин", description="Магазин ролей за монеты")
+    @app_commands.command(name="магазин", description="Магазин ролей за персональную валюту")
     async def магазин(self, interaction: discord.Interaction):
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(
@@ -405,9 +451,9 @@ class Daily(commands.Cog):
         for shop_id, role_id, role_name, price, dur in rows:
             dur_str = f"{dur}ч" if dur else "навсегда"
             can     = "✅" if bal >= price else "❌"
-            lines.append(f"{can} **{role_name}** — {price} монет ({dur_str})  `ID:{shop_id}`")
+            lines.append(f"{can} **{role_name}** — {currency_amount(interaction.user.id, price)} ({dur_str})  `ID:{shop_id}`")
         emb.description = "\n".join(lines)
-        emb.set_footer(text=f"Твой баланс: {bal} монет · /купить_роль id:<ID>")
+        emb.set_footer(text=f"Твой баланс: {currency_amount(interaction.user.id, bal)} · /купить_роль id:<ID>")
         await interaction.response.send_message(embed=emb, ephemeral=True)
 
     # ── /купить_роль ──────────────────────────────────────────────────────────
@@ -427,7 +473,7 @@ class Daily(commands.Cog):
         bal = get_balance(interaction.user.id)
         if bal < price:
             await interaction.response.send_message(
-                f"❌ Недостаточно монет. Нужно **{price}**, у тебя **{bal}**.", ephemeral=True)
+                f"❌ Недостаточно {currency_name(interaction.user.id)}. Нужно **{price}**, у тебя **{bal}**.", ephemeral=True)
             return
 
         role = interaction.guild.get_role(role_id)
@@ -448,7 +494,7 @@ class Daily(commands.Cog):
         dur_str = f"на {dur}ч" if dur else "навсегда"
         emb = discord.Embed(
             title="🛍️ Покупка совершена!",
-            description=f"Получена роль **{role_name}** ({dur_str})\nСписано: **{price}** монет\nОстаток: **{get_balance(interaction.user.id)}**",
+            description=f"Получена роль **{role_name}** ({dur_str})\nСписано: **{currency_amount(interaction.user.id, price)}**\nОстаток: **{currency_amount(interaction.user.id, get_balance(interaction.user.id))}**",
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=emb)
@@ -493,7 +539,7 @@ class Daily(commands.Cog):
                           description="(Админ) Добавить роль в магазин")
     @app_commands.describe(
         роль="Роль для добавления",
-        цена="Цена в монетах",
+        цена="Цена в Сиськах",
         длительность_ч="0 = навсегда, иначе кол-во часов",
     )
     @app_commands.checks.has_permissions(administrator=True)
@@ -516,7 +562,7 @@ class Daily(commands.Cog):
                 )
         dur_str = f"{длительность_ч}ч" if длительность_ч else "навсегда"
         await interaction.response.send_message(
-            f"✅ Роль **{роль.name}** добавлена в магазин: **{цена}** монет ({dur_str}).",
+            f"✅ Роль **{роль.name}** добавлена в магазин: **{цена}** валюты ({dur_str}).",
             ephemeral=True)
 
     # ── /магазин_убрать ───────────────────────────────────────────────────────
@@ -584,7 +630,7 @@ class Daily(commands.Cog):
         for user_id, bal in rows:
             m = interaction.guild.get_member(int(user_id))
             if m:
-                present.append((int(bal), m.display_name))
+                present.append((int(bal), m.display_name, int(user_id)))
 
         if not present:
             await interaction.response.send_message("😶 Нет кошельков.")
@@ -593,8 +639,8 @@ class Daily(commands.Cog):
         present.sort(reverse=True)
         medals = ["🥇", "🥈", "🥉"]
         lines = [
-            f"{medals[i] if i < 3 else f'**{i+1}.**'} {name} — **{bal}** монет"
-            for i, (bal, name) in enumerate(present[:10])
+            f"{medals[i] if i < 3 else f'**{i+1}.**'} {name} — **{bal}** {currency_name(user_id)}"
+            for i, (bal, name, user_id) in enumerate(present[:10])
         ]
         emb = discord.Embed(
             title="💰 Топ баланса",

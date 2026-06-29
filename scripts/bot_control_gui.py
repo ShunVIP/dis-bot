@@ -40,6 +40,7 @@ DEFAULTS = {
     "vps_user": "root",
     "ssh_key": str(Path(os.environ.get("USERPROFILE", "")) / ".ssh" / "disbot_vps_ed25519"),
     "admin_url": "http://100.90.24.117:8080/",
+    "local_web_url": "http://127.0.0.1:3000/",
 }
 
 
@@ -78,6 +79,7 @@ class BotControlApp:
         self.vps_user_var = tk.StringVar(value=self.settings.get("vps_user", DEFAULTS["vps_user"]))
         self.ssh_key_var = tk.StringVar(value=self.settings.get("ssh_key", DEFAULTS["ssh_key"]))
         self.admin_url_var = tk.StringVar(value=self.settings.get("admin_url", DEFAULTS["admin_url"]))
+        self.local_web_url_var = tk.StringVar(value=self.settings.get("local_web_url", DEFAULTS["local_web_url"]))
         self.status_var = tk.StringVar(value="Готово.")
 
         self._build_ui()
@@ -175,14 +177,16 @@ class BotControlApp:
         ttk.Button(extra, text="Запустить бота локально", command=self.run_bot_locally).grid(row=1, column=1, sticky="ew", padx=4, pady=4)
         ttk.Button(extra, text="Отправить лёгкие модели на VPS", command=self.sync_training).grid(row=1, column=2, sticky="ew", padx=4, pady=4)
         ttk.Button(extra, text="Поставить нового VPS", command=self.install_new_vps).grid(row=1, column=3, sticky="ew", padx=4, pady=4)
-        ttk.Button(extra, text="Настройки подключения", command=self.open_settings_window).grid(row=2, column=0, sticky="ew", padx=4, pady=4)
-        ttk.Button(extra, text="Daily sync-задача", command=self.install_daily_sync_task).grid(row=2, column=1, sticky="ew", padx=4, pady=4)
-        ttk.Button(extra, text="Очистить лог", command=self.clear_log).grid(row=2, column=2, sticky="ew", padx=4, pady=4)
+        ttk.Button(extra, text="Запустить сайт/app", command=self.run_web_app_locally).grid(row=2, column=0, sticky="ew", padx=4, pady=4)
+        ttk.Button(extra, text="Открыть сайт/app", command=self.open_local_web_app).grid(row=2, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Button(extra, text="Настройки подключения", command=self.open_settings_window).grid(row=2, column=2, sticky="ew", padx=4, pady=4)
+        ttk.Button(extra, text="Daily sync-задача", command=self.install_daily_sync_task).grid(row=2, column=3, sticky="ew", padx=4, pady=4)
+        ttk.Button(extra, text="Очистить лог", command=self.clear_log).grid(row=3, column=0, sticky="ew", padx=4, pady=4)
         HintLabel(
             extra,
             "Этот блок нужен не каждый день. Настройки подключения трогай только если меняются IP, токен bridge, VPS host или SSH-ключ. "
             "Отправка лёгких моделей на VPS не нужна для тяжёлой GPT с ПК.",
-        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=4, pady=(8, 0))
+        ).grid(row=4, column=0, columnspan=4, sticky="w", padx=4, pady=(8, 0))
 
     def _build_docs_tab(self):
         self.docs_tab.columnconfigure(0, weight=1)
@@ -265,6 +269,7 @@ class BotControlApp:
             "vps_user": self.vps_user_var.get().strip(),
             "ssh_key": self.ssh_key_var.get().strip(),
             "admin_url": self.admin_url_var.get().strip(),
+            "local_web_url": self.local_web_url_var.get().strip(),
         }
         SETTINGS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         self.status_var.set("Настройки сохранены.")
@@ -297,6 +302,9 @@ class BotControlApp:
 
         ttk.Label(win, text="URL веб-панели").grid(row=4, column=0, sticky="w", padx=10, pady=8)
         ttk.Entry(win, textvariable=self.admin_url_var).grid(row=4, column=1, columnspan=3, sticky="ew", padx=10, pady=8)
+
+        ttk.Label(win, text="URL локального сайта/app").grid(row=5, column=0, sticky="w", padx=10, pady=8)
+        ttk.Entry(win, textvariable=self.local_web_url_var).grid(row=5, column=1, columnspan=3, sticky="ew", padx=10, pady=8)
 
         HintLabel(
             win,
@@ -634,6 +642,20 @@ class BotControlApp:
             "& '.\\.venv\\Scripts\\python.exe' main_file.py"
         )
         self._open_powershell_window("Локальный бот", command)
+
+    def run_web_app_locally(self):
+        command = (
+            f"Set-Location -LiteralPath '{ROOT}'; "
+            "if (-not (Test-Path '.venv\\Scripts\\python.exe')) { "
+            "Write-Host 'Сначала установи зависимости.' -ForegroundColor Yellow; return }; "
+            "& '.\\.venv\\Scripts\\python.exe' run_web_app.py"
+        )
+        self._open_powershell_window("Локальный сайт/app", command)
+
+    def open_local_web_app(self):
+        url = self.local_web_url_var.get().strip() or DEFAULTS["local_web_url"]
+        webbrowser.open(url)
+        self._log(f"Открыт локальный сайт/app: {url}")
 
     def git_status(self):
         self._run_background_command("Git status", ["git", "status"])

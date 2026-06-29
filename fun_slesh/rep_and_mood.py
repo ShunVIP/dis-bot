@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # fun_slesh/rep_and_mood.py
 """
-/репа            — +1 репутация (раз в день)
-/антирепа        — -1 репутация (раз в день, не ниже 0)
-/топ_репа        — топ репутации
+/Размер            — +1 Размер (раз в день)
+/антирепа        — -1 Размер (раз в день, не ниже 0)
+/топ_репа        — топ Размера
 /история_репы    — кто кому давал (своя история)
 /мое_настроение  — оценить настроение 1-10
 /настроение_сегодня — настроение сервера за сегодня
@@ -16,6 +16,7 @@ import sqlite3, os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from core.economy import add_coins
+from core.economy_profile import can_receive_currency, currency_amount, economy_profile_required_text, size_name
 from utils.events_bus import emit
 # Импортируем assign_rep_role лениво чтобы избежать circular import
 def _try_assign_role(bot, guild_id, user_id):
@@ -29,9 +30,9 @@ def _try_assign_role(bot, guild_id, user_id):
 MSK     = ZoneInfo("Europe/Moscow")
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 
-# Монет за полученную репу
+# Сисек за полученную Размер
 REP_REWARD   = 5
-# Монет штраф за антирепу (для получателя)
+# Сисек штраф за антирепу (для получателя)
 ANTIREP_COST = 3
 
 
@@ -77,18 +78,24 @@ class RepAndMood(commands.Cog):
         from utils.events_bus import subscribe
         subscribe("game_played", self._on_game_played_handler)
 
-    # ── /репа ─────────────────────────────────────────────────────────────────
-    @app_commands.command(name="репа", description="Дать +1 репутацию участнику (раз в день)")
-    @app_commands.describe(пользователь="Кому дать репутацию")
-    async def репа(self, interaction: discord.Interaction,
+    # ── /Размер ─────────────────────────────────────────────────────────────────
+    @app_commands.command(name="размер", description="Дать +1 Размер участнику (раз в день)")
+    @app_commands.describe(пользователь="Кому дать Размер")
+    async def размер(self, interaction: discord.Interaction,
                    пользователь: discord.Member):
         if пользователь.id == interaction.user.id:
             await interaction.response.send_message(
-                "❌ Нельзя давать репу самому себе.", ephemeral=True)
+                "❌ Нельзя давать Размер самому себе.", ephemeral=True)
             return
         if пользователь.bot:
             await interaction.response.send_message(
-                "❌ Боты не заслуживают репы.", ephemeral=True)
+                "❌ Боты не заслуживают Размера.", ephemeral=True)
+            return
+        if not can_receive_currency(пользователь.id):
+            await interaction.response.send_message(
+                f"❌ {пользователь.display_name} ещё не заполнил профиль 18+.\n{economy_profile_required_text()}",
+                ephemeral=True,
+            )
             return
 
         today = datetime.now(MSK).date().isoformat()
@@ -100,7 +107,7 @@ class RepAndMood(commands.Cog):
             ).fetchone()[0]
             if given:
                 await interaction.response.send_message(
-                    "❌ Ты уже давал репу сегодня. Возвращайся завтра.", ephemeral=True)
+                    "❌ Ты уже давал Размер сегодня. Возвращайся завтра.", ephemeral=True)
                 return
 
             conn.execute(
@@ -109,7 +116,7 @@ class RepAndMood(commands.Cog):
             )
 
         new_rep = _get_rep(пользователь.id)
-        # Награда в монетах получателю
+        # Награда в Сиськах получателю
         new_bal = add_coins(пользователь.id, REP_REWARD, "rep",
                             {"from": interaction.user.id, "type": "plus"})
 
@@ -119,20 +126,20 @@ class RepAndMood(commands.Cog):
         _try_assign_role(self.bot, interaction.guild.id, пользователь.id)
 
         emb = discord.Embed(
-            title="🏆 Репутация выдана!",
+            title="🏆 Размер выдана!",
             color=discord.Color.gold()
         )
         emb.add_field(name="Получатель", value=пользователь.mention, inline=True)
-        emb.add_field(name="Репутация",  value=f"**{new_rep}** ⭐",  inline=True)
+        emb.add_field(name=size_name(пользователь.id),  value=f"**{new_rep}** ⭐",  inline=True)
         emb.add_field(name="Бонус",
-                      value=f"+{REP_REWARD} монет (баланс: {new_bal})", inline=True)
+                      value=f"+{currency_amount(пользователь.id, REP_REWARD)} (баланс: {new_bal})", inline=True)
         await interaction.response.send_message(embed=emb)
 
     # ── /антирепа ─────────────────────────────────────────────────────────────
-    @app_commands.command(name="антирепа",
-                          description="Дать -1 репутацию участнику (раз в день, не ниже 0)")
+    @app_commands.command(name="уменьшить_размер",
+                          description="Дать -1 Размер участнику (раз в день, не ниже 0)")
     @app_commands.describe(
-        пользователь="Кому снизить репутацию",
+        пользователь="Кому снизить Размер",
         причина="Причина (видна в истории)"
     )
     async def антирепа(self, interaction: discord.Interaction,
@@ -140,11 +147,17 @@ class RepAndMood(commands.Cog):
                        причина: str = ""):
         if пользователь.id == interaction.user.id:
             await interaction.response.send_message(
-                "❌ Нельзя снижать репу самому себе.", ephemeral=True)
+                "❌ Нельзя снижать Размер самому себе.", ephemeral=True)
             return
         if пользователь.bot:
             await interaction.response.send_message(
-                "❌ Боты вне системы репутации.", ephemeral=True)
+                "❌ Боты вне системы Размера.", ephemeral=True)
+            return
+        if not can_receive_currency(пользователь.id):
+            await interaction.response.send_message(
+                f"❌ {пользователь.display_name} ещё не заполнил профиль 18+.\n{economy_profile_required_text()}",
+                ephemeral=True,
+            )
             return
 
         today = datetime.now(MSK).date().isoformat()
@@ -155,14 +168,14 @@ class RepAndMood(commands.Cog):
             ).fetchone()[0]
             if given:
                 await interaction.response.send_message(
-                    "❌ Ты уже снижал репу сегодня.", ephemeral=True)
+                    "❌ Ты уже снижал Размер сегодня.", ephemeral=True)
                 return
 
             # Проверяем — уже на нуле?
             current = _get_rep(пользователь.id)
             if current <= 0:
                 await interaction.response.send_message(
-                    f"❌ У {пользователь.display_name} уже 0 репутации — ниже некуда.",
+                    f"❌ У {пользователь.display_name} уже 0 Размера — ниже некуда.",
                     ephemeral=True)
                 return
 
@@ -172,23 +185,23 @@ class RepAndMood(commands.Cog):
             )
 
         new_rep = _get_rep(пользователь.id)
-        # Штраф в монетах получателю антирепы
+        # Штраф в Сиськах получателю антирепы
         if ANTIREP_COST > 0:
             add_coins(пользователь.id, -min(ANTIREP_COST, max(0, new_rep)),
                      "rep", {"from": interaction.user.id, "type": "minus"})
 
         emb = discord.Embed(
-            title="👎 Антирепутация",
+            title="👎 Размер уменьшен",
             color=discord.Color.red()
         )
         emb.add_field(name="Получатель", value=пользователь.mention, inline=True)
-        emb.add_field(name="Репутация",  value=f"**{new_rep}** ⭐",  inline=True)
+        emb.add_field(name=size_name(пользователь.id),  value=f"**{new_rep}** ⭐",  inline=True)
         if причина:
             emb.add_field(name="Причина", value=причина, inline=False)
         await interaction.response.send_message(embed=emb)
 
     # ── /топ_репа ─────────────────────────────────────────────────────────────
-    @app_commands.command(name="топ_репа", description="Топ репутации на сервере")
+    @app_commands.command(name="топ_размер", description="Топ Размера на сервере")
     async def топ_репа(self, interaction: discord.Interaction):
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(
@@ -203,7 +216,7 @@ class RepAndMood(commands.Cog):
                 present.append((int(total), m.display_name, m.mention))
 
         if not present:
-            await interaction.response.send_message("😶 Ещё никто не получил репутации.")
+            await interaction.response.send_message("😶 Ещё никто не получил Размера.")
             return
 
         present.sort(reverse=True)
@@ -213,15 +226,15 @@ class RepAndMood(commands.Cog):
             for i, (rep, name, _) in enumerate(present[:10])
         ]
         emb = discord.Embed(
-            title="⭐ Топ репутации",
+            title="⭐ Топ Размера",
             description="\n".join(lines),
             color=discord.Color.gold()
         )
         await interaction.response.send_message(embed=emb)
 
     # ── /история_репы ─────────────────────────────────────────────────────────
-    @app_commands.command(name="история_репы",
-                          description="История репутации — кто и когда давал")
+    @app_commands.command(name="история_размера",
+                          description="История Размера — кто и когда давал")
     @app_commands.describe(
         пользователь="Чью историю посмотреть (по умолчанию свою)",
         тип="Показать полученные или отданные"
@@ -262,11 +275,11 @@ class RepAndMood(commands.Cog):
 
         total = _get_rep(target.id)
         emb = discord.Embed(
-            title=f"📋 История репутации: {target.display_name}",
+            title=f"📋 История Размера: {target.display_name}",
             description="\n".join(lines),
             color=discord.Color.blurple()
         )
-        emb.set_footer(text=f"Текущая репутация: {total} ⭐")
+        emb.set_footer(text=f"Текущая Размер: {total} ⭐")
         await interaction.response.send_message(embed=emb, ephemeral=True)
 
     # ── /мое_настроение ───────────────────────────────────────────────────────
@@ -340,13 +353,15 @@ class RepAndMood(commands.Cog):
         await interaction.response.send_message(embed=emb)
 
 
-    # ── Репа за активность в играх ───────────────────────────────────────────
+    # ── Размер за активность в играх ───────────────────────────────────────────
     async def _on_game_played_handler(self, user_id: int, guild_id: int, game: str):
-        """Даёт +1 репу за факт участия в игре. Кулдаун 30 минут на игру."""
+        """Даёт +1 Размер за факт участия в игре. Кулдаун 30 минут на игру."""
         import time
         key = (user_id, guild_id, game)
         now = time.time()
         if now - self._game_rep_cache.get(key, 0) < 1800:
+            return
+        if not can_receive_currency(user_id):
             return
         self._game_rep_cache[key] = now
         today = datetime.now(MSK).date().isoformat()

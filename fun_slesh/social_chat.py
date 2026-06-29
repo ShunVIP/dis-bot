@@ -152,6 +152,16 @@ def _ensure_tables():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS social_chat_excluded_channels (
+                guild_id   INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                reason     TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (guild_id, channel_id)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -218,6 +228,24 @@ def _set_channels(guild_id: int, channel_ids: set[int]):
             (guild_id, raw),
         )
         conn.commit()
+
+
+def _social_excluded_channel_ids(guild_id: int) -> set[int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT channel_id FROM social_chat_excluded_channels WHERE guild_id=?",
+            (guild_id,),
+        ).fetchall()
+    return {int(row[0]) for row in rows}
+
+
+def _is_social_channel_excluded(guild_id: int, channel_id: int) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM social_chat_excluded_channels WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id),
+        ).fetchone()
+    return row is not None
 
 
 def _normalize_text(text: str) -> str:
@@ -571,6 +599,8 @@ class SocialChat(commands.Cog):
         enabled, chance_percent, mention_only, channel_ids = _get_config(guild_id)
         if not enabled:
             return
+        if _is_social_channel_excluded(guild_id, message.channel.id):
+            return
         if channel_ids and message.channel.id not in channel_ids:
             return
 
@@ -674,6 +704,46 @@ class SocialChat(commands.Cog):
         else:
             text = "✅ Ограничение по каналам снято. Болтовня может работать во всех каналах."
         await interaction.response.send_message(text, ephemeral=True)
+
+
+    @chat_group.command(name="исключить", description="(Админ) Исключить канал из болтовни бота")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def chat_exclude_channel(
+        self,
+        interaction: discord.Interaction,
+        канал: discord.TextChannel,
+        причина: str = "",
+    ):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO social_chat_excluded_channels(guild_id, channel_id, reason)
+                VALUES(?, ?, ?)
+                ON CONFLICT(guild_id, channel_id) DO UPDATE SET reason=excluded.reason
+                """,
+                (interaction.guild.id, канал.id, причина[:200]),
+            )
+        await interaction.response.send_message(
+            f"✅ {канал.mention} исключён из болтовни бота.", ephemeral=True
+        )
+
+    @chat_group.command(name="вернуть", description="(Админ) Вернуть канал в болтовню бота")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def chat_include_channel(self, interaction: discord.Interaction, канал: discord.TextChannel):
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute(
+                "DELETE FROM social_chat_excluded_channels WHERE guild_id=? AND channel_id=?",
+                (interaction.guild.id, канал.id),
+            )
+        text = f"✅ {канал.mention} снова доступен для болтовни." if cur.rowcount else "ℹ️ Этого канала не было в исключениях."
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @chat_group.command(name="исключения", description="(Админ) Показать каналы, где болтовня отключена")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def chat_excluded_channels(self, interaction: discord.Interaction):
+        ids = _social_excluded_channel_ids(interaction.guild.id)
+        text = ", ".join(f"<#{cid}>" for cid in sorted(ids)) if ids else "Исключений нет."
+        await interaction.response.send_message(f"Каналы без болтовни: {text}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

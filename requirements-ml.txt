@@ -1,0 +1,8 @@
+# Optional local ML training dependencies.
+# Install this on the main PC, not on the 30 GB VPS:
+#   python -m pip install -r requirements-ml.txt
+
+-r requirements.txt
+transformers
+datasets
+torch

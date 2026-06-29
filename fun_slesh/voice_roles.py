@@ -36,6 +36,12 @@ def _ensure_tables():
                 role_id    INTEGER NOT NULL,
                 PRIMARY KEY (guild_id, channel_id)
             );
+            CREATE TABLE IF NOT EXISTS voice_roles_excluded_channels (
+                guild_id   INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                reason     TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (guild_id, channel_id)
+            );
         """)
 
 
@@ -45,6 +51,15 @@ def _is_enabled(guild_id: int) -> bool:
             "SELECT enabled FROM voice_roles_config WHERE guild_id=?", (guild_id,)
         ).fetchone()
     return row[0] if row else True  # по умолчанию включено
+
+
+def _is_excluded(guild_id: int, channel_id: int) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM voice_roles_excluded_channels WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id),
+        ).fetchone()
+    return bool(row)
 
 
 async def _get_or_create_role(guild: discord.Guild, channel: discord.VoiceChannel) -> discord.Role | None:
@@ -158,6 +173,8 @@ class VoiceRoles(commands.Cog):
 
         # Вошёл в канал
         if after.channel and before.channel != after.channel:
+            if _is_excluded(guild.id, after.channel.id):
+                return
             role = await _get_or_create_role(guild, after.channel)
             if role and role not in member.roles:
                 try:
@@ -191,6 +208,10 @@ class VoiceRoles(commands.Cog):
                 "SELECT channel_id, role_id FROM voice_auto_roles WHERE guild_id=?",
                 (interaction.guild.id,)
             ).fetchall()
+            excluded = conn.execute(
+                "SELECT channel_id, reason FROM voice_roles_excluded_channels WHERE guild_id=? ORDER BY channel_id",
+                (interaction.guild.id,),
+            ).fetchall()
 
         emb = discord.Embed(
             title="🎙️ Авто-роли голосовых каналов",
@@ -215,7 +236,49 @@ class VoiceRoles(commands.Cog):
                 inline=False
             )
 
+        if excluded:
+            excluded_lines = []
+            for ch_id, reason in excluded:
+                ch = interaction.guild.get_channel(ch_id)
+                ch_name = ch.name if ch else f"канал {ch_id}"
+                note = f" — {reason}" if reason else ""
+                excluded_lines.append(f"⛔ **{ch_name}**{note}")
+            emb.add_field(name="Исключенные каналы", value="\n".join(excluded_lines[:15]), inline=False)
+
         await interaction.response.send_message(embed=emb, ephemeral=True)
+
+    @voice_roles_group.command(name="исключить",
+                               description="(Админ) Исключить голосовой канал из авто-ролей")
+    @app_commands.describe(
+        канал="Голосовой канал, где авто-роль не нужна",
+        причина="Короткая пометка для админов"
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def войс_роли_исключить(self, interaction: discord.Interaction, канал: discord.VoiceChannel, причина: str = ""):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO voice_roles_excluded_channels(guild_id, channel_id, reason)
+                VALUES(?,?,?)
+                ON CONFLICT(guild_id, channel_id) DO UPDATE SET reason=excluded.reason
+                """,
+                (interaction.guild.id, канал.id, причина.strip()[:120]),
+            )
+            conn.commit()
+        await interaction.response.send_message(f"✅ {канал.mention} исключен из авто-ролей.", ephemeral=True)
+
+    @voice_roles_group.command(name="вернуть",
+                               description="(Админ) Вернуть голосовой канал в авто-роли")
+    @app_commands.describe(канал="Голосовой канал, который снова нужно учитывать")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def войс_роли_вернуть(self, interaction: discord.Interaction, канал: discord.VoiceChannel):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "DELETE FROM voice_roles_excluded_channels WHERE guild_id=? AND channel_id=?",
+                (interaction.guild.id, канал.id),
+            )
+            conn.commit()
+        await interaction.response.send_message(f"✅ {канал.mention} снова участвует в авто-ролях.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

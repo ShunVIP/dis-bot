@@ -42,8 +42,8 @@ FALLBACK_HAIKU = [
     ("Много сообщений,\n"
      "никто не сказал главного.\n"
      "Завтра попробуем."),
-    ("Монеты звенят,\n"
-     "репа растёт понемногу.\n"
+    ("Сиськи звенят,\n"
+     "Размер растёт понемногу.\n"
      "Ночь накрыла всех."),
     ("Споры, смех, игры —\n"
      "обычный вечер дружбы.\n"
@@ -175,7 +175,7 @@ def _get_today_stats(guild_id: int) -> dict:
                 (guild_id, int(toxic_leader[0]), start_today_utc, start_tomorrow_utc),
             ).fetchone()
 
-        # Кто получил репу
+        # Кто получил Размер
         rep_events = conn.execute(
             "SELECT COUNT(*) FROM reputation WHERE date=?", (today,)
         ).fetchone()[0] if _table_exists(conn, "reputation") else 0
@@ -616,7 +616,7 @@ def _tracked_daily_lines(stats: dict) -> str:
     if stats.get("total_game_s") or stats.get("top_games") or stats.get("top_game_users"):
         lines.append("🎮 Discord-игры и игровые привычки")
     if stats.get("rep_events"):
-        lines.append("⭐ репутация")
+        lines.append("⭐ Размер")
     if stats.get("toxic_count"):
         lines.append("☢️ токсичность")
     return "\n".join(lines)
@@ -633,7 +633,7 @@ def _tracked_weekly_lines(stats: dict) -> str:
     if stats.get("top_balance") or stats.get("top_streaks"):
         lines.append("💰 экономика и дэйлики")
     if stats.get("top_rep"):
-        lines.append("⭐ репутация")
+        lines.append("⭐ Размер")
     if stats.get("top_toxic"):
         lines.append("☢️ токсичность")
     return "\n".join(lines)
@@ -701,7 +701,7 @@ def _build_winner_congrats(guild: discord.Guild, stats: dict) -> str:
         ("войс", stats["top_voice"]),
         ("баланс", stats["top_balance"]),
         ("серии", stats["top_streaks"]),
-        ("репа", stats["top_rep"]),
+        ("Размер", stats["top_rep"]),
         ("герои", stats["top_heroes"]),
         ("игры", stats.get("top_game_users", [])),
         ("активности", stats.get("top_activity_users", [])),
@@ -763,7 +763,7 @@ async def _generate_haiku(stats: dict, guild: discord.Guild) -> str:
         if stats["toxic_count"]:
             context_parts.append(f"было {stats['toxic_count']} токсичных сообщений")
         if stats["rep_events"]:
-            context_parts.append(f"раздали {stats['rep_events']} репы")
+            context_parts.append(f"раздали {stats['rep_events']} Размера")
 
         if not context_parts:
             return REIMI_HAIKU_REQUEST
@@ -891,7 +891,7 @@ async def _build_summary_embed(guild: discord.Guild, stats: dict) -> discord.Emb
                 f"Лидер: {_member_name(guild, int(leader_id))} — {int(leader_count)} раз\n> {stats['toxic_quote']}"
             )
     if stats["rep_events"]:
-        misc.append(f"⭐ Репы выдано: {stats['rep_events']}")
+        misc.append(f"⭐ Размера выдано: {stats['rep_events']}")
     if misc:
         emb.add_field(name="Прочее", value=_fit_field("\n".join(misc)), inline=False)
 
@@ -1026,9 +1026,9 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
             value=_format_rank_lines(guild, stats["top_activity_users"], "", value_formatter=_fmt_seconds),
             inline=False,
         )
-    emb.add_field(name="💰 Топ баланса", value=_format_rank_lines(guild, stats["top_balance"], "монет"), inline=True)
+    emb.add_field(name="💰 Топ баланса", value=_format_rank_lines(guild, stats["top_balance"], "Сисек"), inline=True)
     emb.add_field(name="🔥 Топ серий", value=_format_rank_lines(guild, stats["top_streaks"], "дн."), inline=True)
-    emb.add_field(name="⭐ Топ репы", value=_format_rank_lines(guild, stats["top_rep"], "репы"), inline=False)
+    emb.add_field(name="⭐ Топ Размера", value=_format_rank_lines(guild, stats["top_rep"], "Размера"), inline=False)
     if stats["top_toxic"]:
         toxic_text = _format_rank_lines(guild, stats["top_toxic"], "раз")
         if stats.get("toxic_leader") and stats.get("toxic_quote"):

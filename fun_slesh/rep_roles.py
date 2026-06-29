@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # fun_slesh/rep_roles.py
 """
-Система ролей по репутации:
+Система ролей по Размера:
   - Бот создаёт роль с нейро-названием из Persona при достижении порога
-  - Одна активная репа-роль на человека
+  - Одна активная Размер-роль на человека
   - Роль живёт 7 дней, потом обновляется (та же или новая если порог вырос)
   - Админ может сделать роль постоянной
 
@@ -11,7 +11,7 @@
   /репа_роли           — список настроенных порогов
   /репа_роль_добавить  — (Админ) добавить порог
   /репа_роль_убрать    — (Админ) убрать порог
-  /репа_роль_постоянная — (Админ) сделать чью-то репа-роль постоянной
+  /репа_роль_постоянная — (Админ) сделать чью-то Размер-роль постоянной
   /моя_репа_роль       — посмотреть свою текущую роль и когда обновится
 """
 
@@ -38,7 +38,7 @@ scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 def _ensure_tables():
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript("""
-            -- Пороги репы → роль
+            -- Пороги Размера → роль
             CREATE TABLE IF NOT EXISTS rep_role_thresholds (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id   INTEGER NOT NULL,
@@ -55,7 +55,7 @@ def _ensure_tables():
                 enabled  INTEGER NOT NULL DEFAULT 1
             );
 
-            -- Активные репа-роли участников
+            -- Активные Размер-роли участников
             CREATE TABLE IF NOT EXISTS rep_roles_active (
                 user_id    INTEGER NOT NULL,
                 guild_id   INTEGER NOT NULL,
@@ -68,7 +68,7 @@ def _ensure_tables():
             );
         """)
 
-# ── Репутация (чистая сумма) ──────────────────────────────────────────────────
+# ── Размер (чистая сумма) ──────────────────────────────────────────────────
 def _get_rep(user_id: int) -> int:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
@@ -152,7 +152,7 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
     """
     threshold_row = _best_threshold(guild_id, _get_rep(user_id))
     if not threshold_row:
-        return  # Репы не хватает ни на один порог
+        return  # Размера не хватает ни на один порог
 
     threshold, label = threshold_row
 
@@ -192,7 +192,7 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
             )
         # Если роль почему-то слетела — выдаём заново
         if old_role and old_role not in member.roles:
-            await member.add_roles(old_role, reason="Репа-роль продлена")
+            await member.add_roles(old_role, reason="Размер-роль продлена")
         return
 
     # Удаляем старую роль если есть и порог сменился
@@ -200,8 +200,8 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
         old_role = guild.get_role(existing[0])
         if old_role:
             try:
-                await member.remove_roles(old_role, reason="Репа-роль заменена")
-                await old_role.delete(reason="Репа-роль заменена новой")
+                await member.remove_roles(old_role, reason="Размер-роль заменена")
+                await old_role.delete(reason="Размер-роль заменена новой")
             except Exception:
                 pass
 
@@ -211,9 +211,9 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
         new_role = await guild.create_role(
             name=role_name,
             color=discord.Color.from_hsv(random.random(), 0.6, 0.9),
-            reason=f"Репа-роль: {threshold} очков"
+            reason=f"Размер-роль: {threshold} очков"
         )
-        await member.add_roles(new_role, reason="Репа-роль выдана")
+        await member.add_roles(new_role, reason="Размер-роль выдана")
     except discord.Forbidden:
         return  # Нет прав создавать роли
     except Exception:
@@ -234,7 +234,7 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
     # Уведомляем в ЛС
     try:
         await member.send(
-            f"🎖️ Ты получил роль **{role_name}** за репутацию {threshold}+ на сервере!\n"
+            f"🎖️ Ты получил роль **{role_name}** за Размер {threshold}+ на сервере!\n"
             f"Роль действует {ROLE_DURATION_DAYS} дней и обновится автоматически."
         )
     except Exception:
@@ -278,8 +278,8 @@ class RepRoles(commands.Cog):
         )
 
     # ── /репа_роли ────────────────────────────────────────────────────────────
-    @app_commands.command(name="репа_роли",
-                          description="Пороги репутации для получения роли")
+    @app_commands.command(name="размер_роли",
+                          description="Пороги Размера для получения роли")
     async def репа_роли(self, interaction: discord.Interaction):
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute(
@@ -290,32 +290,32 @@ class RepRoles(commands.Cog):
 
         my_rep = _get_rep(interaction.user.id)
         emb = discord.Embed(
-            title="🎖️ Репа-роли",
-            description=f"Твоя репутация: **{my_rep}** ⭐",
+            title="🎖️ Размер-роли",
+            description=f"Твоя Размер: **{my_rep}** ⭐",
             color=discord.Color.gold()
         )
 
         if not rows:
             emb.add_field(
                 name="Пороги не настроены",
-                value="Администратор может добавить через `/репа_роль_добавить`"
+                value="Администратор может добавить через `/размер_роль_добавить`"
             )
         else:
             lines = []
             for rid, min_rep, label in rows:
                 status = "✅" if my_rep >= min_rep else "🔒"
                 tag    = f" · {label}" if label else ""
-                lines.append(f"{status} **{min_rep}** репы{tag} `(ID:{rid})`")
+                lines.append(f"{status} **{min_rep}** Размера{tag} `(ID:{rid})`")
             emb.add_field(name="Пороги", value="\n".join(lines), inline=False)
             emb.set_footer(text="Роль выдаётся автоматически при достижении порога")
 
         await interaction.response.send_message(embed=emb)
 
     # ── /репа_роль_добавить ───────────────────────────────────────────────────
-    @app_commands.command(name="репа_роль_добавить",
-                          description="(Админ) Добавить порог репутации для роли")
+    @app_commands.command(name="размер_роль_добавить",
+                          description="(Админ) Добавить порог Размера для роли")
     @app_commands.describe(
-        порог="Сколько репы нужно для получения роли",
+        порог="Сколько Размера нужно для получения роли",
         метка="Короткое описание для этого уровня (напр. 'ветеран')",
     )
     @app_commands.checks.has_permissions(administrator=True)
@@ -337,15 +337,15 @@ class RepRoles(commands.Cog):
                 )
         tag = f" · `{метка}`" if метка else ""
         await interaction.response.send_message(
-            f"✅ Порог **{порог}** репы добавлен{tag}.\n"
+            f"✅ Порог **{порог}** Размера добавлен{tag}.\n"
             f"Роль выдаётся автоматически и обновляется каждые {ROLE_DURATION_DAYS} дней.",
             ephemeral=True
         )
 
     # ── /репа_роль_убрать ─────────────────────────────────────────────────────
-    @app_commands.command(name="репа_роль_убрать",
-                          description="(Админ) Убрать порог репутации")
-    @app_commands.describe(id="ID порога из /репа_роли")
+    @app_commands.command(name="размер_роль_убрать",
+                          description="(Админ) Убрать порог Размера")
+    @app_commands.describe(id="ID порога из /размер_роли")
     @app_commands.checks.has_permissions(administrator=True)
     async def репа_роль_убрать(self, interaction: discord.Interaction,
                                 id: app_commands.Range[int, 1, 999999]):
@@ -361,11 +361,11 @@ class RepRoles(commands.Cog):
             conn.execute("DELETE FROM rep_role_thresholds WHERE id=?", (id,))
         tag = f" · `{row[1]}`" if row[1] else ""
         await interaction.response.send_message(
-            f"✅ Порог **{row[0]}** репы{tag} удалён.", ephemeral=True)
+            f"✅ Порог **{row[0]}** Размера{tag} удалён.", ephemeral=True)
 
     # ── /репа_роль_постоянная ─────────────────────────────────────────────────
-    @app_commands.command(name="репа_роль_постоянная",
-                          description="(Админ) Сделать репа-роль участника постоянной")
+    @app_commands.command(name="размер_роль_постоянная",
+                          description="(Админ) Сделать Размер-роль участника постоянной")
     @app_commands.describe(участник="Кому сделать роль постоянной")
     @app_commands.checks.has_permissions(administrator=True)
     async def репа_роль_постоянная(self, interaction: discord.Interaction,
@@ -378,7 +378,7 @@ class RepRoles(commands.Cog):
             ).fetchone()
             if not row:
                 await interaction.response.send_message(
-                    f"❌ У {участник.display_name} нет активной репа-роли.",
+                    f"❌ У {участник.display_name} нет активной Размер-роли.",
                     ephemeral=True)
                 return
             if row[1]:
@@ -400,11 +400,11 @@ class RepRoles(commands.Cog):
 
     # ── /моя_репа_роль ────────────────────────────────────────────────────────
     # ── /репа_роль_изменить ──────────────────────────────────────────────────
-    @app_commands.command(name="репа_роль_изменить",
+    @app_commands.command(name="размер_роль_изменить",
                           description="(Админ) Изменить порог или метку существующего уровня")
     @app_commands.describe(
-        id="ID порога из /репа_роли",
-        новый_порог="Новое значение репы (0 = не менять)",
+        id="ID порога из /размер_роли",
+        новый_порог="Новое значение Размера (0 = не менять)",
         новая_метка="Новое название уровня (пусто = не менять)",
     )
     @app_commands.checks.has_permissions(administrator=True)
@@ -438,11 +438,11 @@ class RepRoles(commands.Cog):
 
         tag = f" · `{upd_label}`" if upd_label else ""
         await interaction.response.send_message(
-            f"✅ Порог обновлён: **{upd_rep}** репы{tag}.", ephemeral=True)
+            f"✅ Порог обновлён: **{upd_rep}** Размера{tag}.", ephemeral=True)
 
     # ── /репа_роли_вкл ────────────────────────────────────────────────────────
-    @app_commands.command(name="репа_роли_вкл",
-                          description="(Админ) Включить или выключить систему репа-ролей")
+    @app_commands.command(name="размер_роли_вкл",
+                          description="(Админ) Включить или выключить систему Размер-ролей")
     @app_commands.describe(включить="Включить или выключить")
     @app_commands.checks.has_permissions(administrator=True)
     async def репа_роли_вкл(self, interaction: discord.Interaction, включить: bool):
@@ -455,10 +455,10 @@ class RepRoles(commands.Cog):
         status = "✅ Включена" if включить else "⛔ Выключена"
         note   = "" if включить else "\nСуществующие роли остаются у участников до истечения срока."
         await interaction.response.send_message(
-            f"{status} система репа-ролей.{note}", ephemeral=True)
+            f"{status} система Размер-ролей.{note}", ephemeral=True)
 
-    @app_commands.command(name="моя_репа_роль",
-                          description="Твоя текущая репа-роль и когда обновится")
+    @app_commands.command(name="моя_размер_роль",
+                          description="Твоя текущая Размер-роль и когда обновится")
     async def моя_репа_роль(self, interaction: discord.Interaction):
         my_rep = _get_rep(interaction.user.id)
         with sqlite3.connect(DB_PATH) as conn:
@@ -473,8 +473,8 @@ class RepRoles(commands.Cog):
                 (interaction.guild.id, my_rep)
             ).fetchone()
 
-        emb = discord.Embed(title="🎖️ Твоя репа-роль", color=discord.Color.gold())
-        emb.add_field(name="Репутация", value=f"**{my_rep}** ⭐", inline=True)
+        emb = discord.Embed(title="🎖️ Твоя Размер-роль", color=discord.Color.gold())
+        emb.add_field(name="Размер", value=f"**{my_rep}** ⭐", inline=True)
 
         if row:
             role       = interaction.guild.get_role(row[0])
@@ -501,7 +501,7 @@ class RepRoles(commands.Cog):
             tag  = f" `{next_t[1]}`" if next_t[1] else ""
             emb.add_field(
                 name="До следующего уровня",
-                value=f"Ещё **{need}** репы → порог **{next_t[0]}**{tag}",
+                value=f"Ещё **{need}** Размера → порог **{next_t[0]}**{tag}",
                 inline=False
             )
 

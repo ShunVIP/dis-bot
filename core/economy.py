@@ -1,6 +1,7 @@
 # core/economy.py
 import os, sqlite3, json
 from datetime import datetime, timezone
+from core.economy_profile import can_receive_currency
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 
@@ -37,6 +38,8 @@ def get_balance(user_id: int) -> int:
 def add_coins(user_id: int, delta: int, reason: str, meta: dict | None = None) -> int:
     """¬сегда пишет в ledger, возвращает новый баланс."""
     _ensure_tables()
+    if int(delta) > 0 and not can_receive_currency(user_id):
+        return get_balance(user_id)
     now_utc = datetime.now(timezone.utc).isoformat()
     meta_text = json.dumps(meta or {}, ensure_ascii=False)
 

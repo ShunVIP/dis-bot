@@ -31,6 +31,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from core.economy import add_coins, get_balance
+from core.economy_profile import can_receive_currency
 
 # === Путь к общей БД проекта ===
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
@@ -149,6 +150,14 @@ SCHEMA_SQL = [
         voice_coins       INTEGER NOT NULL DEFAULT 1
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS activity_excluded_channels (
+        guild_id   INTEGER NOT NULL,
+        channel_id INTEGER NOT NULL,
+        reason     TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (guild_id, channel_id)
+    )
+    """,
     # Счётчик сообщений для пассивных наград (сбрасывается при начислении)
     """
     CREATE TABLE IF NOT EXISTS activity_msg_counter (
@@ -177,6 +186,24 @@ def _ensure_db():
         for sql in SCHEMA_SQL:
             cur.execute(sql)
         conn.commit()
+
+
+def _is_activity_channel_excluded(guild_id: int, channel_id: int) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM activity_excluded_channels WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id),
+        ).fetchone()
+    return bool(row)
+
+
+def _excluded_channel_ids(guild_id: int) -> list[int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT channel_id FROM activity_excluded_channels WHERE guild_id=?",
+            (guild_id,),
+        ).fetchall()
+    return [int(row[0]) for row in rows]
 
 # -------------------------
 # Text utils
@@ -361,6 +388,9 @@ class MessageAndVoiceStats(commands.Cog):
 
         guild_id = interaction.guild_id
         assert guild_id is not None
+        if _is_activity_channel_excluded(guild_id, channel.id):
+            await _safe_reply(interaction, content=f"⛔ Канал {channel.mention} исключен из статистики и пассивных наград.", ephemeral=True)
+            return
         limit_days = int(макс_дней)
         after_dt = None
         if limit_days > 0:
@@ -430,16 +460,22 @@ class MessageAndVoiceStats(commands.Cog):
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             if канал is None:
+                excluded = _excluded_channel_ids(guild_id)
+                channel_filter = ""
+                params: list = [guild_id, since]
+                if excluded:
+                    channel_filter = f" AND channel_id NOT IN ({','.join('?' for _ in excluded)})"
+                    params.extend(excluded)
                 cur.execute(
-                    """
+                    f"""
                     SELECT user_id, SUM(messages) AS total
                     FROM msg_stats_daily
-                    WHERE guild_id = ? AND date >= ?
+                    WHERE guild_id = ? AND date >= ?{channel_filter}
                     GROUP BY user_id
                     ORDER BY total DESC
                     LIMIT 15
                     """,
-                    (guild_id, since)
+                    params
                 )
             else:
                 cur.execute(
@@ -477,9 +513,15 @@ class MessageAndVoiceStats(commands.Cog):
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             if канал is None:
+                excluded = _excluded_channel_ids(guild_id)
+                channel_filter = ""
+                params: list = [guild_id, since]
+                if excluded:
+                    channel_filter = f" AND channel_id NOT IN ({','.join('?' for _ in excluded)})"
+                    params.extend(excluded)
                 cur.execute(
-                    "SELECT user_id, SUM(words) AS total FROM msg_stats_daily WHERE guild_id=? AND date>=? GROUP BY user_id ORDER BY total DESC LIMIT 15",
-                    (guild_id, since))
+                    f"SELECT user_id, SUM(words) AS total FROM msg_stats_daily WHERE guild_id=? AND date>=?{channel_filter} GROUP BY user_id ORDER BY total DESC LIMIT 15",
+                    params)
             else:
                 cur.execute(
                     "SELECT user_id, SUM(words) AS total FROM msg_stats_daily WHERE guild_id=? AND channel_id=? AND date>=? GROUP BY user_id ORDER BY total DESC LIMIT 15",
@@ -506,9 +548,15 @@ class MessageAndVoiceStats(commands.Cog):
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             if канал is None:
+                excluded = _excluded_channel_ids(guild_id)
+                channel_filter = ""
+                params: list = [guild_id, since]
+                if excluded:
+                    channel_filter = f" AND channel_id NOT IN ({','.join('?' for _ in excluded)})"
+                    params.extend(excluded)
                 cur.execute(
-                    "SELECT user_id, SUM(emojis) AS total FROM msg_stats_daily WHERE guild_id=? AND date>=? GROUP BY user_id ORDER BY total DESC LIMIT 15",
-                    (guild_id, since))
+                    f"SELECT user_id, SUM(emojis) AS total FROM msg_stats_daily WHERE guild_id=? AND date>=?{channel_filter} GROUP BY user_id ORDER BY total DESC LIMIT 15",
+                    params)
             else:
                 cur.execute(
                     "SELECT user_id, SUM(emojis) AS total FROM msg_stats_daily WHERE guild_id=? AND channel_id=? AND date>=? GROUP BY user_id ORDER BY total DESC LIMIT 15",
@@ -524,6 +572,54 @@ class MessageAndVoiceStats(commands.Cog):
             embed=discord.Embed(title=f"😎 Топ эмодзи за {дней} дн.", description="\n".join(lines), color=discord.Color.orange()),
         )
 
+    @app_commands.command(name="стат_исключить", description="(Админ) Исключить канал из статистики и пассивных наград")
+    @app_commands.describe(
+        канал="Канал, который не должен учитываться",
+        причина="Короткая пометка для админов"
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def стат_исключить(self, interaction: discord.Interaction, канал: discord.TextChannel, причина: str = ""):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO activity_excluded_channels(guild_id, channel_id, reason)
+                VALUES(?,?,?)
+                ON CONFLICT(guild_id, channel_id) DO UPDATE SET reason=excluded.reason
+                """,
+                (interaction.guild.id, канал.id, причина.strip()[:120]),
+            )
+            conn.commit()
+        await interaction.response.send_message(f"✅ {канал.mention} исключен из статистики и пассивных наград.", ephemeral=True)
+
+    @app_commands.command(name="стат_вернуть", description="(Админ) Вернуть канал в статистику и пассивные награды")
+    @app_commands.describe(канал="Канал, который снова нужно учитывать")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def стат_вернуть(self, interaction: discord.Interaction, канал: discord.TextChannel):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "DELETE FROM activity_excluded_channels WHERE guild_id=? AND channel_id=?",
+                (interaction.guild.id, канал.id),
+            )
+            conn.commit()
+        await interaction.response.send_message(f"✅ {канал.mention} снова учитывается.", ephemeral=True)
+
+    @app_commands.command(name="стат_исключения", description="(Админ) Показать исключенные из статистики каналы")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def стат_исключения(self, interaction: discord.Interaction):
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT channel_id, reason FROM activity_excluded_channels WHERE guild_id=? ORDER BY channel_id",
+                (interaction.guild.id,),
+            ).fetchall()
+        if not rows:
+            await interaction.response.send_message("✅ Исключенных каналов нет.", ephemeral=True)
+            return
+        lines = []
+        for channel_id, reason in rows:
+            note = f" — {reason}" if reason else ""
+            lines.append(f"<#{channel_id}>{note}")
+        await interaction.response.send_message("Исключенные каналы:\n" + "\n".join(lines), ephemeral=True)
+
     # ========= ТЕКСТ: пассивные награды =========
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -532,6 +628,8 @@ class MessageAndVoiceStats(commands.Cog):
         guild_id = message.guild.id
         user_id  = message.author.id
         channel_id = message.channel.id
+        if _is_activity_channel_excluded(guild_id, channel_id):
+            return
 
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
@@ -559,13 +657,13 @@ class MessageAndVoiceStats(commands.Cog):
             ).fetchone()
             count = row[0] if row else 0
 
-            # Монеты за каждые per_n сообщений
+            # Сиськи за каждые per_n сообщений
             if count % per_n == 0:
                 add_coins(user_id, coins, "msg_activity",
                           {"guild": guild_id, "count": count})
 
-            # Репутация за каждые rep_per_n сообщений
-            if rep_per_n > 0 and count % rep_per_n == 0:
+            # Размер за каждые rep_per_n сообщений
+            if rep_per_n > 0 and count % rep_per_n == 0 and can_receive_currency(user_id):
                 today = datetime.now(UTC).date().isoformat()
                 conn.execute(
                     "INSERT INTO reputation(user_id, given_by, delta, date) VALUES(?,?,?,?)",
@@ -661,7 +759,7 @@ class MessageAndVoiceStats(commands.Cog):
 
 
     async def _award_voice(self, user_id: int, guild_id: int, seconds: int):
-        """Начисляет монеты за голос."""
+        """Начисляет Сиськи за голос."""
         with sqlite3.connect(DB_PATH) as conn:
             cfg = conn.execute(
                 "SELECT voice_enabled, voice_per_min, voice_coins"
@@ -698,14 +796,14 @@ class MessageAndVoiceStats(commands.Cog):
     @app_commands.command(name="награды_настроить",
                           description="(Админ) Настроить пассивные награды за активность")
     @app_commands.describe(
-        монеты_за_сообщения="Включить монеты за сообщения",
-        монет_за_n_сообщений="Сколько монет за каждые N сообщений",
-        каждые_n_сообщений="Каждые сколько сообщений давать монеты",
-        репа_за_сообщения="Давать +1 репутации автоматически",
-        репа_каждые_n="Репа каждые N сообщений (0 = выключено)",
-        монеты_за_голос="Включить монеты за голос",
-        монет_за_минут="Монет за каждые N минут в голосе",
-        голос_каждые_мин="Каждые сколько минут давать монеты",
+        монеты_за_сообщения="Включить Сиськи за сообщения",
+        монет_за_n_сообщений="Сколько Сисек за каждые N сообщений",
+        каждые_n_сообщений="Каждые сколько сообщений давать Сиськи",
+        репа_за_сообщения="Давать +1 Размера автоматически",
+        репа_каждые_n="Размер каждые N сообщений (0 = выключено)",
+        монеты_за_голос="Включить Сиськи за голос",
+        монет_за_минут="Сисек за каждые N минут в голосе",
+        голос_каждые_мин="Каждые сколько минут давать Сиськи",
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def награды_настроить(
@@ -756,16 +854,16 @@ class MessageAndVoiceStats(commands.Cog):
         me, mp, mc, mrp, mr, ve, vp, vc = cfg
         emb = discord.Embed(title="⚙️ Пассивные награды", color=discord.Color.teal())
         msg_st   = "✅ Включены" if me else "⛔ Выключены"
-        rep_line = f"+{mr} репа каждые {mrp} сообщений" if mrp else "Репа: выключена"
+        rep_line = f"+{mr} Размер каждые {mrp} сообщений" if mrp else "Размер: выключена"
         emb.add_field(
             name="💬 Сообщения",
-            value=f"{msg_st}\n+{mc} монет каждые {mp} сообщений\n{rep_line}",
+            value=f"{msg_st}\n+{mc} Сисек каждые {mp} сообщений\n{rep_line}",
             inline=False
         )
         voice_st = "✅ Включены" if ve else "⛔ Выключены"
         emb.add_field(
             name="🎙️ Голос",
-            value=f"{voice_st}\n+{vc} монет каждые {vp} минут",
+            value=f"{voice_st}\n+{vc} Сисек каждые {vp} минут",
             inline=False
         )
         await interaction.response.send_message(embed=emb, ephemeral=True)
@@ -787,11 +885,11 @@ class MessageAndVoiceStats(commands.Cog):
             return
         me, mp, mc, mrp, mr, ve, vp, vc = cfg
         emb = discord.Embed(title="⚙️ Пассивные награды", color=discord.Color.teal())
-        msg_v = ("✅" if me else "⛔") + f"\n+{mc} монет / {mp} сообщений"
+        msg_v = ("✅" if me else "⛔") + f"\n+{mc} Сисек / {mp} сообщений"
         if mrp:
-            msg_v += f"\n+{mr} репа / {mrp} сообщений"
+            msg_v += f"\n+{mr} Размер / {mrp} сообщений"
         emb.add_field(name="💬 Сообщения", value=msg_v, inline=True)
-        voice_v = ("✅" if ve else "⛔") + f"\n+{vc} монет / {vp} минут"
+        voice_v = ("✅" if ve else "⛔") + f"\n+{vc} Сисек / {vp} минут"
         emb.add_field(name="🎙️ Голос", value=voice_v, inline=True)
 
 

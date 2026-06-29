@@ -1,0 +1,29 @@
+{
+  "name": "ViPik Control",
+  "short_name": "ViPik",
+  "description": "Private Discord-compatible control app for ViPik.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#101214",
+  "theme_color": "#101214",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Server",
+      "url": "/?view=server"
+    },
+    {
+      "name": "Voice",
+      "url": "/?view=voice"
+    }
+  ]
+}

@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ViPik Control</title>
+  <meta name="theme-color" content="#101214">
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="brand">ViPik Control</div>
+      <div class="subline">Discord bot, игры и fallback-чат</div>
+    </div>
+    <nav class="top-actions">
+      <button id="installApp" class="button ghost hidden" type="button">Установить</button>
+      <a id="loginLink" class="button primary" href="/auth/discord">Войти через Discord</a>
+      <a id="logoutLink" class="button ghost hidden" href="/auth/logout">Выйти</a>
+    </nav>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <button class="nav active" data-view="overview">Обзор</button>
+      <button class="nav" data-view="server">Сервер</button>
+      <button class="nav" data-view="members">Участники</button>
+      <button class="nav" data-view="chat">Чат</button>
+      <button class="nav" data-view="voice">Голос</button>
+      <button class="nav" data-view="games">Игры</button>
+      <button class="nav" data-view="settings" data-admin-only>Настройки бота</button>
+    </aside>
+
+    <section class="workspace">
+      <section id="overview" class="view active">
+        <div class="band">
+          <div>
+            <h1 id="hello">Кабинет ViPik</h1>
+            <p id="authState">Проверяем вход...</p>
+          </div>
+          <div class="status-grid">
+            <div class="metric">
+              <span>Discord</span>
+              <strong id="discordStatus">...</strong>
+            </div>
+            <div class="metric">
+              <span>Riot/LoL</span>
+              <strong id="riotStatus">...</strong>
+            </div>
+            <div class="metric">
+              <span>Web chat</span>
+              <strong id="chatStatus">local</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="columns">
+          <section class="panel">
+            <h2>Что уже связано</h2>
+            <div id="connectionsList" class="list muted">Нет данных</div>
+          </section>
+          <section class="panel">
+            <h2>Резервный вход</h2>
+            <form id="localLoginForm" class="login-form">
+              <input id="localEmail" type="email" placeholder="email">
+              <input id="localPassword" type="password" placeholder="пароль">
+              <button class="button" type="submit">Войти без Discord</button>
+            </form>
+            <form id="loginProfileForm" class="login-form hidden">
+              <input id="profileEmail" type="email" placeholder="email для входа">
+              <input id="profileLogin" placeholder="резервный ник">
+              <input id="profilePassword" type="password" placeholder="новый пароль, можно пустым">
+              <button class="button primary" type="submit">Сохранить резервный доступ</button>
+            </form>
+            <p id="loginProfileStatus"></p>
+          </section>
+        </div>
+      </section>
+
+      <section id="server" class="view">
+        <div class="server-shell">
+          <aside class="server-channels">
+            <div id="platformServerName" class="server-name">Ламповый Чай</div>
+            <div id="textChannelList" class="channel-list"></div>
+            <form id="channelCreateForm" class="compact-form" data-admin-only>
+              <input id="newChannelName" placeholder="новый-канал">
+              <button class="button" type="submit">+</button>
+            </form>
+            <div class="server-name small">Личные сообщения</div>
+            <div id="dmThreadList" class="channel-list"></div>
+            <form id="dmCreateForm" class="compact-form">
+              <input id="dmPeerId" inputmode="numeric" placeholder="Discord ID">
+              <button class="button" type="submit">ЛС</button>
+            </form>
+          </aside>
+          <section class="server-chat">
+            <div class="server-chat-head">
+              <h1 id="platformChatTitle"># general</h1>
+              <input id="platformSearch" placeholder="Поиск">
+            </div>
+            <div id="platformMessages" class="platform-messages muted">Выбери канал или ЛС</div>
+            <form id="platformMessageForm" class="platform-message-form">
+              <button id="platformAttachButton" class="button ghost" type="button">+</button>
+              <input id="platformFileInput" class="hidden" type="file" multiple>
+              <textarea id="platformMessageText" placeholder="Сообщение"></textarea>
+              <div id="platformAttachmentTray" class="attachment-tray"></div>
+              <button class="button primary" type="submit">Отправить</button>
+            </form>
+          </section>
+          <aside class="server-presence">
+            <h2>Активность</h2>
+            <div id="activityList" class="activity-list muted">Нет активности</div>
+            <h2>Участники</h2>
+            <div id="presenceMembers" class="presence-list muted">Нет участников</div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="members" class="view">
+        <div class="band compact">
+          <div>
+            <h1>Участники</h1>
+            <p>Локальные профили, роли, статусы и косметика платформы. Discord нужен только как первичная личность.</p>
+          </div>
+        </div>
+        <div class="columns">
+          <section class="panel">
+            <div class="section-head">
+              <h2>Моя карточка</h2>
+              <button id="reloadMembers" class="button" type="button">Обновить</button>
+            </div>
+            <form id="communityProfileForm" class="cosmetic-form">
+              <input id="communityDisplay" placeholder="Отображаемый ник">
+              <input id="communityStatus" placeholder="Статус">
+              <input id="communityAccent" placeholder="#4fc3b1">
+              <select id="communityBanner">
+                <option value="midnight">Midnight</option>
+                <option value="tea">Tea</option>
+                <option value="neon">Neon</option>
+                <option value="steel">Steel</option>
+              </select>
+              <input id="communityDecoration" placeholder="Украшение аватара">
+              <input id="communityBadges" placeholder="бейджи через запятую">
+              <textarea id="communityBio" placeholder="О себе"></textarea>
+              <button class="button primary" type="submit">Сохранить косметику</button>
+            </form>
+            <p id="communityStatusLine"></p>
+          </section>
+          <section class="panel">
+            <h2>Роли платформы</h2>
+            <div id="roleCatalog" class="role-catalog muted">Роли не загружены</div>
+          </section>
+        </div>
+        <section class="panel">
+          <h2>Серверная карточка</h2>
+          <div id="memberGrid" class="member-grid muted">Участники не загружены</div>
+        </section>
+      </section>
+
+      <section id="chat" class="view">
+        <div class="band compact">
+          <div>
+            <h1>Fallback-чат</h1>
+            <p>Сообщения сохраняются в общей базе. Если указать guild/channel, бот отправит их в Discord, когда он онлайн.</p>
+          </div>
+        </div>
+        <section class="panel chat-panel">
+          <div class="section-head">
+            <h2>Сообщения</h2>
+            <input id="chatSearch" placeholder="Поиск по чату">
+          </div>
+          <div id="chatMessages" class="messages"></div>
+          <form id="chatForm" class="chat-form">
+            <input id="guildId" inputmode="numeric" placeholder="Guild ID, необязательно">
+            <input id="channelId" inputmode="numeric" placeholder="Channel ID, необязательно">
+            <textarea id="chatText" placeholder="Сообщение"></textarea>
+            <div class="chat-tools">
+              <button id="chatAttachButton" class="button ghost" type="button">Файл</button>
+              <span id="chatAttachmentTray" class="attachment-tray"></span>
+            </div>
+            <input id="chatFileInput" class="hidden" type="file" multiple>
+            <button class="button primary" type="submit">Отправить</button>
+          </form>
+        </section>
+      </section>
+
+      <section id="voice" class="view">
+        <div class="voice-shell">
+          <aside class="voice-rooms">
+            <div class="voice-title">Голосовые комнаты</div>
+            <div id="voiceRooms" class="voice-room-list"></div>
+            <form id="voiceRoomForm" class="voice-room-form">
+              <input id="voiceRoomName" placeholder="Новая комната">
+              <button class="button" type="submit">Создать</button>
+            </form>
+          </aside>
+          <section class="voice-stage">
+            <div class="voice-stage-head">
+              <div>
+                <h1 id="voiceRoomTitle">Голос</h1>
+                <p id="voiceStatus">Выбери комнату слева, чтобы подключиться.</p>
+              </div>
+              <button id="voiceInvite" class="button ghost" type="button">Ссылка</button>
+            </div>
+            <div id="voiceMembers" class="voice-members">
+              <div class="voice-empty">Пока никто не подключён</div>
+            </div>
+            <div class="voice-controls">
+              <button id="voiceMute" class="voice-control" type="button" disabled title="Микрофон">🎙</button>
+              <button id="voiceDeafen" class="voice-control" type="button" disabled title="Звук">🎧</button>
+              <button id="voiceSettings" class="voice-control" type="button" disabled title="Устройства">⚙</button>
+              <button id="voiceLeave" class="voice-control danger" type="button" disabled title="Отключиться">⏏</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="games" class="view">
+        <div class="band compact">
+          <div>
+            <h1>Игры</h1>
+            <p>Игровые разделы с профилями, аналитикой и будущими интеграциями. Первый рабочий модуль: League of Legends через Riot API.</p>
+          </div>
+        </div>
+        <div class="game-tabs" aria-label="Игровые разделы">
+          <button class="game-tab active" type="button" data-game="lol">League of Legends</button>
+          <button class="game-tab" type="button" disabled>Dota 2</button>
+          <button class="game-tab" type="button" disabled>CS2</button>
+        </div>
+        <section class="panel">
+          <div class="section-head">
+            <h2>League of Legends</h2>
+            <div class="inline-actions">
+              <button id="refreshLol" class="button" type="button">Обновить</button>
+              <button id="unlinkLol" class="button ghost" type="button">Отвязать</button>
+            </div>
+          </div>
+          <form id="lolLinkForm" class="lol-form">
+            <input id="riotId" placeholder="Riot ID: Name#TAG">
+            <input id="riotPlatform" placeholder="Регион платформы" value="ru">
+            <input id="riotRegional" placeholder="Роутинг матчей" value="europe">
+            <button class="button primary" type="submit">Привязать Riot ID</button>
+          </form>
+          <div id="lolStatus" class="muted status-line"></div>
+          <div id="lolProfile" class="profile-grid muted">Профиль не загружен</div>
+        </section>
+      </section>
+
+      <section id="settings" class="view" data-admin-only>
+        <div class="band compact">
+          <div>
+            <h1>Настройки платформы</h1>
+            <p>Профиль сервера, роли, каналы функций и будущие мосты с Discord хранятся в общей базе бота.</p>
+          </div>
+        </div>
+        <div class="settings-grid">
+          <section class="panel">
+            <div class="section-head">
+              <h2>Профиль сервера</h2>
+              <span id="serverSettingsStatus" class="muted">не загружено</span>
+            </div>
+            <div id="serverPreview" class="server-preview banner-midnight">
+              <div id="serverPreviewIcon" class="server-preview-icon">LC</div>
+              <div>
+                <strong id="serverPreviewName">Ламповый Чай</strong>
+                <span id="serverPreviewDescription">Приватная платформа</span>
+              </div>
+            </div>
+            <form id="serverSettingsForm" class="settings-form">
+              <input id="serverName" placeholder="Название сервера">
+              <select id="serverBanner">
+                <option value="midnight">Midnight</option>
+                <option value="tea">Tea</option>
+                <option value="neon">Neon</option>
+                <option value="steel">Steel</option>
+                <option value="sunset">Sunset</option>
+                <option value="mint">Mint</option>
+              </select>
+              <input id="serverIcon" placeholder="Иконка/инициалы">
+              <textarea id="serverDescription" placeholder="Описание"></textarea>
+              <button class="button primary" type="submit">Сохранить профиль</button>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="section-head">
+              <h2>Роли платформы</h2>
+              <span id="roleSettingsStatus" class="muted">каталог</span>
+            </div>
+            <form id="roleSettingsForm" class="settings-form">
+              <input id="roleSlug" placeholder="slug, например raid-lead">
+              <input id="roleName" placeholder="Название роли">
+              <input id="roleColor" placeholder="#6aa7ff">
+              <input id="rolePosition" inputmode="numeric" placeholder="Позиция">
+              <button class="button primary" type="submit">Сохранить роль</button>
+            </form>
+            <div id="settingsRoleCatalog" class="role-catalog muted">Роли не загружены</div>
+          </section>
+
+          <section class="panel settings-wide">
+            <h2>Каналы функций бота</h2>
+            <form id="settingsForm" class="settings-form">
+              <input id="settingsGuild" inputmode="numeric" placeholder="Guild ID">
+              <input id="settingsFeature" placeholder="feature, например parody_training">
+              <select id="settingsMode">
+                <option value="output">output channel</option>
+                <option value="allow">allow channel</option>
+                <option value="exclude">exclude channel</option>
+              </select>
+              <input id="settingsChannel" inputmode="numeric" placeholder="Channel ID">
+              <button class="button primary" type="submit">Сохранить канал</button>
+            </form>
+            <pre id="settingsOutput" class="json-box">{}</pre>
+          </section>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/static/service-worker.js").catch(console.error);
+    }
+  </script>
+</body>
+</html>
