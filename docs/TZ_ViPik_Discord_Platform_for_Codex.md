@@ -18,7 +18,7 @@
 - админ-панель;
 - интеграцию с текущим Python Discord bot;
 - fallback-портал на случай, когда Discord недоступен;
-- возможность общения/обращений вне Discord, если Discord отвалился;
+- возможность общения, комнат, голосового чата и дальнейшей демонстрации экрана вне Discord, если Discord отвалился;
 - базу пользователей, заявок, тикетов, объявлений, настроек и аудита;
 - безопасную работу с VPS, env-секретами, базами и bridge для GPT-моделей.
 
@@ -90,7 +90,7 @@ MVP должен быть небольшим, но рабочим. Его нуж
 - собственный Discord client;
 - обход Discord API;
 - scraping Discord вне официальных API;
-- замена Discord voice/chat;
+- полноценная замена Discord voice/chat в первом MVP;
 - массовые рассылки;
 - перенос тяжелой GPT-модели на VPS.
 
@@ -644,7 +644,7 @@ vipik-platform/
 Промпт:
 
 ```text
-Ты реализуешь ViPik Discord Platform на базе существующего ShunVIP/dis-bot. Сначала проведи аудит структуры, прочитай CODEX_HANDOFF.md, AGENT_CONTEXT.md, README.md и docs/TZ_ViPik_Discord_Platform_for_Codex.md. Не переписывай бота. Создай минимальный каркас backend FastAPI, frontend Next.js, docker-compose и README так, чтобы текущий бот остался нетронутым.
+Ты реализуешь ViPik Discord Platform на базе существующего ShunVIP/dis-bot. Сначала проведи аудит структуры, прочитай AGENT_CONTEXT.md, README.md, docs/PLATFORM_REVIEW.md и docs/TZ_ViPik_Discord_Platform_for_Codex.md. Не переписывай бота. Создай минимальный каркас backend/frontend и README так, чтобы текущий бот остался рабочим.
 ```
 
 ### Этап 1 - backend foundation
@@ -912,7 +912,7 @@ Bad migration:
 
 - [ ] Вернуть GitHub repo в private.
 - [ ] На основном ПК проверить реальный git clone.
-- [ ] Прочитать `CODEX_HANDOFF.md`.
+- [ ] Прочитать `docs/PLATFORM_REVIEW.md`.
 - [ ] Проверить `KGTD.env`, но не печатать секреты.
 - [ ] Проверить `datebase/`, `models/`, SSH key.
 - [ ] Проверить VPS `/opt/dis-bot`.

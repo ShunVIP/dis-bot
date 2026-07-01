@@ -3,16 +3,22 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import discord
-import os
+
+from core.paths import BIRTHDAYS_DB
+from core.settings_store import get_feature_policy
 
 # ── Часовой пояс для крон-задачи ──────────────────────────────────────────────
 MSK = ZoneInfo("Europe/Moscow")
 
 # ── Путь к БД (birthdays.db) ──────────────────────────────────────────────────
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "birthdays.db"))
+DB_PATH = BIRTHDAYS_DB
+FEATURE_BIRTHDAY = "birthday"
 
 
 def _birthday_channel_id(guild_id: int) -> int | None:
+    policy = get_feature_policy(guild_id, FEATURE_BIRTHDAY)
+    if policy.output_channel_id:
+        return int(policy.output_channel_id)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS birthday_config (

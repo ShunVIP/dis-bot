@@ -13,7 +13,7 @@
   /итог_недели         — показать еженедельный дайджест прямо сейчас
 """
 
-import os, sqlite3, random, asyncio
+import sqlite3, random, asyncio
 from datetime import datetime, timedelta, timezone, date
 from zoneinfo import ZoneInfo
 
@@ -21,12 +21,20 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from core.paths import MESSAGES_DB, SOCIAL_DB
+from core.settings_store import (
+    get_feature_policy,
+    has_feature_setting,
+    set_feature_channel,
+    set_feature_enabled,
+)
 from utils.logger import log as _base_log
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
-MSG_DB  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "messages.db"))
+DB_PATH = SOCIAL_DB
+MSG_DB  = MESSAGES_DB
 UTC     = timezone.utc
 MSK     = ZoneInfo("Europe/Moscow")
+FEATURE_DAILY_SUMMARY = "daily_summary"
 
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 log = _base_log.bind(src="daily_summary")
@@ -74,6 +82,54 @@ def _ensure_tables():
                 PRIMARY KEY (guild_id, summary_type, period_key)
             );
         """)
+
+
+def _legacy_summary_targets() -> dict[int, int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT guild_id, channel_id FROM daily_summary_config"
+            " WHERE enabled=1 AND channel_id IS NOT NULL"
+        ).fetchall()
+    return {int(guild_id): int(channel_id) for guild_id, channel_id in rows}
+
+
+def _summary_targets(bot: commands.Bot) -> list[tuple[int, int]]:
+    targets = _legacy_summary_targets()
+    for guild in bot.guilds:
+        policy = get_feature_policy(guild.id, FEATURE_DAILY_SUMMARY)
+        configured = has_feature_setting(guild.id, FEATURE_DAILY_SUMMARY) or policy.output_channel_id is not None
+        if not configured:
+            continue
+        if policy.enabled and policy.output_channel_id:
+            targets[guild.id] = int(policy.output_channel_id)
+        else:
+            targets.pop(guild.id, None)
+    return sorted(targets.items())
+
+
+def _save_summary_channel(guild_id: int, channel_id: int):
+    set_feature_enabled(guild_id, FEATURE_DAILY_SUMMARY, True)
+    set_feature_channel(guild_id, FEATURE_DAILY_SUMMARY, channel_id, "output", "Discord admin command")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO daily_summary_config(guild_id, channel_id, enabled)"
+            " VALUES(?,?,1)"
+            " ON CONFLICT(guild_id) DO UPDATE SET"
+            " channel_id=excluded.channel_id, enabled=1",
+            (guild_id, channel_id),
+        )
+        conn.commit()
+
+
+def _save_summary_enabled(guild_id: int, enabled: bool):
+    set_feature_enabled(guild_id, FEATURE_DAILY_SUMMARY, enabled)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO daily_summary_config(guild_id, enabled) VALUES(?,?)"
+            " ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
+            (guild_id, int(enabled)),
+        )
+        conn.commit()
 
 
 # ── Сбор статистики за день ───────────────────────────────────────────────────
@@ -264,17 +320,26 @@ def _week_bounds_msk() -> tuple[date, date]:
     return start_current_week - timedelta(days=7), start_current_week
 
 
+def _month_bounds_msk() -> tuple[date, date]:
+    today = datetime.now(MSK).date()
+    start_this_month = today.replace(day=1)
+    if today.month == 12:
+        start_next_month = today.replace(year=today.year + 1, month=1, day=1)
+    else:
+        start_next_month = today.replace(month=today.month + 1, day=1)
+    return start_this_month, start_next_month
+
+
 def _top_rows(conn: sqlite3.Connection, query: str, params: tuple) -> list[tuple]:
     return conn.execute(query, params).fetchall()
 
 
-def _get_weekly_stats(guild_id: int) -> dict:
-    start_prev_week, start_this_week = _week_bounds_msk()
-    since = start_prev_week.isoformat()
-    until = start_this_week.isoformat()
-    last_week_code = (start_this_week - timedelta(days=1)).strftime("%Y-W%W")
-    start_week_utc = datetime.combine(start_prev_week, datetime.min.time(), MSK).astimezone(UTC).isoformat()
-    end_week_utc = datetime.combine(start_this_week, datetime.min.time(), MSK).astimezone(UTC).isoformat()
+def _get_period_stats(guild_id: int, start_period: date, end_period: date) -> dict:
+    since = start_period.isoformat()
+    until = end_period.isoformat()
+    toxicity_week_code = (end_period - timedelta(days=1)).strftime("%Y-W%W") if (end_period - start_period).days <= 8 else ""
+    start_period_utc = datetime.combine(start_period, datetime.min.time(), MSK).astimezone(UTC).isoformat()
+    end_period_utc = datetime.combine(end_period, datetime.min.time(), MSK).astimezone(UTC).isoformat()
 
     with sqlite3.connect(DB_PATH) as conn:
         top_msgs = _top_rows(
@@ -388,8 +453,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             WHERE guild_id=? AND week=?
             ORDER BY count DESC LIMIT 5
             """,
-            (guild_id, last_week_code),
-        ) if _table_exists(conn, "toxicity_weekly") else []
+            (guild_id, toxicity_week_code),
+        ) if toxicity_week_code and _table_exists(conn, "toxicity_weekly") else []
         top_heroes = _top_rows(
             conn,
             """
@@ -402,8 +467,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                start_week_utc,
-                end_week_utc,
+                start_period_utc,
+                end_period_utc,
             ),
         ) if _table_exists(conn, "heroes_sessions") else []
         top_activities = _top_rows(
@@ -418,8 +483,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                start_week_utc,
-                end_week_utc,
+                start_period_utc,
+                end_period_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
         top_games = _top_rows(
@@ -434,8 +499,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                start_week_utc,
-                end_week_utc,
+                start_period_utc,
+                end_period_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
         top_game_users = _top_rows(
@@ -450,8 +515,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                start_week_utc,
-                end_week_utc,
+                start_period_utc,
+                end_period_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
         top_user_games = _top_rows(
@@ -464,7 +529,7 @@ def _get_weekly_stats(guild_id: int) -> dict:
             HAVING total_seconds > 0
             ORDER BY total_seconds DESC LIMIT 10
             """,
-            (guild_id, start_week_utc, end_week_utc),
+            (guild_id, start_period_utc, end_period_utc),
         ) if _table_exists(conn, "activity_sessions") else []
         total_game_s = conn.execute(
             """
@@ -472,7 +537,7 @@ def _get_weekly_stats(guild_id: int) -> dict:
             FROM activity_sessions
             WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
             """,
-            (guild_id, start_week_utc, end_week_utc),
+            (guild_id, start_period_utc, end_period_utc),
         ).fetchone()[0] if _table_exists(conn, "activity_sessions") else 0
         top_other_activities = _top_rows(
             conn,
@@ -486,8 +551,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                start_week_utc,
-                end_week_utc,
+                start_period_utc,
+                end_period_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
         top_activity_users = _top_rows(
@@ -502,8 +567,8 @@ def _get_weekly_stats(guild_id: int) -> dict:
             """,
             (
                 guild_id,
-                start_week_utc,
-                end_week_utc,
+                start_period_utc,
+                end_period_utc,
             ),
         ) if _table_exists(conn, "activity_sessions") else []
         toxic_leader = _top_rows(
@@ -515,7 +580,7 @@ def _get_weekly_stats(guild_id: int) -> dict:
             GROUP BY user_id
             ORDER BY total DESC LIMIT 1
             """,
-            (guild_id, start_week_utc, end_week_utc),
+            (guild_id, start_period_utc, end_period_utc),
         ) if _table_exists(conn, "toxicity_log") else []
         toxic_quote = None
         if toxic_leader:
@@ -526,7 +591,7 @@ def _get_weekly_stats(guild_id: int) -> dict:
                 WHERE guild_id=? AND user_id=? AND logged_at>=? AND logged_at<?
                 ORDER BY level DESC, logged_at DESC LIMIT 1
                 """,
-                (guild_id, int(toxic_leader[0][0]), start_week_utc, end_week_utc),
+                (guild_id, int(toxic_leader[0][0]), start_period_utc, end_period_utc),
             ).fetchone()
             toxic_quote = quote_row[0] if quote_row else None
 
@@ -556,6 +621,16 @@ def _get_weekly_stats(guild_id: int) -> dict:
         "total_voice_s": total_voice,
         "total_game_s": total_game_s,
     }
+
+
+def _get_weekly_stats(guild_id: int) -> dict:
+    start_prev_week, start_this_week = _week_bounds_msk()
+    return _get_period_stats(guild_id, start_prev_week, start_this_week)
+
+
+def _get_monthly_stats(guild_id: int) -> dict:
+    start_month, start_next_month = _month_bounds_msk()
+    return _get_period_stats(guild_id, start_month, start_next_month)
 
 
 def _member_name(guild: discord.Guild, user_id: int) -> str:
@@ -588,6 +663,42 @@ def _format_term_lines(rows: list[tuple]) -> str:
     if not rows:
         return "Пока пусто."
     return "\n".join(f"**{i}.** {term} — **{int(count)}**" for i, (term, count) in enumerate(rows[:3], start=1))
+
+
+def _format_named_duration_lines(rows: list[tuple], limit: int = 5) -> str:
+    if not rows:
+        return "Пока пусто."
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (name, seconds) in enumerate(rows[:limit], start=1):
+        prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
+        lines.append(f"{prefix} {name} — **{_fmt_seconds(int(seconds))}**")
+    return "\n".join(lines)
+
+
+def _summary_metrics(stats: dict) -> str:
+    parts = [
+        f"💬 **{int(stats.get('total_msgs') or 0)}** сообщ.",
+        f"🎙️ **{_fmt_seconds(int(stats.get('total_voice_s') or 0))}** войс",
+        f"🎮 **{_fmt_seconds(int(stats.get('total_game_s') or 0))}** игры",
+    ]
+    return "  •  ".join(parts)
+
+
+def _period_focus_line(guild: discord.Guild, stats: dict) -> str:
+    focus = []
+    if stats.get("top_msgs"):
+        uid, total = stats["top_msgs"][0]
+        focus.append(f"чат держал {_member_name(guild, int(uid))} ({int(total)} сообщ.)")
+    if stats.get("top_game_users"):
+        uid, seconds = stats["top_game_users"][0]
+        focus.append(f"в играх лидировал {_member_name(guild, int(uid))} ({_fmt_seconds(int(seconds))})")
+    if stats.get("top_games"):
+        name, seconds = stats["top_games"][0]
+        focus.append(f"главная игра: {name} ({_fmt_seconds(int(seconds))})")
+    if not focus:
+        return "Период прошёл тихо: статистика ещё копится."
+    return " · ".join(focus[:3])
 
 
 def _fit_field(value: str, limit: int = 1024) -> str:
@@ -901,13 +1012,7 @@ async def _build_summary_embed(guild: discord.Guild, stats: dict) -> discord.Emb
 
 # ── Авто-постинг ─────────────────────────────────────────────────────────────
 async def _post_daily_summary(bot: commands.Bot):
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT guild_id, channel_id FROM daily_summary_config"
-            " WHERE enabled=1 AND channel_id IS NOT NULL"
-        ).fetchall()
-
-    for guild_id, ch_id in rows:
+    for guild_id, ch_id in _summary_targets(bot):
         guild = bot.get_guild(guild_id)
         ch    = bot.get_channel(ch_id)
         if not guild or not ch:
@@ -923,6 +1028,11 @@ async def _post_daily_summary(bot: commands.Bot):
 def _weekly_period_key() -> str:
     start_prev_week, start_this_week = _week_bounds_msk()
     return f"{start_prev_week.isoformat()}_{start_this_week.isoformat()}"
+
+
+def _monthly_period_key() -> str:
+    start_month, start_next_month = _month_bounds_msk()
+    return f"{start_month.isoformat()}_{start_next_month.isoformat()}"
 
 
 def _mark_posted(guild_id: int, summary_type: str, period_key: str):
@@ -949,46 +1059,51 @@ def _was_posted(guild_id: int, summary_type: str, period_key: str) -> bool:
     return bool(row)
 
 
-async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embed:
+async def _build_period_embed(
+    guild: discord.Guild,
+    stats: dict,
+    *,
+    title_prefix: str,
+    color: discord.Color,
+    period_word: str,
+) -> discord.Embed:
     start = datetime.fromisoformat(stats["since"]).strftime("%d.%m")
     end = (datetime.fromisoformat(stats["until"]) - timedelta(days=1)).strftime("%d.%m")
 
     emb = discord.Embed(
-        title=f"🏆 Итоги недели — {start}–{end}",
+        title=f"{title_prefix} — {start}–{end}",
         description=(
-            "Автоматический еженедельный дайджест по главным топам сервера.\n"
-            "Собрано за завершившуюся неделю, постится по воскресеньям в 23:59 MSK."
+            f"{_summary_metrics(stats)}\n"
+            f"{_period_focus_line(guild, stats)}"
         ),
-        color=discord.Color.gold(),
+        color=color,
     )
+    emb.add_field(name="Главные люди", value=_format_rank_lines(guild, stats["top_msgs"], "сообщ.", limit=5), inline=True)
     emb.add_field(
-        name="За неделю",
-        value=(
-            f"💬 {stats['total_msgs']} сообщений\n"
-            f"🎙️ {_fmt_seconds(int(stats['total_voice_s']))} в войсе\n"
-            f"🎮 {_fmt_seconds(int(stats.get('total_game_s', 0)))} в играх"
-        ),
-        inline=False,
-    )
-    emb.add_field(name="Что трекалось", value=_tracked_weekly_lines(stats), inline=False)
-    emb.add_field(name="🗣️ Топ активности", value=_format_rank_lines(guild, stats["top_msgs"], "сообщ."), inline=False)
-    emb.add_field(name="📝 Топ слов", value=_format_rank_lines(guild, stats["top_words"], "слов"), inline=True)
-    emb.add_field(name="😎 Топ эмодзи", value=_format_rank_lines(guild, stats["top_emojis"], "эмодзи"), inline=True)
-    if stats.get("top_word_terms"):
-        emb.add_field(name="📝 Слова недели", value=_format_term_lines(stats["top_word_terms"]), inline=True)
-    if stats.get("top_emoji_terms"):
-        emb.add_field(name="😎 Эмодзи недели", value=_format_term_lines(stats["top_emoji_terms"]), inline=True)
-    emb.add_field(
-        name="🎙️ Топ войса",
+        name="Войс",
         value=_format_rank_lines(guild, stats["top_voice"], "", value_formatter=_fmt_seconds),
-        inline=False,
+        inline=True,
     )
+    emb.add_field(name="Размер", value=_format_rank_lines(guild, stats["top_rep"], "Размера"), inline=True)
+
+    word_bits = []
+    if stats.get("top_word_terms"):
+        word_bits.append("**Слова:**\n" + _format_term_lines(stats["top_word_terms"]))
+    if stats.get("top_emoji_terms"):
+        word_bits.append("**Эмодзи:**\n" + _format_term_lines(stats["top_emoji_terms"]))
+    if word_bits:
+        emb.add_field(name="О чём шумели", value=_fit_field("\n\n".join(word_bits)), inline=False)
+
+    game_bits = []
     if stats["top_heroes"]:
-        emb.add_field(
-            name="🏰 Топ Heroes за неделю",
-            value=_format_rank_lines(guild, stats["top_heroes"], "", value_formatter=_fmt_seconds),
-            inline=False,
-        )
+        game_bits.append("**Heroes:**\n" + _format_rank_lines(guild, stats["top_heroes"], "", value_formatter=_fmt_seconds))
+    if stats.get("top_games"):
+        game_bits.append("**Игры:**\n" + _format_named_duration_lines(stats["top_games"], limit=5))
+    if stats.get("top_game_users"):
+        game_bits.append("**Игроки:**\n" + _format_rank_lines(guild, stats["top_game_users"], "", value_formatter=_fmt_seconds, limit=5))
+    if game_bits:
+        emb.add_field(name="Игровой блок", value=_fit_field("\n\n".join(game_bits)), inline=False)
+
     labels = {
         "game": "игра",
         "streaming": "стрим",
@@ -996,22 +1111,10 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
         "watching": "смотрит",
         "competing": "соревнование",
     }
-    if stats.get("top_games"):
-        lines = [
-            f"**{i}.** {name} — **{_fmt_seconds(int(seconds))}**"
-            for i, (name, seconds) in enumerate(stats["top_games"], start=1)
-        ]
-        emb.add_field(name="🎮 Топ игр", value=_fit_field("\n".join(lines)), inline=False)
-    if stats.get("top_game_users"):
-        emb.add_field(
-            name="🕹️ Топ игроков по играм",
-            value=_format_rank_lines(guild, stats["top_game_users"], "", value_formatter=_fmt_seconds, limit=10),
-            inline=False,
-        )
     if stats.get("top_user_games"):
         emb.add_field(
-            name="🎮 Кто во что играл",
-            value=_fit_field(_format_user_game_lines(guild, stats["top_user_games"], limit=10)),
+            name="Кто во что играл",
+            value=_fit_field(_format_user_game_lines(guild, stats["top_user_games"], limit=7)),
             inline=False,
         )
     if stats.get("top_other_activities"):
@@ -1019,35 +1122,45 @@ async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embe
         for i, (name, activity_type, seconds) in enumerate(stats["top_other_activities"], start=1):
             label = labels.get(activity_type, activity_type)
             lines.append(f"**{i}.** {name} ({label}) — **{_fmt_seconds(int(seconds))}**")
-        emb.add_field(name="📡 Другие активности", value="\n".join(lines), inline=False)
-    if stats.get("top_activity_users"):
-        emb.add_field(
-            name="📊 Все активности по участникам",
-            value=_format_rank_lines(guild, stats["top_activity_users"], "", value_formatter=_fmt_seconds),
-            inline=False,
-        )
-    emb.add_field(name="💰 Топ баланса", value=_format_rank_lines(guild, stats["top_balance"], "Сисек"), inline=True)
-    emb.add_field(name="🔥 Топ серий", value=_format_rank_lines(guild, stats["top_streaks"], "дн."), inline=True)
-    emb.add_field(name="⭐ Топ Размера", value=_format_rank_lines(guild, stats["top_rep"], "Размера"), inline=False)
+        emb.add_field(name="Другие активности", value=_fit_field("\n".join(lines[:5])), inline=False)
+
+    emb.add_field(name="Баланс", value=_format_rank_lines(guild, stats["top_balance"], "Сисек"), inline=True)
+    emb.add_field(name="Серии", value=_format_rank_lines(guild, stats["top_streaks"], "дн."), inline=True)
     if stats["top_toxic"]:
         toxic_text = _format_rank_lines(guild, stats["top_toxic"], "раз")
         if stats.get("toxic_leader") and stats.get("toxic_quote"):
             leader_id, leader_count = stats["toxic_leader"]
             toxic_text += f"\n\nЛидер недели: {_member_name(guild, int(leader_id))} — {int(leader_count)} раз\n> {stats['toxic_quote']}"
-        emb.add_field(name="☢️ Топ токсиков", value=_fit_field(toxic_text), inline=False)
-    emb.add_field(name="🎐 Поздравления чемпионам", value=_fit_field(_build_winner_congrats(guild, stats)), inline=False)
-    emb.set_footer(text="Если хочешь тише — можно вынести этот дайджест в отдельный канал.")
+        emb.add_field(name="Токсичность", value=_fit_field(toxic_text), inline=False)
+    emb.add_field(name="Поздравления чемпионам", value=_fit_field(_build_winner_congrats(guild, stats)), inline=False)
+    emb.set_footer(text=f"Итоги за {period_word}. Канал и автопостинг настраиваются в меню администратора.")
     return emb
+
+
+async def _build_weekly_embed(guild: discord.Guild, stats: dict) -> discord.Embed:
+    return await _build_period_embed(
+        guild,
+        stats,
+        title_prefix="🏆 Итоги недели",
+        color=discord.Color.gold(),
+        period_word="неделю",
+    )
+
+
+async def _build_monthly_embed(guild: discord.Guild, stats: dict) -> discord.Embed:
+    return await _build_period_embed(
+        guild,
+        stats,
+        title_prefix="📅 Итоги месяца",
+        color=discord.Color.teal(),
+        period_word="месяц",
+    )
 
 
 async def _post_weekly_summary(bot: commands.Bot):
     period_key = _weekly_period_key()
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT guild_id, channel_id FROM daily_summary_config WHERE enabled=1 AND channel_id IS NOT NULL"
-        ).fetchall()
 
-    for guild_id, ch_id in rows:
+    for guild_id, ch_id in _summary_targets(bot):
         if _was_posted(guild_id, "weekly", period_key):
             continue
         guild = bot.get_guild(guild_id)
@@ -1070,6 +1183,32 @@ async def _post_weekly_summary(bot: commands.Bot):
             log.bind(guild_id=guild_id, channel_id=ch_id).error(f"weekly summary post failed: {e}")
 
 
+async def _post_monthly_summary(bot: commands.Bot):
+    period_key = _monthly_period_key()
+
+    for guild_id, ch_id in _summary_targets(bot):
+        if _was_posted(guild_id, "monthly", period_key):
+            continue
+        guild = bot.get_guild(guild_id)
+        channel = bot.get_channel(ch_id)
+        if not guild or not channel:
+            continue
+        try:
+            stats = _get_monthly_stats(guild_id)
+            emb = await _build_monthly_embed(guild, stats)
+            champion_ids = _weekly_champion_ids(stats)
+            content = ""
+            allowed = discord.AllowedMentions.none()
+            if champion_ids:
+                mentions = " ".join(f"<@{uid}>" for uid in champion_ids)
+                content = f"📅 Чемпионы месяца: {mentions}"
+                allowed = discord.AllowedMentions(users=True, roles=False, everyone=False)
+            await channel.send(content=content or None, embed=emb, allowed_mentions=allowed)
+            _mark_posted(guild_id, "monthly", period_key)
+        except Exception as e:
+            log.bind(guild_id=guild_id, channel_id=ch_id).error(f"monthly summary post failed: {e}")
+
+
 async def _catch_up_weekly_summary(bot: commands.Bot):
     await bot.wait_until_ready()
     now_msk = datetime.now(MSK)
@@ -1085,7 +1224,7 @@ async def _catch_up_weekly_summary(bot: commands.Bot):
 class DailySummary(commands.Cog):
     summary_group = app_commands.Group(
         name="итоги",
-        description="Дневные и недельные итоги сервера"
+        description="Дневные, недельные и месячные итоги сервера"
     )
 
     def __init__(self, bot: commands.Bot):
@@ -1104,6 +1243,11 @@ class DailySummary(commands.Cog):
             _post_weekly_summary, "cron",
             day_of_week="sun", hour=23, minute=59, timezone=MSK,
             args=[bot], id="weekly_summary", replace_existing=True, misfire_grace_time=48 * 3600
+        )
+        scheduler.add_job(
+            _post_monthly_summary, "cron",
+            day="last", hour=23, minute=59, timezone=MSK,
+            args=[bot], id="monthly_summary", replace_existing=True, misfire_grace_time=48 * 3600
         )
 
     @commands.Cog.listener()
@@ -1127,16 +1271,9 @@ class DailySummary(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def итог_дня_канал(self, interaction: discord.Interaction,
                                канал: discord.TextChannel):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO daily_summary_config(guild_id, channel_id, enabled)"
-                " VALUES(?,?,1)"
-                " ON CONFLICT(guild_id) DO UPDATE SET"
-                " channel_id=excluded.channel_id, enabled=1",
-                (interaction.guild.id, канал.id)
-            )
+        _save_summary_channel(interaction.guild.id, канал.id)
         await interaction.response.send_message(
-            f"✅ Итоги будут постить в {канал.mention}: день — в 23:59 MSK, неделя — по воскресеньям в 23:59 MSK.",
+            f"✅ Итоги будут постить в {канал.mention}: день — в 23:59 MSK, неделя — по воскресеньям в 23:59 MSK, месяц — в последний день месяца в 23:59 MSK.\nНастройка сохранена в admin feature settings.",
             ephemeral=True)
 
     @summary_group.command(name="вкл",
@@ -1144,15 +1281,10 @@ class DailySummary(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def итог_дня_вкл(self, interaction: discord.Interaction,
                              включить: bool):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO daily_summary_config(guild_id, enabled) VALUES(?,?)"
-                " ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
-                (interaction.guild.id, int(включить))
-            )
+        _save_summary_enabled(interaction.guild.id, включить)
         status = "✅ Включён" if включить else "⛔ Выключен"
         await interaction.response.send_message(
-            f"{status} авто-постинг итогов дня и недели.", ephemeral=True)
+            f"{status} авто-постинг итогов дня, недели и месяца. Настройка сохранена в admin feature settings.", ephemeral=True)
 
     @summary_group.command(name="неделя",
                            description="Еженедельный дайджест главных топов сервера")
@@ -1160,6 +1292,14 @@ class DailySummary(commands.Cog):
         await interaction.response.defer(thinking=True)
         stats = _get_weekly_stats(interaction.guild.id)
         emb = await _build_weekly_embed(interaction.guild, stats)
+        await interaction.followup.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
+
+    @summary_group.command(name="месяц",
+                           description="Месячный дайджест главных топов сервера")
+    async def итог_месяца(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        stats = _get_monthly_stats(interaction.guild.id)
+        emb = await _build_monthly_embed(interaction.guild, stats)
         await interaction.followup.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
 
 async def setup(bot: commands.Bot):

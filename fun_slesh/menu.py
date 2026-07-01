@@ -22,6 +22,7 @@ from discord import app_commands
 from discord.ext import commands
 from core.economy import get_balance
 from core.economy_profile import can_receive_currency, currency_amount, economy_profile_required_text
+from core.runtime_policy import WEB_ADMIN_ENABLED, get_web_admin_url
 
 
 @dataclass(frozen=True)
@@ -66,14 +67,11 @@ class SectionAction:
 CATEGORY_STYLES: dict[str, CategoryStyle] = {
     "👤 Профиль": CategoryStyle("👤", discord.Color.gold()),
     "🎭 Пародия": CategoryStyle("🎭", discord.Color.purple()),
-    "📊 Статистика": CategoryStyle("📊", discord.Color.blurple()),
-    "🎂 Дни рождения": CategoryStyle("🎂", discord.Color.pink()),
+    "📊 Топы и итоги": CategoryStyle("📊", discord.Color.blurple()),
     "💰 Кошелек и магазин": CategoryStyle("💰", discord.Color.green()),
     "🎲 Развлечения": CategoryStyle("🎲", discord.Color.red()),
     "⏰ Напоминания": CategoryStyle("⏰", discord.Color.teal()),
-    "🌿 WWM гильдия": CategoryStyle("🌿", discord.Color.from_rgb(82, 180, 132)),
     "🔍 Поиск": CategoryStyle("🔍", discord.Color.from_rgb(100, 180, 255)),
-    "🎮 Steam": CategoryStyle("🎮", discord.Color.dark_blue()),
     "🕹️ Игры": CategoryStyle("🕹️", discord.Color.from_rgb(80, 190, 210)),
     "☢️ Активность": CategoryStyle("☢️", discord.Color.orange()),
     "💬 Болтовня": CategoryStyle("💬", discord.Color.from_rgb(225, 111, 255)),
@@ -84,15 +82,12 @@ CATEGORY_STYLES: dict[str, CategoryStyle] = {
 CATEGORY_ORDER = [
     "👤 Профиль",
     "💰 Кошелек и магазин",
-    "📊 Статистика",
+    "📊 Топы и итоги",
+    "🕹️ Игры",
     "🎲 Развлечения",
     "🎭 Пародия",
-    "🎮 Steam",
-    "🕹️ Игры",
-    "🌿 WWM гильдия",
     "⏰ Напоминания",
     "🔍 Поиск",
-    "🎂 Дни рождения",
     "🛡️ Админ",
     "💬 Болтовня",
     "☢️ Активность",
@@ -100,20 +95,17 @@ CATEGORY_ORDER = [
 ]
 
 CATEGORY_SUMMARIES = {
-    "👤 Профиль": "Личная карточка, Размер, настроение, ачивки и общая инфа.",
-    "🎭 Пародия": "Общие генерации фраз и профили стиля. Обучение и фильтры — в /админ.",
+    "👤 Профиль": "Единое окно: личная карточка, ДР, настроение, ачивки, Steam, Riot/LoL и WWM.",
+    "🎭 Пародия": "Markov-фразы, мемные фразы и паспорт стиля. Обучение и GPT — в админке/отдельном ревью.",
     "💬 Болтовня": "Настройки живого общения и внезапных ответов бота.",
     "☢️ Активность": "Токсичность, войс-роли, сводки, игровые реакции и мем-триггеры.",
-    "📊 Статистика": "Общая статистика сервера: сообщения, слова, эмодзи, голос, итоги и топы.",
-    "💰 Кошелек и магазин": "Персональная валюта, баланс, ежедневные задания, налог, магазин и переводы.",
+    "📊 Топы и итоги": "Единое окно топов, статистики голоса, активности и итогов сервера.",
+    "💰 Кошелек и магазин": "Валюта, дэйлик, магазин ролей и переводы через компактные окна.",
     "🎲 Развлечения": "Игры, дуэли, случайные штуки и смешные публичные итоги.",
-    "🎮 Steam": "Steam-профиль, библиотека, вишлист, общие игры и игровые идеи по запросу.",
-    "🕹️ Игры": "Игровые разделы: профили, аналитика, подборки и будущие игровые интеграции. Сейчас первый полноценный раздел - LoL.",
-    "🌿 WWM гильдия": "Игровой ник, Steam-привязка и карточки участников гильдии.",
+    "🕹️ Игры": "Один игровой хаб: мини-игры, Steam, LoL, WWM и игровые профили.",
     "⏰ Напоминания": "Создание, просмотр и удаление напоминаний.",
     "🔍 Поиск": "Разные источники поиска: WWM-база, Википедия и PubMed.",
-    "🎂 Дни рождения": "Личные дни рождения и общий список.",
-    "🛡️ Админ": "Команды обслуживания, настройки и ручные переключатели.",
+    "🛡️ Админ": "Админские действия переезжают в отдельную web-панель.",
     "🧩 Прочее": "Редкие или пока неразобранные команды.",
 }
 
@@ -169,62 +161,38 @@ MENU_ROOTS = {"команды", "админ"}
 
 MENU_ONLY_ACTIONS: tuple[MenuOnlyAction, ...] = (
     MenuOnlyAction("ping", "Пинг", "Быстрый ответ с текущей задержкой бота.", "👤 Профиль", "menu_ping", "🏓"),
-    MenuOnlyAction("server", "Сервер", "Карточка сервера без отдельного slash-ввода.", "📊 Статистика", "menu_server", "🏰"),
+    MenuOnlyAction("server", "Сервер", "Карточка сервера без отдельного slash-ввода.", "📊 Топы и итоги", "menu_server", "🏰"),
     MenuOnlyAction("coinflip", "Монетка", "Подбросить монетку прямо из меню.", "🎲 Развлечения", "menu_coinflip", "🪙"),
     MenuOnlyAction("meme", "Мем", "Случайный мем без отдельной slash-команды.", "🎲 Развлечения", "menu_meme", "😂"),
 )
 MENU_ONLY_BY_ID = {item.action_id: item for item in MENU_ONLY_ACTIONS}
 QUICK_BUTTON_ACTIONS: tuple[QuickButtonAction, ...] = (
-    QuickButtonAction("top_active", "Топ актив", "📊", "MessageAndVoiceStats", "топ_актив", {}, 2),
-    QuickButtonAction("top_words", "Топ слова", "📝", "MessageAndVoiceStats", "топ_слова", {}, 2),
-    QuickButtonAction("top_emojis", "Топ эмодзи", "😎", "MessageAndVoiceStats", "топ_эмодзи", {}, 2),
-    QuickButtonAction("top_voice", "Топ войс", "🎙️", "MessageAndVoiceStats", "voice_top", {}, 2),
-    QuickButtonAction("top_rep", "Топ Размер", "⭐", "RepAndMood", "топ_репа", {}, 2),
-    QuickButtonAction("my_balance", "Баланс", "💰", "Daily", "баланс", {}, 3),
-    QuickButtonAction("my_achievements", "Ачивки", "🏅", "AchievementsEngine", "ачивки", {}, 3),
-    QuickButtonAction("mood_today", "Настроение", "🙂", "RepAndMood", "настроение_сегодня", {}, 3),
-    QuickButtonAction("rewards_status", "Награды", "🎁", "MessageAndVoiceStats", "награды_статус", {}, 3),
-    QuickButtonAction("summary_day", "Итоги дня", "🌙", "DailySummary", "итог_дня", {}, 3),
-    QuickButtonAction("summary_week", "Итоги недели", "🗓️", "DailySummary", "итог_недели", {}, 4),
 )
 QUICK_BUTTON_BY_ID = {item.action_id: item for item in QUICK_BUTTON_ACTIONS}
 
 
 SECTION_ACTIONS: dict[str, tuple[SectionAction, ...]] = {
     "👤 Профиль": (
-        SectionAction("profile_me", "Моя инфа", "👤", "profile_hub", row=1),
-        SectionAction("profile_size", "Изменить Размер", "📏", "size_action_select", row=1),
-        SectionAction("profile_public", "Общая инфа", "🌐", "community_info_select", row=1),
-        SectionAction("profile_rep_roles", "Размер-роли", "🎖️", "call", "RepRoles", "репа_роли", row=2),
-        SectionAction("profile_ping", "Пинг", "🏓", "menu_only", row=2),
+        SectionAction("profile_me", "Мой профиль", "👤", "profile_hub", row=1),
+        SectionAction("profile_accounts", "Привязки", "🔗", "accounts_hub", row=1),
+        SectionAction("profile_birthday", "День рождения", "🎂", "birthday_hub", row=1),
+        SectionAction("profile_size", "Размер", "📏", "size_action_select", row=1),
+        SectionAction("profile_mood", "Настроение", "🙂", "mood_modal", row=2),
+        SectionAction("profile_achievements", "Ачивки", "🏅", "call", "AchievementsEngine", "ачивки", row=2),
     ),
     "💰 Кошелек и магазин": (
         SectionAction("wallet_status", "Моя валюта", "💰", "wallet_status", row=1),
         SectionAction("shop_hub", "Магазин", "🛒", "shop_hub", row=1),
-        SectionAction("wallet_top", "Топ валюты", "🏦", "call", "Daily", "топ_баланс", row=2),
-        SectionAction("wallet_streaks", "Топ серий", "🔥", "call", "Daily", "топ_серии", row=2),
+        SectionAction("wallet_daily", "Дэйлик", "🎁", "call", "Daily", "дэйлик", row=1),
+        SectionAction("wallet_transfer", "Перевод", "💸", "transfer_modal", row=1),
     ),
-    "📊 Статистика": (
-        SectionAction("stats_active", "Сообщения", "📊", "call", "MessageAndVoiceStats", "топ_актив", row=1),
-        SectionAction("stats_words", "Слова", "📝", "call", "MessageAndVoiceStats", "топ_слова", row=1),
-        SectionAction("stats_emojis", "Эмодзи", "😎", "call", "MessageAndVoiceStats", "топ_эмодзи", row=1),
-        SectionAction("stats_voice_top", "Голос", "🎙️", "call", "MessageAndVoiceStats", "voice_top", row=1),
-        SectionAction("stats_voice_me", "Мой голос", "🎧", "call", "MessageAndVoiceStats", "voice_me", row=2),
-        SectionAction("stats_rewards", "Награды активности", "🎁", "call", "MessageAndVoiceStats", "награды_статус", row=2),
-        SectionAction("summary_day", "Итоги дня", "🌙", "call", "DailySummary", "итог_дня", row=2),
-        SectionAction("summary_week", "Итоги недели", "🗓️", "call", "DailySummary", "итог_недели", row=2),
-    ),
-    "🎂 Дни рождения": (
-        SectionAction("bd_set", "Установить", "🎂", "birthday_modal", row=1),
-        SectionAction("bd_delete", "Удалить мой", "🗑️", "call", "Birthday", "д_р", row=1),
-        SectionAction("bd_all", "Все ДР", "📅", "call", "Birthday", "все_др", row=1),
-        SectionAction("bd_when_me", "Когда мой", "🔎", "call", "Birthday", "когда_др", row=1),
+    "📊 Топы и итоги": (
+        SectionAction("top_hub", "Все топы", "🏆", "top_hub", row=1),
+        SectionAction("summary_hub", "Итоги", "🗓️", "summary_hub", row=1),
+        SectionAction("stats_voice_me", "Мой голос", "🎧", "call", "MessageAndVoiceStats", "voice_me", row=1),
+        SectionAction("stats_rewards", "Награды", "🎁", "call", "MessageAndVoiceStats", "награды_статус", row=1),
     ),
     "🎲 Развлечения": (
-        SectionAction("play_rps", "КНБ", "✊", "rps_hub", row=1),
-        SectionAction("play_guess", "Угадай число", "🔢", "guess_modal", row=1),
-        SectionAction("play_blackjack", "Блэкджек", "🃏", "blackjack_modal", row=1),
-        SectionAction("play_hangman", "Виселица", "🔤", "call", "Games", "виселица", row=1),
         SectionAction("fun_random_hub", "Случайное", "🎲", "random_hub", row=2),
     ),
     "🎭 Пародия": (
@@ -234,24 +202,11 @@ SECTION_ACTIONS: dict[str, tuple[SectionAction, ...]] = {
         SectionAction("parody_meme", "Мемная фраза", "🤣", "user_select", "ParodyEngine", "мем_фраза", row=1),
         SectionAction("parody_users", "Кого знает бот", "👥", "call", "ParodyEngine", "список_пользователей", row=2),
     ),
-    "🎮 Steam": (
-        SectionAction("steam_profile", "Профиль Steam", "👤", "call", "Steam", "steam_профиль", row=1),
-        SectionAction("steam_link", "Привязать Steam", "🔗", "steam_link_modal", row=1),
-        SectionAction("steam_unlink", "Отвязать Steam", "❌", "call", "Steam", "steam_отвязать", row=1),
-        SectionAction("steam_random", "Во что сыграть", "🎲", "call", "Steam", "steam_рандом", row=2),
-        SectionAction("steam_challenge", "Челлендж сейчас", "🏁", "call", "Steam", "steam_челлендж", row=2),
-        SectionAction("steam_wishlist", "Вишлист", "🎁", "call", "Steam", "steam_вишлист", row=2),
-    ),
     "🕹️ Игры": (
+        SectionAction("games_hub", "Игровой хаб", "🎮", "games_hub", row=1),
+        SectionAction("steam_hub", "Steam", "🎮", "steam_hub", row=1),
         SectionAction("game_lol", "League of Legends", "🧬", "game_lol_hub", row=1),
-    ),
-    "🌿 WWM гильдия": (
-        SectionAction("wwm_nick", "Указать ник", "📝", "wwm_nick_modal", row=1),
-        SectionAction("wwm_card", "Моя карточка", "🎴", "call", "WWMGuild", "wwm_карточка", row=1),
-        SectionAction("wwm_roster", "Состав", "👥", "call", "WWMGuild", "wwm_состав", row=1),
-        SectionAction("wwm_steam", "Steam", "🔗", "steam_link_modal", row=2),
-        SectionAction("wwm_search", "WWM поиск", "🔎", "wwm_search_modal", row=2),
-        SectionAction("wwm_random", "WWM random", "🎲", "call", "WWMSearchCog", "wwm_random", row=2),
+        SectionAction("wwm_hub", "WWM", "🌿", "wwm_hub", row=1),
     ),
     "🔍 Поиск": (
         SectionAction("search_wwm", "WWM база", "🔎", "wwm_search_modal", row=1),
@@ -269,6 +224,14 @@ SECTION_ACTION_BY_ID = {
     action.action_id: action
     for actions in SECTION_ACTIONS.values()
     for action in actions
+}
+SECTION_ACTION_CALLBACKS_BY_CATEGORY = {
+    category: {
+        action.method_name
+        for action in actions
+        if action.kind == "call" and action.method_name
+    }
+    for category, actions in SECTION_ACTIONS.items()
 }
 
 
@@ -295,6 +258,8 @@ def _is_admin_command(cmd: app_commands.Command, qualified_name: str) -> bool:
 def _category_for_command(qualified_name: str, module_name: str) -> str:
     root = qualified_name.split()[0]
 
+    if root in {"топ_серии", "топ_баланс", "топ_размер", "настроение_сегодня"}:
+        return "📊 Топы и итоги"
     if root in MENU_ROOTS:
         return "🧩 Прочее"
     if root in CHAT_ROOTS:
@@ -302,27 +267,27 @@ def _category_for_command(qualified_name: str, module_name: str) -> str:
     if root in REMINDER_ROOTS:
         return "⏰ Напоминания"
     if root in WWM_ROOTS or module_name == "fun_slesh.wwm_guild":
-        return "🌿 WWM гильдия"
+        return "🕹️ Игры"
     if root in SEARCH_COMMANDS or module_name in {"fun_slesh.ai_tools", "fun_slesh.wwm_search_cog"}:
         return "🔍 Поиск"
     if root in STEAM_ROOTS or module_name == "fun_slesh.steam":
-        return "🎮 Steam"
+        return "🕹️ Игры"
     if root in GAME_PROFILE_ROOTS or module_name == "fun_slesh.lol_profile":
         return "🕹️ Игры"
     if root in PARODY_COMMANDS or module_name.startswith("fun_slesh.parody_"):
         return "🎭 Пародия"
     if root in ACTIVITY_STATS_ROOTS or module_name in {"fun_slesh.toxicity", "fun_slesh.daily_summary"}:
-        return "📊 Статистика"
+        return "📊 Топы и итоги"
     if root in ACTIVITY_ADMIN_ROOTS or module_name == "fun_slesh.voice_roles":
         return "🛡️ Админ"
     if root in ACTIVITY_HIDDEN_ROOTS or module_name in {"fun_slesh.heroes_troll", "fun_slesh.sixty_seven"}:
         return "🎲 Развлечения"
     if root in STATS_COMMANDS or module_name == "fun_slesh.message_and_voice_stats":
-        return "📊 Статистика"
+        return "📊 Топы и итоги"
     if root in REP_COMMANDS or module_name in {"fun_slesh.rep_and_mood", "fun_slesh.rep_roles"}:
         return "👤 Профиль"
     if root in BIRTHDAY_COMMANDS or module_name == "fun_slesh.birthday":
-        return "🎂 Дни рождения"
+        return "👤 Профиль"
     if root in ECON_COMMANDS or module_name == "fun_slesh.daily":
         return "💰 Кошелек и магазин"
     if root in GAME_COMMANDS or module_name == "fun_slesh.games":
@@ -332,10 +297,15 @@ def _category_for_command(qualified_name: str, module_name: str) -> str:
     if root in INFO_COMMANDS or module_name in {"fun_slesh.achievements_engine", "fun_slesh.test_hello"}:
         return "👤 Профиль"
     if root in ACTIVITY_ROOTS:
-        return "📊 Статистика"
+        return "📊 Топы и итоги"
     if root in ADMIN_ROOTS:
         return "🛡️ Админ"
     return "🧩 Прочее"
+
+
+def _is_replaced_by_section_button(category: str, item: dict) -> bool:
+    callback_name = item.get("callback_name")
+    return bool(callback_name and callback_name in SECTION_ACTION_CALLBACKS_BY_CATEGORY.get(category, set()))
 
 
 def _mention_for(qualified_name: str, root_id: int | None) -> str:
@@ -378,12 +348,14 @@ def _walk_leaf_commands(tree_commands: list[app_commands.Command | app_commands.
         root_name = qualified_name.split()[0]
         callback = getattr(cmd, "callback", None)
         module_name = getattr(callback, "__module__", "") if callback else ""
+        callback_name = getattr(callback, "__name__", "") if callback else ""
         description = (cmd.description or "Без описания").strip()
         collected.append(
             {
                 "qualified_name": qualified_name,
                 "root_name": root_name,
                 "module_name": module_name,
+                "callback_name": callback_name,
                 "description": description,
                 "root_id": root_ids.get(root_name),
                 "is_admin": _is_admin_command(cmd, qualified_name),
@@ -416,6 +388,8 @@ async def _build_catalog(bot: commands.Bot, *, admin_only: bool) -> dict[str, li
         if admin_only and category != "🛡️ Админ":
             category = "🛡️ Админ"
         if not admin_only and category in {"💬 Болтовня", "☢️ Активность", "🛡️ Админ", "🧩 Прочее"}:
+            continue
+        if not admin_only and _is_replaced_by_section_button(category, item):
             continue
         catalog.setdefault(category, []).append(item)
 
@@ -456,14 +430,11 @@ def _build_overview_embed(catalog: dict[str, list[dict]], *, admin_only: bool) -
     title = "🛡️ Меню администратора" if admin_only else "🧭 Меню команд"
     emb = discord.Embed(title=title, color=color)
 
-    intro = (
-        "Это живой каталог действий бота. В Discord через `/` видны только `/команды` и `/админ`.\n"
-        "Выбери категорию в выпадающем списке ниже — внутри будут команды, которые постепенно переводятся на кнопки и формы."
-    )
+    intro = "Выбери категорию в выпадающем списке ниже."
     if admin_only:
-        intro += "\n\nСкрыты обычные пользовательские команды: здесь только админские действия."
+        intro += "\nЗдесь собраны админские действия и настройки сервера."
     else:
-        intro += "\n\nАдмин-команды вынесены отдельно в `/админ`, чтобы обычное меню было чище."
+        intro += "\nЗдесь собраны основные действия бота."
     emb.description = intro
 
     lines = []
@@ -475,7 +446,7 @@ def _build_overview_embed(catalog: dict[str, list[dict]], *, admin_only: bool) -
     if len(lines) > 8:
         emb.add_field(name="Ещё", value="\n\n".join(lines[8:]), inline=False)
 
-    emb.set_footer(text=f"Всего пунктов: {total} • Публичные slash-команды сведены к /команды и /админ")
+    emb.set_footer(text=f"Всего пунктов: {total}")
     return emb
 
 
@@ -831,17 +802,124 @@ async def _send_profile_hub(bot: commands.Bot, interaction: discord.Interaction)
     async def achievements(next_interaction: discord.Interaction):
         await _invoke_cog_action(bot, next_interaction, "AchievementsEngine", "ачивки")
 
+    async def accounts(next_interaction: discord.Interaction):
+        await _send_accounts_hub(bot, next_interaction)
+
+    async def birthday(next_interaction: discord.Interaction):
+        await _send_birthday_hub(bot, next_interaction)
+
     await _send_action_picker(
         interaction,
-        title="👤 Моя инфа",
-        description="Личная карточка: история Размера, настроение и ачивки.",
+        title="👤 Мой профиль",
+        description="Единое окно профиля: личная инфа, ДР, настроение, ачивки и привязки игровых аккаунтов.",
         placeholder="Что показать?",
         options=[
+            discord.SelectOption(label="Привязки аккаунтов", value="accounts", emoji="🔗"),
+            discord.SelectOption(label="День рождения", value="birthday", emoji="🎂"),
             discord.SelectOption(label="Моя история Размера", value="history", emoji="📜"),
             discord.SelectOption(label="Указать настроение", value="mood", emoji="🙂"),
             discord.SelectOption(label="Мои ачивки", value="achievements", emoji="🏅"),
         ],
-        callbacks={"history": history, "mood": mood, "achievements": achievements},
+        callbacks={"accounts": accounts, "birthday": birthday, "history": history, "mood": mood, "achievements": achievements},
+    )
+
+
+async def _send_accounts_hub(bot: commands.Bot, interaction: discord.Interaction):
+    async def steam_link(next_interaction: discord.Interaction):
+        await next_interaction.response.send_modal(SingleFieldModal(
+            title="Привязать Steam",
+            label="Ссылка, vanity или SteamID64",
+            placeholder="https://steamcommunity.com/id/...",
+            action=lambda modal_interaction, value: _invoke_cog_action(
+                bot, modal_interaction, "Steam", "steam_привязать", профиль=value
+            ),
+        ))
+
+    async def steam_profile(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Steam", "steam_профиль")
+
+    async def lol_link(next_interaction: discord.Interaction):
+        await next_interaction.response.send_modal(SingleFieldModal(
+            title="Привязать Riot ID",
+            label="Riot ID",
+            placeholder="Name#TAG",
+            action=lambda modal_interaction, value: _invoke_cog_action(
+                bot, modal_interaction, "LolProfile", "link", riot_id=value
+            ),
+        ))
+
+    async def lol_profile(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "LolProfile", "profile")
+
+    async def wwm_nick(next_interaction: discord.Interaction):
+        await next_interaction.response.send_modal(SingleFieldModal(
+            title="Игровой ник WWM",
+            label="Ник в Where Winds Meet",
+            placeholder="Например: ShunVIP",
+            action=lambda modal_interaction, value: _invoke_cog_action(
+                bot, modal_interaction, "WWMGuild", "wwm_ник", игровой_ник=value
+            ),
+        ))
+
+    async def wwm_card(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "WWMGuild", "wwm_карточка")
+
+    await _send_action_picker(
+        interaction,
+        title="🔗 Привязки профиля",
+        description="Здесь собираются внешние аккаунты и игровые профили. Это будущая основа одной карточки пользователя.",
+        placeholder="Что открыть?",
+        options=[
+            discord.SelectOption(label="Привязать Steam", value="steam_link", emoji="🎮"),
+            discord.SelectOption(label="Мой Steam", value="steam_profile", emoji="👤"),
+            discord.SelectOption(label="Привязать Riot ID", value="lol_link", emoji="🧬"),
+            discord.SelectOption(label="Мой LoL", value="lol_profile", emoji="📊"),
+            discord.SelectOption(label="Указать WWM-ник", value="wwm_nick", emoji="🌿"),
+            discord.SelectOption(label="Моя WWM-карточка", value="wwm_card", emoji="🎴"),
+        ],
+        callbacks={
+            "steam_link": steam_link,
+            "steam_profile": steam_profile,
+            "lol_link": lol_link,
+            "lol_profile": lol_profile,
+            "wwm_nick": wwm_nick,
+            "wwm_card": wwm_card,
+        },
+    )
+
+
+async def _send_birthday_hub(bot: commands.Bot, interaction: discord.Interaction):
+    async def set_birthday(next_interaction: discord.Interaction):
+        async def submit_birthday(modal_interaction: discord.Interaction, value: str):
+            await _invoke_cog_action(bot, modal_interaction, "Birthday", "др", дата=value)
+        await next_interaction.response.send_modal(SingleFieldModal(
+            title="Установить день рождения",
+            label="Дата в формате ДД.ММ",
+            placeholder="Например: 20.04",
+            action=submit_birthday,
+        ))
+
+    async def delete_birthday(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Birthday", "д_р")
+
+    async def when_birthday(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Birthday", "когда_др")
+
+    async def all_birthdays(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Birthday", "все_др")
+
+    await _send_action_picker(
+        interaction,
+        title="🎂 День рождения",
+        description="Личная дата рождения и общий список. Админские правки дат переезжают в админ-панель.",
+        placeholder="Что сделать?",
+        options=[
+            discord.SelectOption(label="Установить мой ДР", value="set", emoji="🎂"),
+            discord.SelectOption(label="Удалить мой ДР", value="delete", emoji="🗑️"),
+            discord.SelectOption(label="Когда мой ДР", value="when", emoji="🔎"),
+            discord.SelectOption(label="Все дни рождения", value="all", emoji="📅"),
+        ],
+        callbacks={"set": set_birthday, "delete": delete_birthday, "when": when_birthday, "all": all_birthdays},
     )
 
 
@@ -862,7 +940,7 @@ async def _send_size_picker(bot: commands.Bot, interaction: discord.Interaction)
 
     await _send_action_picker(
         interaction,
-        title="📏 Изменить Размер",
+        title="📏 Размер",
         description="Размер — персональная репутация. Валюта и название зависят от 18+ профиля пользователя.",
         placeholder="Выбери действие",
         options=[
@@ -894,6 +972,83 @@ async def _send_community_info_picker(bot: commands.Bot, interaction: discord.In
             discord.SelectOption(label="Размер-роли", value="roles", emoji="🎖️"),
         ],
         callbacks={"top": top_size, "mood": mood_today, "roles": rep_roles},
+    )
+
+
+async def _send_top_hub(bot: commands.Bot, interaction: discord.Interaction):
+    async def active(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "MessageAndVoiceStats", "топ_актив")
+
+    async def words(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "MessageAndVoiceStats", "топ_слова")
+
+    async def emojis(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "MessageAndVoiceStats", "топ_эмодзи")
+
+    async def voice(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "MessageAndVoiceStats", "voice_top")
+
+    async def balance(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Daily", "топ_баланс")
+
+    async def streaks(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Daily", "топ_серии")
+
+    async def size(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "RepAndMood", "топ_репа")
+
+    async def mood(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "RepAndMood", "настроение_сегодня")
+
+    await _send_action_picker(
+        interaction,
+        title="🏆 Все топы",
+        description="Один вход для рейтингов сервера: активность, голос, валюта, Размер и настроение.",
+        placeholder="Какой топ показать?",
+        options=[
+            discord.SelectOption(label="Активность", value="active", emoji="📊"),
+            discord.SelectOption(label="Слова", value="words", emoji="📝"),
+            discord.SelectOption(label="Эмодзи", value="emojis", emoji="😎"),
+            discord.SelectOption(label="Голос", value="voice", emoji="🎙️"),
+            discord.SelectOption(label="Баланс", value="balance", emoji="💰"),
+            discord.SelectOption(label="Серия дэйлика", value="streaks", emoji="🔥"),
+            discord.SelectOption(label="Размер", value="size", emoji="⭐"),
+            discord.SelectOption(label="Настроение", value="mood", emoji="🙂"),
+        ],
+        callbacks={
+            "active": active,
+            "words": words,
+            "emojis": emojis,
+            "voice": voice,
+            "balance": balance,
+            "streaks": streaks,
+            "size": size,
+            "mood": mood,
+        },
+    )
+
+
+async def _send_summary_hub(bot: commands.Bot, interaction: discord.Interaction):
+    async def day(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "DailySummary", "итог_дня")
+
+    async def week(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "DailySummary", "итог_недели")
+
+    async def month(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "DailySummary", "итог_месяца")
+
+    await _send_action_picker(
+        interaction,
+        title="🗓️ Итоги сервера",
+        description="Сводки остаются пользовательской фичей, а расписание и каналы публикации переезжают в админку.",
+        placeholder="Какой итог показать?",
+        options=[
+            discord.SelectOption(label="Итог дня", value="day", emoji="🌙"),
+            discord.SelectOption(label="Итог недели", value="week", emoji="🗓️"),
+            discord.SelectOption(label="Итог месяца", value="month", emoji="📅"),
+        ],
+        callbacks={"day": day, "week": week, "month": month},
     )
 
 
@@ -1120,6 +1275,164 @@ async def _send_rps_hub(bot: commands.Bot, interaction: discord.Interaction):
     )
 
 
+async def _send_steam_hub(bot: commands.Bot, interaction: discord.Interaction):
+    async def profile(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Steam", "steam_профиль")
+
+    async def link(next_interaction: discord.Interaction):
+        await next_interaction.response.send_modal(SingleFieldModal(
+            title="Привязать Steam",
+            label="Ссылка, vanity или SteamID64",
+            placeholder="https://steamcommunity.com/id/...",
+            action=lambda modal_interaction, value: _invoke_cog_action(
+                bot, modal_interaction, "Steam", "steam_привязать", профиль=value
+            ),
+        ))
+
+    async def random_game(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Steam", "steam_рандом")
+
+    async def challenge(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Steam", "steam_челлендж")
+
+    async def wishlist(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Steam", "steam_вишлист")
+
+    await _send_action_picker(
+        interaction,
+        title="🎮 Steam",
+        description="Профиль, библиотека, wishlist и игровые подсказки. Релизы/канал уведомлений настраиваются в админке.",
+        placeholder="Что открыть?",
+        options=[
+            discord.SelectOption(label="Мой профиль", value="profile", emoji="👤"),
+            discord.SelectOption(label="Привязать Steam", value="link", emoji="🔗"),
+            discord.SelectOption(label="Во что сыграть", value="random", emoji="🎲"),
+            discord.SelectOption(label="Челлендж", value="challenge", emoji="🏁"),
+            discord.SelectOption(label="Вишлист", value="wishlist", emoji="🎁"),
+        ],
+        callbacks={"profile": profile, "link": link, "random": random_game, "challenge": challenge, "wishlist": wishlist},
+    )
+
+
+async def _send_wwm_hub(bot: commands.Bot, interaction: discord.Interaction):
+    async def nick(next_interaction: discord.Interaction):
+        await next_interaction.response.send_modal(SingleFieldModal(
+            title="Игровой ник WWM",
+            label="Ник в Where Winds Meet",
+            placeholder="Например: ShunVIP",
+            action=lambda modal_interaction, value: _invoke_cog_action(
+                bot, modal_interaction, "WWMGuild", "wwm_ник", игровой_ник=value
+            ),
+        ))
+
+    async def card(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "WWMGuild", "wwm_карточка")
+
+    async def roster(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "WWMGuild", "wwm_состав")
+
+    async def search(next_interaction: discord.Interaction):
+        await next_interaction.response.send_modal(SingleFieldModal(
+            title="Where Winds Meet KB",
+            label="Search query",
+            placeholder="English in-game terms work best",
+            action=lambda modal_interaction, value: _invoke_cog_action(
+                bot, modal_interaction, "WWMSearchCog", "wwm_search", query=value
+            ),
+        ))
+
+    async def random_article(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "WWMSearchCog", "wwm_random")
+
+    await _send_action_picker(
+        interaction,
+        title="🌿 Where Winds Meet",
+        description="WWM-ник, карточки гильдии и база знаний. Каналы приветствия и приёмной уходят в админку.",
+        placeholder="Что открыть?",
+        options=[
+            discord.SelectOption(label="Указать ник", value="nick", emoji="📝"),
+            discord.SelectOption(label="Моя карточка", value="card", emoji="🎴"),
+            discord.SelectOption(label="Состав", value="roster", emoji="👥"),
+            discord.SelectOption(label="Поиск по базе", value="search", emoji="🔎"),
+            discord.SelectOption(label="Случайная статья", value="random", emoji="🎲"),
+        ],
+        callbacks={"nick": nick, "card": card, "roster": roster, "search": search, "random": random_article},
+    )
+
+
+async def _send_games_hub(bot: commands.Bot, interaction: discord.Interaction):
+    async def rps(next_interaction: discord.Interaction):
+        await _send_rps_hub(bot, next_interaction)
+
+    async def guess(next_interaction: discord.Interaction):
+        async def submit_guess(modal_interaction: discord.Interaction, value: str):
+            try:
+                number = int(value)
+            except ValueError:
+                await modal_interaction.response.send_message("❌ Число должно быть числом.", ephemeral=True)
+                return
+            await _invoke_cog_action(bot, modal_interaction, "Games", "угадай", число=number, до=10)
+        await next_interaction.response.send_modal(SingleFieldModal(
+            title="Угадай число",
+            label="Твоя попытка",
+            placeholder="Число от 1 до 10",
+            action=submit_guess,
+        ))
+
+    async def blackjack(next_interaction: discord.Interaction):
+        async def submit_bj(modal_interaction: discord.Interaction, value: str):
+            try:
+                bet = int(value)
+            except ValueError:
+                await modal_interaction.response.send_message("❌ Ставка должна быть числом.", ephemeral=True)
+                return
+            await _invoke_cog_action(bot, modal_interaction, "Games", "бж", ставка=bet)
+        await next_interaction.response.send_modal(SingleFieldModal(
+            title="Блэкджек",
+            label="Ставка",
+            placeholder="Минимум 5",
+            action=submit_bj,
+            default="5",
+        ))
+
+    async def hangman(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Games", "виселица")
+
+    async def steam(next_interaction: discord.Interaction):
+        await _send_steam_hub(bot, next_interaction)
+
+    async def lol(next_interaction: discord.Interaction):
+        await _send_lol_game_hub(bot, next_interaction)
+
+    async def wwm(next_interaction: discord.Interaction):
+        await _send_wwm_hub(bot, next_interaction)
+
+    await _send_action_picker(
+        interaction,
+        title="🎮 Игровой хаб",
+        description="Один вход для мини-игр, Steam, LoL и WWM.",
+        placeholder="Выбери игровой раздел",
+        options=[
+            discord.SelectOption(label="КНБ", value="rps", emoji="✊"),
+            discord.SelectOption(label="Угадай число", value="guess", emoji="🔢"),
+            discord.SelectOption(label="Блэкджек", value="blackjack", emoji="🃏"),
+            discord.SelectOption(label="Виселица", value="hangman", emoji="🔤"),
+            discord.SelectOption(label="Steam", value="steam", emoji="🎮"),
+            discord.SelectOption(label="League of Legends", value="lol", emoji="🧬"),
+            discord.SelectOption(label="WWM", value="wwm", emoji="🌿"),
+        ],
+        callbacks={
+            "rps": rps,
+            "guess": guess,
+            "blackjack": blackjack,
+            "hangman": hangman,
+            "steam": steam,
+            "lol": lol,
+            "wwm": wwm,
+        },
+    )
+
+
 async def _run_section_action(bot: commands.Bot, interaction: discord.Interaction, action_id: str):
     action = SECTION_ACTION_BY_ID.get(action_id)
     if not action:
@@ -1148,6 +1461,14 @@ async def _run_section_action(bot: commands.Bot, interaction: discord.Interactio
         await _send_profile_hub(bot, interaction)
         return
 
+    if action.kind == "accounts_hub":
+        await _send_accounts_hub(bot, interaction)
+        return
+
+    if action.kind == "birthday_hub":
+        await _send_birthday_hub(bot, interaction)
+        return
+
     if action.kind == "size_action_select":
         await _send_size_picker(bot, interaction)
         return
@@ -1162,6 +1483,26 @@ async def _run_section_action(bot: commands.Bot, interaction: discord.Interactio
 
     if action.kind == "shop_hub":
         await _send_shop_hub(bot, interaction)
+        return
+
+    if action.kind == "top_hub":
+        await _send_top_hub(bot, interaction)
+        return
+
+    if action.kind == "summary_hub":
+        await _send_summary_hub(bot, interaction)
+        return
+
+    if action.kind == "games_hub":
+        await _send_games_hub(bot, interaction)
+        return
+
+    if action.kind == "steam_hub":
+        await _send_steam_hub(bot, interaction)
+        return
+
+    if action.kind == "wwm_hub":
+        await _send_wwm_hub(bot, interaction)
         return
 
     if action.kind == "game_lol_hub":
@@ -1499,6 +1840,12 @@ class MenuView(discord.ui.View):
         self.stop()
 
 
+class AdminPanelLinkView(discord.ui.View):
+    def __init__(self, url: str):
+        super().__init__(timeout=300)
+        self.add_item(discord.ui.Button(label="Открыть админ-панель", style=discord.ButtonStyle.link, url=url))
+
+
 class Menu(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1519,14 +1866,27 @@ class Menu(commands.Cog):
     @app_commands.command(name="админ", description="(Админ) Живой каталог административных команд")
     @app_commands.checks.has_permissions(administrator=True)
     async def админ(self, interaction: discord.Interaction):
-        catalog = await _build_catalog(self.bot, admin_only=True)
-        if not catalog:
-            await interaction.response.send_message("❌ Не удалось собрать каталог админ-команд.", ephemeral=True)
-            return
-        first = "__overview__"
+        admin_url = get_web_admin_url()
+        embed = discord.Embed(
+            title="🛡️ Админ-панель",
+            description=(
+                "Админские настройки открываются в отдельной панели/app.\n"
+                "Туда уходят каналы, ДР админов, токсичность, болтовня, автопосты, модели и maintenance."
+            ),
+            color=discord.Color.dark_gold(),
+        )
+        embed.add_field(name="Адрес панели", value=f"`{admin_url}`", inline=False)
+        embed.add_field(
+            name="Статус",
+            value=(
+                "Панель включена." if WEB_ADMIN_ENABLED
+                else "Панель выключена в env. Включи `WEB_ADMIN_ENABLED=true` на машине, где работает бот."
+            ),
+            inline=False,
+        )
         await interaction.response.send_message(
-            embed=_build_embed(first, catalog, admin_only=True),
-            view=MenuView(self.bot, first, catalog, admin_only=True),
+            embed=embed,
+            view=AdminPanelLinkView(admin_url),
             ephemeral=True,
         )
 

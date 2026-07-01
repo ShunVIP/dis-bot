@@ -11,14 +11,24 @@
   /войс_роли_статус — посмотреть текущие авто-роли
 """
 
-import os, sqlite3
+import sqlite3
 from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
 from discord import app_commands
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+from core.paths import SOCIAL_DB
+from core.settings_store import (
+    clear_feature_channel,
+    get_feature_policy,
+    has_feature_setting,
+    set_feature_channel,
+    set_feature_enabled,
+)
+
+DB_PATH = SOCIAL_DB
+FEATURE_VOICE_ROLES = "voice_roles"
 UTC     = timezone.utc
 
 
@@ -45,21 +55,48 @@ def _ensure_tables():
         """)
 
 
-def _is_enabled(guild_id: int) -> bool:
+def _legacy_is_enabled(guild_id: int) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT enabled FROM voice_roles_config WHERE guild_id=?", (guild_id,)
         ).fetchone()
-    return row[0] if row else True  # по умолчанию включено
+    return bool(row[0]) if row else True  # по умолчанию включено
+
+
+def _is_enabled(guild_id: int) -> bool:
+    policy = get_feature_policy(guild_id, FEATURE_VOICE_ROLES)
+    return policy.enabled if has_feature_setting(guild_id, FEATURE_VOICE_ROLES) else _legacy_is_enabled(guild_id)
+
+
+def _legacy_excluded_channel_ids(guild_id: int) -> set[int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT channel_id FROM voice_roles_excluded_channels WHERE guild_id=?",
+            (guild_id,),
+        ).fetchall()
+    return {int(row[0]) for row in rows}
+
+
+def _excluded_channel_ids(guild_id: int) -> set[int]:
+    policy = get_feature_policy(guild_id, FEATURE_VOICE_ROLES)
+    return _legacy_excluded_channel_ids(guild_id) | set(policy.excluded_channel_ids)
+
+
+def _excluded_rows(guild_id: int) -> list[tuple[int, str]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT channel_id, reason FROM voice_roles_excluded_channels WHERE guild_id=? ORDER BY channel_id",
+            (guild_id,),
+        ).fetchall()
+    reasons = {int(channel_id): str(reason or "") for channel_id, reason in rows}
+    policy = get_feature_policy(guild_id, FEATURE_VOICE_ROLES)
+    for channel_id in policy.excluded_channel_ids:
+        reasons.setdefault(int(channel_id), "feature policy")
+    return sorted(reasons.items())
 
 
 def _is_excluded(guild_id: int, channel_id: int) -> bool:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT 1 FROM voice_roles_excluded_channels WHERE guild_id=? AND channel_id=?",
-            (guild_id, channel_id),
-        ).fetchone()
-    return bool(row)
+    return channel_id in _excluded_channel_ids(guild_id)
 
 
 async def _get_or_create_role(guild: discord.Guild, channel: discord.VoiceChannel) -> discord.Role | None:
@@ -194,6 +231,7 @@ class VoiceRoles(commands.Cog):
                 " ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
                 (interaction.guild.id, int(включить))
             )
+        set_feature_enabled(interaction.guild.id, FEATURE_VOICE_ROLES, включить)
         status = "✅ Включены" if включить else "⛔ Выключены"
         await interaction.response.send_message(
             f"{status} авто-роли по голосовым каналам.", ephemeral=True)
@@ -208,10 +246,7 @@ class VoiceRoles(commands.Cog):
                 "SELECT channel_id, role_id FROM voice_auto_roles WHERE guild_id=?",
                 (interaction.guild.id,)
             ).fetchall()
-            excluded = conn.execute(
-                "SELECT channel_id, reason FROM voice_roles_excluded_channels WHERE guild_id=? ORDER BY channel_id",
-                (interaction.guild.id,),
-            ).fetchall()
+        excluded = _excluded_rows(interaction.guild.id)
 
         emb = discord.Embed(
             title="🎙️ Авто-роли голосовых каналов",
@@ -265,6 +300,7 @@ class VoiceRoles(commands.Cog):
                 (interaction.guild.id, канал.id, причина.strip()[:120]),
             )
             conn.commit()
+        set_feature_channel(interaction.guild.id, FEATURE_VOICE_ROLES, канал.id, "exclude", причина.strip()[:120])
         await interaction.response.send_message(f"✅ {канал.mention} исключен из авто-ролей.", ephemeral=True)
 
     @voice_roles_group.command(name="вернуть",
@@ -278,6 +314,7 @@ class VoiceRoles(commands.Cog):
                 (interaction.guild.id, канал.id),
             )
             conn.commit()
+        clear_feature_channel(interaction.guild.id, FEATURE_VOICE_ROLES, канал.id, "exclude")
         await interaction.response.send_message(f"✅ {канал.mention} снова участвует в авто-ролях.", ephemeral=True)
 
 

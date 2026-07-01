@@ -24,7 +24,11 @@ from discord.ext import commands
 from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+from core.paths import SOCIAL_DB
+from core.settings_store import get_feature_policy, set_feature_channel, set_feature_payload
+
+DB_PATH = SOCIAL_DB
+FEATURE_STEAM = "steam"
 UTC     = timezone.utc
 MSK     = ZoneInfo("Europe/Moscow")
 
@@ -265,16 +269,38 @@ def _mark_auto_log(user_id: int, kind: str, period_key: str, appid: int | None =
         conn.commit()
 
 
+def _steam_notify_configs(bot: commands.Bot) -> list[tuple[int, int, int]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        legacy_rows = conn.execute(
+            "SELECT guild_id, notify_channel, discount_min_pct FROM steam_config"
+            " WHERE notify_channel IS NOT NULL"
+        ).fetchall()
+
+    by_guild: dict[int, tuple[int, int, int]] = {
+        int(guild_id): (int(guild_id), int(channel_id), int(discount_min_pct))
+        for guild_id, channel_id, discount_min_pct in legacy_rows
+        if channel_id
+    }
+    for guild in bot.guilds:
+        policy = get_feature_policy(guild.id, FEATURE_STEAM)
+        if not policy.output_channel_id:
+            continue
+        payload = policy.extra or {}
+        legacy_min_pct = by_guild.get(guild.id, (guild.id, int(policy.output_channel_id), 50))[2]
+        try:
+            min_pct = int(payload.get("discount_min_pct", legacy_min_pct))
+        except (TypeError, ValueError):
+            min_pct = legacy_min_pct
+        by_guild[guild.id] = (guild.id, int(policy.output_channel_id), max(0, min(100, min_pct)))
+    return list(by_guild.values())
+
+
 def _public_channel_for_user(bot: commands.Bot, user_id: int, preferred_channel_id: int | None = None) -> discord.TextChannel | None:
     if preferred_channel_id:
         channel = bot.get_channel(preferred_channel_id)
         if isinstance(channel, discord.TextChannel):
             return channel
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT guild_id, notify_channel FROM steam_config WHERE notify_channel IS NOT NULL"
-        ).fetchall()
-    for guild_id, channel_id in rows:
+    for guild_id, channel_id, _ in _steam_notify_configs(bot):
         guild = bot.get_guild(int(guild_id))
         if guild and guild.get_member(int(user_id)):
             channel = bot.get_channel(int(channel_id))
@@ -368,10 +394,7 @@ async def _check_releases(bot: commands.Bot):
 
     with sqlite3.connect(DB_PATH) as conn:
         profiles  = conn.execute("SELECT user_id, steam_id FROM steam_profiles").fetchall()
-        guild_cfgs = conn.execute(
-            "SELECT guild_id, notify_channel, discount_min_pct FROM steam_config"
-            " WHERE notify_channel IS NOT NULL"
-        ).fetchall()
+    guild_cfgs = _steam_notify_configs(bot)
 
     if not guild_cfgs:
         return
@@ -488,12 +511,7 @@ async def _send_daily_game_prompts(bot: commands.Bot):
             WHERE COALESCE(s.random_enabled, 1)=1 OR COALESCE(s.challenge_enabled, 1)=1
             """
         ).fetchall()
-        fallback_channels = {
-            int(guild_id): channel_id
-            for guild_id, channel_id in conn.execute(
-                "SELECT guild_id, notify_channel FROM steam_config WHERE notify_channel IS NOT NULL"
-            ).fetchall()
-        }
+        fallback_channels = {guild_id: channel_id for guild_id, channel_id, _ in _steam_notify_configs(bot)}
 
     fallback_channel_id = next(iter(fallback_channels.values()), None)
     for user_id, steam_id, random_enabled, challenge_enabled in rows:
@@ -546,11 +564,7 @@ async def _send_weekly_backlog_prompts(bot: commands.Bot):
             WHERE COALESCE(s.backlog_enabled, 1)=1
             """
         ).fetchall()
-        fallback_channels = [
-            row[0] for row in conn.execute(
-                "SELECT notify_channel FROM steam_config WHERE notify_channel IS NOT NULL"
-            ).fetchall()
-        ]
+        fallback_channels = [channel_id for _, channel_id, _ in _steam_notify_configs(bot)]
     fallback_channel_id = fallback_channels[0] if fallback_channels else None
 
     for user_id, steam_id, backlog_enabled, tone in rows:
@@ -1018,6 +1032,8 @@ class Steam(commands.Cog):
                 " discount_min_pct=excluded.discount_min_pct",
                 (interaction.guild.id, канал.id, минимальная_скидка)
             )
+        set_feature_channel(interaction.guild.id, FEATURE_STEAM, канал.id, "output", "Discord command")
+        set_feature_payload(interaction.guild.id, FEATURE_STEAM, {"discount_min_pct": int(минимальная_скидка)})
         await interaction.response.send_message(
             f"✅ Уведомления о релизах и скидках ≥ **{минимальная_скидка}%** "
             f"будут постить в {канал.mention}.",

@@ -80,7 +80,7 @@ class LolProfile(commands.Cog):
     ):
         if not RIOT_API_KEY:
             await interaction.response.send_message(
-                "Riot API key не настроен. Добавь `RIOT_API_KEY` в `KGTD.env`.",
+                "Riot API key не настроен. Добавь строку `RIOT_API_KEY=твой_ключ` в `KGTD.env` и перезапусти бота.",
                 ephemeral=True,
             )
             return
@@ -115,7 +115,7 @@ class LolProfile(commands.Cog):
     async def refresh(self, interaction: discord.Interaction, матчей: app_commands.Range[int, 5, 50] = 20):
         if not RIOT_API_KEY:
             await interaction.response.send_message(
-                "Riot API key не настроен. Добавь `RIOT_API_KEY` в `KGTD.env`.",
+                "Riot API key не настроен. Добавь строку `RIOT_API_KEY=твой_ключ` в `KGTD.env` и перезапусти бота.",
                 ephemeral=True,
             )
             return

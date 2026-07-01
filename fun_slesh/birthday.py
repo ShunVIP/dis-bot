@@ -3,9 +3,12 @@ from discord.ext import commands
 from discord import app_commands
 import sqlite3
 from datetime import datetime
-import os
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "birthdays.db"))
+from core.paths import BIRTHDAYS_DB
+from core.settings_store import get_feature_policy, set_feature_channel
+
+DB_PATH = BIRTHDAYS_DB
+FEATURE_BIRTHDAY = "birthday"
 
 def _ensure_table():
     """Гарантируем наличие таблицы дней рождения (на случай чистой установки)."""
@@ -27,6 +30,9 @@ def _ensure_table():
 
 
 def _birthday_channel_id(guild_id: int) -> int | None:
+    policy = get_feature_policy(guild_id, FEATURE_BIRTHDAY)
+    if policy.output_channel_id:
+        return int(policy.output_channel_id)
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute("SELECT channel_id FROM birthday_config WHERE guild_id=?", (guild_id,)).fetchone()
     return int(row[0]) if row and row[0] else None
@@ -92,6 +98,7 @@ class Birthday(commands.Cog):
                 (interaction.guild.id, канал.id),
             )
             conn.commit()
+        set_feature_channel(interaction.guild.id, FEATURE_BIRTHDAY, канал.id, "output", "Discord command")
         await interaction.response.send_message(f"✅ Поздравления с ДР будут отправляться в {канал.mention}.", ephemeral=True)
 
     @app_commands.command(name="д-р_ад", description="(Админ) Удалить день рождения выбранного пользователя")

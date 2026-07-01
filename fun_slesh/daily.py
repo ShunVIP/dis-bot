@@ -18,7 +18,7 @@
   /налог_статус    — текущие настройки налога
 """
 
-import os, sqlite3, json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -27,6 +27,7 @@ from discord.ext import commands
 from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from core.paths import SOCIAL_DB
 from core.economy import add_coins, get_balance
 from core.economy_profile import (
     GENDER_FEMALE,
@@ -38,13 +39,15 @@ from core.economy_profile import (
     get_economy_profile,
     set_economy_profile,
 )
+from core.settings_store import get_feature_payload, set_feature_payload
 from utils.events_bus import emit
 
 MSK  = ZoneInfo("Europe/Moscow")
 UTC  = timezone.utc
 
-DB_PATH  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+DB_PATH  = SOCIAL_DB
 ECO_PATH = DB_PATH  # всё в одном файле
+FEATURE_ECONOMY = "economy"
 
 scheduler = AsyncIOScheduler(timezone=MSK)
 
@@ -103,19 +106,41 @@ def _compute_reward(streak: int) -> int:
     series = 5 * min(max(streak - 1, 0), 7)
     return base + series + _milestone_bonus(streak)
 
-def _tax_config() -> dict:
+def _tax_config(guild_id: int | None = None) -> dict:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT enabled, rate_pct, interval_h, last_run FROM tax_config WHERE id=1"
         ).fetchone()
     if not row:
-        return {"enabled": 0, "rate_pct": 10, "interval_h": 168, "last_run": ""}
-    return {"enabled": row[0], "rate_pct": row[1], "interval_h": row[2], "last_run": row[3]}
+        cfg = {"enabled": 0, "rate_pct": 10, "interval_h": 168, "last_run": ""}
+    else:
+        cfg = {"enabled": row[0], "rate_pct": row[1], "interval_h": row[2], "last_run": row[3]}
+    if guild_id is None:
+        return cfg
+    payload = get_feature_payload(guild_id, FEATURE_ECONOMY)
+    if "tax_enabled" in payload:
+        cfg["enabled"] = int(bool(payload["tax_enabled"]))
+    if "tax_rate_pct" in payload:
+        try:
+            cfg["rate_pct"] = max(1, min(50, int(payload["tax_rate_pct"])))
+        except (TypeError, ValueError):
+            pass
+    if "tax_interval_h" in payload:
+        try:
+            cfg["interval_h"] = max(1, min(720, int(payload["tax_interval_h"])))
+        except (TypeError, ValueError):
+            pass
+    return cfg
+
+
+def _primary_guild_id(bot: commands.Bot) -> int | None:
+    guild = next(iter(bot.guilds), None)
+    return int(guild.id) if guild else None
 
 
 # ── Налог (запускается планировщиком) ─────────────────────────────────────────
 async def _run_tax(bot: commands.Bot):
-    cfg = _tax_config()
+    cfg = _tax_config(_primary_guild_id(bot))
     if not cfg["enabled"]:
         return
 
@@ -146,7 +171,7 @@ class Daily(commands.Cog):
         self._start_scheduler()
 
     def _start_scheduler(self):
-        cfg = _tax_config()
+        cfg = _tax_config(_primary_guild_id(self.bot))
         if cfg["enabled"]:
             self._reschedule_tax(cfg["interval_h"])
         if not scheduler.running:
@@ -399,6 +424,15 @@ class Daily(commands.Cog):
                 "UPDATE tax_config SET enabled=?, rate_pct=?, interval_h=? WHERE id=1",
                 (int(включить), ставка, каждые_часов)
             )
+        set_feature_payload(
+            interaction.guild.id,
+            FEATURE_ECONOMY,
+            {
+                "tax_enabled": bool(включить),
+                "tax_rate_pct": int(ставка),
+                "tax_interval_h": int(каждые_часов),
+            },
+        )
 
         if включить:
             self._reschedule_tax(каждые_часов)
@@ -416,7 +450,7 @@ class Daily(commands.Cog):
     # ── /налог_статус ─────────────────────────────────────────────────────────
     @app_commands.command(name="налог_статус", description="Текущие настройки налога")
     async def налог_статус(self, interaction: discord.Interaction):
-        cfg = _tax_config()
+        cfg = _tax_config(interaction.guild.id if interaction.guild else None)
         enabled = "✅ Включён" if cfg["enabled"] else "⛔ Выключен"
         last    = cfg["last_run"] or "ещё не запускался"
         if cfg["last_run"]:

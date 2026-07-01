@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """WWM guild onboarding and member identification."""
 
-import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -10,7 +9,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+from core.paths import SOCIAL_DB
+from core.settings_store import get_feature_policy, set_feature_channel, set_feature_payload
+
+DB_PATH = SOCIAL_DB
+FEATURE_WWM_GUILD = "wwm_guild"
 UTC = timezone.utc
 NICK_RE = re.compile(r"^[\wА-Яа-яЁё .'\-\[\]]{2,32}$", re.UNICODE)
 
@@ -52,7 +55,7 @@ def _ensure_tables():
         conn.commit()
 
 
-def _config(guild_id: int) -> tuple[int | None, int | None, bool, str]:
+def _legacy_config(guild_id: int) -> tuple[int | None, int | None, bool, str]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("INSERT OR IGNORE INTO wwm_config(guild_id) VALUES(?)", (guild_id,))
         row = conn.execute(
@@ -61,6 +64,24 @@ def _config(guild_id: int) -> tuple[int | None, int | None, bool, str]:
         ).fetchone()
         conn.commit()
     return (row[0], row[1], bool(row[2]), row[3] or "{game_nick}")
+
+
+def _config(guild_id: int) -> tuple[int | None, int | None, bool, str]:
+    welcome_channel_id, reception_channel_id, auto_nickname, nickname_template = _legacy_config(guild_id)
+    policy = get_feature_policy(guild_id, FEATURE_WWM_GUILD)
+    payload = policy.extra or {}
+
+    if policy.output_channel_id:
+        welcome_channel_id = int(policy.output_channel_id)
+    try:
+        reception_channel_id = int(payload.get("reception_channel_id") or reception_channel_id or 0) or None
+    except (TypeError, ValueError):
+        pass
+    if "auto_nickname" in payload:
+        auto_nickname = bool(payload.get("auto_nickname"))
+    if payload.get("nickname_template"):
+        nickname_template = str(payload["nickname_template"])[:80]
+    return welcome_channel_id, reception_channel_id, auto_nickname, nickname_template or "{game_nick}"
 
 
 def _steam_id(user_id: int) -> str | None:
@@ -401,6 +422,7 @@ class WWMGuild(commands.Cog):
                 (interaction.guild.id, канал.id),
             )
             conn.commit()
+        set_feature_channel(interaction.guild.id, FEATURE_WWM_GUILD, канал.id, "output", "Discord command")
         await interaction.response.send_message(f"✅ WWM-приветствие будет отправляться в {канал.mention}.", ephemeral=True)
 
     @wwm_group.command(name="приемная", description="(Админ) Настроить канал обращений не-WWM участников")
@@ -416,6 +438,7 @@ class WWMGuild(commands.Cog):
                 (interaction.guild.id, канал.id),
             )
             conn.commit()
+        set_feature_payload(interaction.guild.id, FEATURE_WWM_GUILD, {"reception_channel_id": канал.id})
         await interaction.response.send_message(f"✅ Обращения не-WWM участников будут уходить в {канал.mention}.", ephemeral=True)
 
     @wwm_group.command(name="ники", description="(Админ) Настроить авто-изменение серверного ника")
@@ -441,6 +464,11 @@ class WWMGuild(commands.Cog):
                 (interaction.guild.id, int(включить), template),
             )
             conn.commit()
+        set_feature_payload(
+            interaction.guild.id,
+            FEATURE_WWM_GUILD,
+            {"auto_nickname": bool(включить), "nickname_template": template},
+        )
         await interaction.response.send_message(
             f"✅ Авто-ники: {'вкл' if включить else 'выкл'} · шаблон `{template}`",
             ephemeral=True,

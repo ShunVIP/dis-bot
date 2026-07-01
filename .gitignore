@@ -37,6 +37,7 @@ Thumbs.db
 # --- Builds / temp ---
 dist/
 dist_build/
+dist_build_*/
 build/
 *.zip
 .tar.gz

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from html import escape
 import ipaddress
 
@@ -22,6 +23,13 @@ from core.runtime_policy import (
     is_remote_model_inference_enabled,
     policy_summary,
     set_remote_model_inference_enabled,
+)
+from core.settings_store import (
+    clear_feature_channel,
+    get_feature_policy,
+    set_feature_channel,
+    set_feature_enabled,
+    set_feature_payload,
 )
 
 
@@ -85,6 +93,217 @@ def _status_chip(ok: bool, on_text: str = "ON", off_text: str = "OFF") -> str:
     )
 
 
+ADMIN_AREAS = (
+    (
+        "Настройки сервера",
+        "Каналы, автопосты, WWM, Steam releases, voice roles, болтовня и токсичность.",
+        "Move from Discord admin commands",
+    ),
+    (
+        "Экономика и роли",
+        "Налоги, магазин ролей, награды активности, Размер-роли и временные роли.",
+        "Move from Discord admin commands",
+    ),
+    (
+        "Модели и пародии",
+        "Markov, Persona, GPT, фильтры, список пользователей, статус моделей.",
+        "Admin/owner only",
+    ),
+    (
+        "Maintenance",
+        "Сбор сообщений, сброс чекпоинтов, индексация, профилактика и ручные проверки.",
+        "Requires confirmation",
+    ),
+    (
+        "Fallback platform",
+        "Пользователи, комнаты, чат, voice rooms, screen share и модерация сайта/app.",
+        "User app integration",
+    ),
+)
+
+FEATURE_REGISTRY = (
+    {
+        "id": "daily_summary",
+        "title": "Итоги сервера",
+        "group": "Настройки сервера",
+        "description": "Автопостинг итогов дня, недели и месяца.",
+        "channel_modes": ("output",),
+        "payload_hint": '{"schedule": "23:59 MSK"}',
+    },
+    {
+        "id": "birthday",
+        "title": "Дни рождения",
+        "group": "Настройки сервера",
+        "description": "Поздравления, канал поздравлений и пользовательские даты.",
+        "channel_modes": ("output",),
+        "payload_hint": '{"timezone": "Europe/Moscow"}',
+    },
+    {
+        "id": "wwm_guild",
+        "title": "WWM гильдия",
+        "group": "Настройки сервера",
+        "description": "Ники WWM, карточки, приветствие и приемная.",
+        "channel_modes": ("output", "allow", "exclude"),
+        "payload_hint": '{"reception_channel_id": 123, "auto_nickname": true, "nickname_template": "{game_nick}"}',
+    },
+    {
+        "id": "steam",
+        "title": "Steam",
+        "group": "Настройки сервера",
+        "description": "Steam-профили, вишлисты, релизы и уведомления.",
+        "channel_modes": ("output",),
+        "payload_hint": '{"discount_min_pct": 50}',
+    },
+    {
+        "id": "toxicity",
+        "title": "Токсичность",
+        "group": "Модерация",
+        "description": "Детектор токсичности, пороги и исключения каналов.",
+        "channel_modes": ("allow", "exclude"),
+        "payload_hint": '{"threshold": 2}',
+    },
+    {
+        "id": "social_chat",
+        "title": "Болтовня",
+        "group": "Модерация",
+        "description": "Случайные ответы бота, шанс ответа и режимы.",
+        "channel_modes": ("allow", "exclude"),
+        "payload_hint": '{"chance_percent": 12, "mention_only": false}',
+    },
+    {
+        "id": "voice_roles",
+        "title": "Voice roles",
+        "group": "Экономика и роли",
+        "description": "Авто-роли по голосовым каналам и исключения.",
+        "channel_modes": ("allow", "exclude"),
+        "payload_hint": '{"enabled_roles": []}',
+    },
+    {
+        "id": "economy",
+        "title": "Экономика",
+        "group": "Экономика и роли",
+        "description": "Налоги, магазин, награды и персональная валюта.",
+        "channel_modes": (),
+        "payload_hint": '{"tax_enabled": false, "tax_rate_pct": 10, "tax_interval_h": 168}',
+    },
+    {
+        "id": "parody_training",
+        "title": "Пародии и модели",
+        "group": "Модели и пародии",
+        "description": "Markov, Persona, GPT, фильтры и безопасное обучение.",
+        "channel_modes": ("allow", "exclude"),
+        "payload_hint": '{"allow_gpt_training": false}',
+    },
+    {
+        "id": "maintenance",
+        "title": "Maintenance",
+        "group": "Maintenance",
+        "description": "Сбор сообщений, индексация, профилактика и ручные проверки.",
+        "channel_modes": (),
+        "payload_hint": '{"requires_confirmation": true}',
+    },
+    {
+        "id": "fallback_platform",
+        "title": "Fallback platform",
+        "group": "Fallback platform",
+        "description": "Сайт/app, чат, комнаты, voice rooms и screen share.",
+        "channel_modes": (),
+        "payload_hint": '{"fallback_mode": false}',
+    },
+)
+
+FEATURES_BY_ID = {item["id"]: item for item in FEATURE_REGISTRY}
+
+
+def _render_admin_area_registry() -> str:
+    items = []
+    for title, description, status in ADMIN_AREAS:
+        items.append(
+            "<div class=\"area\">"
+            f"<div class=\"area-title\">{escape(title)}</div>"
+            f"<div class=\"area-desc\">{escape(description)}</div>"
+            f"<div class=\"area-status\">{escape(status)}</div>"
+            "</div>"
+        )
+    return "\n".join(items)
+
+
+def _admin_guild_id(bot) -> int:
+    guilds = list(getattr(bot, "guilds", []) or [])
+    return int(guilds[0].id) if guilds else 0
+
+
+def _channel_list(values: tuple[int, ...] | list[int]) -> str:
+    return ", ".join(str(item) for item in values) if values else "-"
+
+
+def _render_mode_form(feature_id: str, mode: str, current: str) -> str:
+    labels = {
+        "output": "Output channel",
+        "allow": "Allow channel",
+        "exclude": "Exclude channel",
+    }
+    return f"""
+        <form method="post" action="/features/{escape(feature_id)}/channel" class="inline-form">
+          <input type="hidden" name="mode" value="{escape(mode)}">
+          <input name="channel_id" inputmode="numeric" placeholder="{escape(labels.get(mode, mode))}">
+          <input name="reason" placeholder="Комментарий">
+          <button type="submit">Добавить</button>
+          <button type="submit" formaction="/features/{escape(feature_id)}/channel/delete" class="button-secondary">Удалить</button>
+          <span class="muted">{escape(current)}</span>
+        </form>
+    """
+
+
+def _render_feature_registry(guild_id: int = 0) -> str:
+    cards = []
+    for feature in FEATURE_REGISTRY:
+        feature_id = feature["id"]
+        policy = get_feature_policy(guild_id, feature_id)
+        output = str(policy.output_channel_id) if policy.output_channel_id else "-"
+        allow = _channel_list(policy.allowed_channel_ids)
+        exclude = _channel_list(policy.excluded_channel_ids)
+        modes = []
+        for mode in feature["channel_modes"]:
+            current = {"output": output, "allow": allow, "exclude": exclude}.get(mode, "-")
+            modes.append(_render_mode_form(feature_id, mode, current))
+        payload = escape(json.dumps(policy.extra or {}, ensure_ascii=False, indent=2))
+        cards.append(
+            f"""
+            <div class="feature-card">
+              <div class="feature-head">
+                <div>
+                  <div class="area-title">{escape(feature["title"])}</div>
+                  <div class="area-desc">{escape(feature["description"])}</div>
+                </div>
+                <form method="post" action="/features/{escape(feature_id)}/enabled">
+                  <input type="hidden" name="enabled" value="{'0' if policy.enabled else '1'}">
+                  <button class="{'button-secondary' if policy.enabled else ''}" type="submit">{'Выключить' if policy.enabled else 'Включить'}</button>
+                </form>
+              </div>
+              <div class="feature-meta">
+                <span>{_status_chip(policy.enabled, "Enabled", "Disabled")}</span>
+                <span class="area-status">{escape(feature["group"])}</span>
+              </div>
+              <div class="channel-grid">
+                <div><b>Output</b><br><code>{escape(output)}</code></div>
+                <div><b>Allow</b><br><code>{escape(allow)}</code></div>
+                <div><b>Exclude</b><br><code>{escape(exclude)}</code></div>
+              </div>
+              {''.join(modes) if modes else '<p class="muted">У этой зоны пока нет channel policy.</p>'}
+              <details>
+                <summary>Payload</summary>
+                <form method="post" action="/features/{escape(feature_id)}/payload" class="payload-form">
+                  <textarea name="payload" placeholder="{escape(feature["payload_hint"])}">{payload}</textarea>
+                  <button type="submit">Сохранить JSON</button>
+                </form>
+              </details>
+            </div>
+            """
+        )
+    return "\n".join(cards)
+
+
 def _render_page(bot, request: web.Request | None = None, message: str = "") -> str:
     summary = policy_summary()
     if request is not None:
@@ -101,6 +320,9 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     )
     action = "disable" if is_remote_model_inference_enabled() else "enable"
     action_label = "Отключить удалённую тяжёлую модель" if action == "disable" else "Включить удалённую тяжёлую модель"
+    admin_area_registry = _render_admin_area_registry()
+    active_guild_id = _admin_guild_id(bot)
+    feature_registry = _render_feature_registry(active_guild_id)
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -118,6 +340,8 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     .value {{ font-size:16px; font-weight:700; }}
     .help {{ color:#475569; line-height:1.5; }}
     button {{ border:0; border-radius:12px; padding:12px 16px; font-size:15px; font-weight:700; cursor:pointer; background:#1d4ed8; color:#fff; }}
+    input, textarea {{ border:1px solid #cbd5e1; border-radius:10px; padding:10px 12px; font:inherit; }}
+    textarea {{ min-height:88px; width:100%; box-sizing:border-box; font-family:Consolas, monospace; }}
     .button-secondary {{ background:#475569; }}
     .actions {{ display:flex; gap:12px; flex-wrap:wrap; }}
     .actions form {{ margin:0; }}
@@ -125,6 +349,18 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     .muted {{ color:#64748b; }}
     code {{ background:#eef2ff; padding:2px 6px; border-radius:8px; }}
     ul {{ margin:0; padding-left:20px; color:#475569; line-height:1.7; }}
+    .area {{ border:1px solid #e2e8f0; border-radius:14px; padding:14px; background:#f8fafc; }}
+    .area-title {{ font-weight:800; margin-bottom:6px; }}
+    .area-desc {{ color:#475569; line-height:1.45; }}
+    .area-status {{ display:inline-block; margin-top:10px; padding:4px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:12px; font-weight:700; }}
+    .feature-stack {{ display:grid; gap:14px; }}
+    .feature-card {{ border:1px solid #e2e8f0; border-radius:14px; padding:16px; background:#fff; }}
+    .feature-head {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }}
+    .feature-meta {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }}
+    .channel-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin:14px 0; }}
+    .inline-form {{ display:grid; grid-template-columns:minmax(120px,1fr) minmax(120px,1fr) auto auto auto; gap:8px; align-items:center; margin:8px 0; }}
+    .payload-form {{ display:grid; gap:10px; margin-top:10px; }}
+    @media (max-width:720px) {{ .feature-head, .inline-form {{ display:grid; grid-template-columns:1fr; }} }}
   </style>
 </head>
 <body>
@@ -138,6 +374,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
         <div class="item"><div class="label">Хост</div><div class="value">{escape(summary["hostname"])}</div></div>
         <div class="item"><div class="label">Режим сервера</div><div class="value">{_status_chip(summary["is_server_runtime"], "VPS", "Local")}</div></div>
         <div class="item"><div class="label">Удалённый bridge</div><div class="value">{_status_chip(remote_configured, "Configured", "Not set")}</div></div>
+        <div class="item"><div class="label">Guild settings</div><div class="value"><code>{active_guild_id or "-"}</code></div></div>
         <div class="item"><div class="label">Твой IP</div><div class="value"><code>{client_ip or "-"}</code></div></div>
         <div class="item"><div class="label">Разрешённые IP</div><div class="value"><code>{allowed_ips}</code></div></div>
       </div>
@@ -153,6 +390,22 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
         <div class="item"><div class="label">Ежедневный сбор</div><div class="value">{_status_chip(is_daily_markov_collection_enabled(), "Enabled", "Disabled")}</div></div>
       </div>
       <p class="help">По умолчанию серверу запрещено GPT-дообучение и полная профилактика. Это защищает VPS от перегруза и случайного запуска тяжёлых задач из Discord. Безопасный цикл Markov можно включить отдельно на время {DAILY_MARKOV_RETRAIN_HOUR:02d}:{DAILY_MARKOV_RETRAIN_MINUTE:02d} МСК.</p>
+    </div>
+
+    <div class="card">
+      <h2>Куда переезжают админские функции</h2>
+      <p class="help">Пользовательский Discord-бот должен оставаться чистым. Эти зоны постепенно становятся полноценными разделами админ-панели/app, а не пунктами обычного меню.</p>
+      <div class="grid">
+        {admin_area_registry}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Feature settings</h2>
+      <p class="help">Первый рабочий слой будущей админки: здесь хранятся включение фич, каналы вывода, allow/exclude-каналы и JSON payload в общей таблице <code>core.settings_store</code>. Сейчас применяется к guild <code>{active_guild_id or "-"}</code>.</p>
+      <div class="feature-stack">
+        {feature_registry}
+      </div>
     </div>
 
     <div class="card">
@@ -196,8 +449,8 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     <div class="card">
       <h2>Быстрые подсказки</h2>
       <ul>
-        <li>Если нужен локальный training: используй <code>ViPikBotControl.exe</code> и кнопку обучения.</li>
-        <li>Если нужен Git update на ПК: используй <code>ViPikBotControl.exe</code> и кнопку <code>Git pull</code>.</li>
+        <li>Если нужен локальный training: запусти <code>scripts/bot_control_gui.py</code> и кнопку обучения.</li>
+        <li>Если нужен Git update на ПК: используй локальный GUI и кнопку <code>Git pull</code>.</li>
         <li>Если нужно включить тяжёлую GPT с ПК для VPS: сначала включи bridge в локальном GUI, потом используй переключатель на этой панели.</li>
       </ul>
     </div>
@@ -254,6 +507,89 @@ async def _remote_models(request: web.Request) -> web.Response:
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
+def _feature_or_404(feature_id: str) -> dict:
+    feature = FEATURES_BY_ID.get(feature_id)
+    if not feature:
+        raise web.HTTPNotFound(text="Unknown feature")
+    return feature
+
+
+async def _feature_enabled(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    feature_id = request.match_info["feature"]
+    _feature_or_404(feature_id)
+    data = await request.post()
+    enabled = str(data.get("enabled") or "0").strip() in {"1", "true", "on", "yes"}
+    guild_id = _admin_guild_id(request.app["bot"])
+    set_feature_enabled(guild_id, feature_id, enabled)
+    message = f"Фича {feature_id} {'включена' if enabled else 'выключена'}."
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
+async def _feature_channel(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    feature_id = request.match_info["feature"]
+    feature = _feature_or_404(feature_id)
+    data = await request.post()
+    mode = str(data.get("mode") or "").strip()
+    if mode not in feature["channel_modes"]:
+        raise web.HTTPBadRequest(text="Unsupported channel mode for this feature")
+    channel_raw = str(data.get("channel_id") or "").strip()
+    if not channel_raw.isdigit():
+        raise web.HTTPBadRequest(text="channel_id must be numeric")
+    reason = str(data.get("reason") or "")
+    guild_id = _admin_guild_id(request.app["bot"])
+    set_feature_channel(guild_id, feature_id, int(channel_raw), mode, reason)
+    message = f"Канал {channel_raw} добавлен в {feature_id}:{mode}."
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
+async def _feature_channel_delete(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    feature_id = request.match_info["feature"]
+    feature = _feature_or_404(feature_id)
+    data = await request.post()
+    mode = str(data.get("mode") or "").strip()
+    if mode not in feature["channel_modes"]:
+        raise web.HTTPBadRequest(text="Unsupported channel mode for this feature")
+    channel_raw = str(data.get("channel_id") or "").strip()
+    if not channel_raw.isdigit():
+        raise web.HTTPBadRequest(text="channel_id must be numeric")
+    guild_id = _admin_guild_id(request.app["bot"])
+    deleted = clear_feature_channel(guild_id, feature_id, int(channel_raw), mode)
+    message = f"Удалено записей {feature_id}:{mode}: {deleted}."
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
+async def _feature_payload(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    feature_id = request.match_info["feature"]
+    _feature_or_404(feature_id)
+    data = await request.post()
+    raw = str(data.get("payload") or "").strip()
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise web.HTTPBadRequest(text=f"Invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="Payload must be a JSON object")
+    else:
+        payload = {}
+    guild_id = _admin_guild_id(request.app["bot"])
+    set_feature_payload(guild_id, feature_id, payload)
+    message = f"Payload для {feature_id} сохранен."
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
 async def _logout(request: web.Request) -> web.StreamResponse:
     _assert_ip_allowed(request)
     response = web.HTTPFound("/")
@@ -274,6 +610,10 @@ async def start_admin_panel(bot, log) -> None:
     app.router.add_get("/", _index)
     app.router.add_post("/login", _login)
     app.router.add_post("/remote-models", _remote_models)
+    app.router.add_post("/features/{feature}/enabled", _feature_enabled)
+    app.router.add_post("/features/{feature}/channel", _feature_channel)
+    app.router.add_post("/features/{feature}/channel/delete", _feature_channel_delete)
+    app.router.add_post("/features/{feature}/payload", _feature_payload)
     app.router.add_post("/logout", _logout)
 
     runner = web.AppRunner(app)

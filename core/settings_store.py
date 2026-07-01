@@ -118,6 +118,16 @@ def is_feature_enabled(guild_id: int, feature: str, default: bool = True) -> boo
     return default if not row else bool(row[0])
 
 
+def has_feature_setting(guild_id: int, feature: str) -> bool:
+    ensure_settings_tables()
+    with sqlite3.connect(SOCIAL_DB) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM feature_settings WHERE guild_id=? AND feature=?",
+            (guild_id, feature),
+        ).fetchone()
+    return bool(row)
+
+
 def set_feature_channel(
     guild_id: int,
     feature: str,
@@ -153,6 +163,17 @@ def clear_feature_channel(guild_id: int, feature: str, channel_id: int, mode: st
         cur = conn.execute(
             "DELETE FROM feature_channels WHERE guild_id=? AND feature=? AND channel_id=? AND mode=?",
             (guild_id, feature, channel_id, mode),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+def clear_feature_channels(guild_id: int, feature: str, mode: str) -> int:
+    ensure_settings_tables()
+    with sqlite3.connect(SOCIAL_DB) as conn:
+        cur = conn.execute(
+            "DELETE FROM feature_channels WHERE guild_id=? AND feature=? AND mode=?",
+            (guild_id, feature, mode),
         )
         conn.commit()
         return cur.rowcount
