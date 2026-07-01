@@ -187,6 +187,14 @@ async def on_ready():
     except Exception as e:
         log.bind(src="gateway").error(f"    Ошибка синхронизации: {e}")
 
+    try:
+        from fun_slesh.menu import ensure_admin_panel_entry
+        ok = await ensure_admin_panel_entry(bot)
+        if not ok:
+            log.bind(src="menu").warning("Не удалось создать или обновить постоянную кнопку админ-панели")
+    except Exception as e:
+        log.bind(src="menu").error(f"Ошибка постоянной кнопки админ-панели: {e}")
+
     log.info("━" * 44)
     log.bind(src="gateway").info("🚀  Бот готов к работе")
     log.info("━" * 44 + "\n")
