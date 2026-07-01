@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import sqlite3
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ from core.economy import get_balance
 from core.economy_profile import can_receive_currency, currency_amount, economy_profile_required_text
 from core.runtime_policy import WEB_ADMIN_CHANNEL_ID, WEB_ADMIN_CHANNEL_NAME, get_web_admin_url
 from core.settings_store import get_feature_payload, set_feature_payload
+
+
+log = logging.getLogger("menu")
 
 
 @dataclass(frozen=True)
@@ -1869,6 +1873,11 @@ async def _find_admin_panel_channel(bot: commands.Bot) -> discord.TextChannel | 
 async def _ensure_admin_panel_entry(bot: commands.Bot) -> bool:
     channel = await _find_admin_panel_channel(bot)
     if not channel:
+        log.warning(
+            "admin panel channel not found: id=%s name=%s",
+            WEB_ADMIN_CHANNEL_ID,
+            WEB_ADMIN_CHANNEL_NAME,
+        )
         return False
 
     payload = get_feature_payload(channel.guild.id, FEATURE_ADMIN_PANEL_ENTRY)
@@ -1880,13 +1889,20 @@ async def _ensure_admin_panel_entry(bot: commands.Bot) -> bool:
             message = await channel.fetch_message(message_id)
             if message.author == bot.user:
                 await message.edit(content=_admin_panel_entry_content(), embed=None, view=view)
+                log.info("admin panel entry updated: channel=%s message=%s", channel.id, message.id)
                 return True
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
+        except discord.NotFound:
+            log.info("admin panel entry missing, creating new message: channel=%s message=%s", channel.id, message_id)
+        except discord.Forbidden:
+            log.warning("admin panel entry cannot be fetched or edited: channel=%s", channel.id)
+            return False
+        except discord.HTTPException as exc:
+            log.warning("admin panel entry update failed: channel=%s error=%s", channel.id, exc)
 
     try:
         message = await channel.send(content=_admin_panel_entry_content(), view=view)
-    except discord.HTTPException:
+    except discord.HTTPException as exc:
+        log.warning("admin panel entry create failed: channel=%s error=%s", channel.id, exc)
         return False
 
     set_feature_payload(
@@ -1894,6 +1910,7 @@ async def _ensure_admin_panel_entry(bot: commands.Bot) -> bool:
         FEATURE_ADMIN_PANEL_ENTRY,
         {"channel_id": channel.id, "message_id": message.id},
     )
+    log.info("admin panel entry created: channel=%s message=%s", channel.id, message.id)
     return True
 
 
