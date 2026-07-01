@@ -33,9 +33,10 @@ Optional built-in admin panel:
 - `WEB_ADMIN_HOST`
 - `WEB_ADMIN_PORT`
 - `WEB_ADMIN_PUBLIC_URL`
+- `WEB_ADMIN_DISCORD_REDIRECT_URI`
 - `WEB_ADMIN_CHANNEL_NAME`
 - `WEB_ADMIN_CHANNEL_ID`
-- `WEB_ADMIN_TOKEN`
+- `WEB_ADMIN_TOKEN` emergency fallback only; the human login is Discord OAuth
 - `WEB_ADMIN_ALLOWED_IPS`
 - `WEB_ADMIN_TITLE`
 

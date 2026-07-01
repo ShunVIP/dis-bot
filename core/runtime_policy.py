@@ -30,6 +30,7 @@ WEB_ADMIN_ALLOWED_IPS = os.getenv("WEB_ADMIN_ALLOWED_IPS", "").strip()
 WEB_ADMIN_PUBLIC_URL = os.getenv("WEB_ADMIN_PUBLIC_URL", "").strip()
 WEB_ADMIN_CHANNEL_NAME = os.getenv("WEB_ADMIN_CHANNEL_NAME", "whitehouse").strip() or "whitehouse"
 WEB_ADMIN_CHANNEL_ID = int(os.getenv("WEB_ADMIN_CHANNEL_ID", "0") or "0")
+WEB_ADMIN_DISCORD_REDIRECT_URI = os.getenv("WEB_ADMIN_DISCORD_REDIRECT_URI", "").strip()
 
 _runtime_state = {
     "remote_model_inference": ALLOW_REMOTE_MODEL_INFERENCE,
@@ -58,6 +59,12 @@ def get_web_admin_url() -> str:
     return f"http://{WEB_ADMIN_HOST}:{WEB_ADMIN_PORT}"
 
 
+def get_web_admin_discord_redirect_uri() -> str:
+    if WEB_ADMIN_DISCORD_REDIRECT_URI:
+        return WEB_ADMIN_DISCORD_REDIRECT_URI
+    return f"{get_web_admin_url()}/auth/discord/callback"
+
+
 def is_daily_markov_retrain_enabled() -> bool:
     return IS_SERVER_RUNTIME and ENABLE_DAILY_MARKOV_RETRAIN_ON_SERVER
 
@@ -81,6 +88,7 @@ def policy_summary() -> dict:
         "web_admin_host": WEB_ADMIN_HOST,
         "web_admin_port": WEB_ADMIN_PORT,
         "web_admin_public_url": get_web_admin_url(),
+        "web_admin_discord_redirect_uri": get_web_admin_discord_redirect_uri(),
         "web_admin_channel_name": WEB_ADMIN_CHANNEL_NAME,
         "web_admin_channel_id": WEB_ADMIN_CHANNEL_ID,
         "web_admin_allowed_ips": WEB_ADMIN_ALLOWED_IPS,

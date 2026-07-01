@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import secrets
+import time
+from datetime import datetime
 import json
 from html import escape
 import ipaddress
+from urllib.parse import urlencode
 
+import aiohttp
+import discord
 from aiohttp import web
 
-from config import REMOTE_MODEL_API_URL, REMOTE_MODEL_API_TOKEN
+from config import DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, REMOTE_MODEL_API_URL, REMOTE_MODEL_API_TOKEN
 from core.runtime_policy import (
     DAILY_MARKOV_RETRAIN_HOUR,
     DAILY_MARKOV_RETRAIN_MINUTE,
@@ -16,6 +22,7 @@ from core.runtime_policy import (
     WEB_ADMIN_ALLOWED_IPS,
     WEB_ADMIN_TITLE,
     WEB_ADMIN_TOKEN,
+    get_web_admin_discord_redirect_uri,
     is_daily_markov_collection_enabled,
     is_daily_markov_retrain_enabled,
     is_full_maintenance_allowed,
@@ -31,6 +38,12 @@ from core.settings_store import (
     set_feature_enabled,
     set_feature_payload,
 )
+
+
+DISCORD_API = "https://discord.com/api/v10"
+ADMIN_STATE_COOKIE = "vipik_admin_oauth_state"
+ADMIN_SESSION_COOKIE = "vipik_admin_session"
+ADMIN_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7
 
 
 def _client_ip(request: web.Request) -> str:
@@ -76,12 +89,63 @@ def _assert_ip_allowed(request: web.Request) -> None:
 
 
 def _is_authorized(request: web.Request) -> bool:
+    if _current_admin_session(request):
+        return True
+
     token = (
         request.headers.get("X-Admin-Token")
         or request.cookies.get("vipik_admin_token")
         or ""
     ).strip()
     return bool(WEB_ADMIN_TOKEN and token == WEB_ADMIN_TOKEN and _ip_matches_allowed(_client_ip(request)))
+
+
+def _current_admin_session(request: web.Request) -> dict | None:
+    if not _ip_matches_allowed(_client_ip(request)):
+        return None
+    session_id = (request.cookies.get(ADMIN_SESSION_COOKIE) or "").strip()
+    if not session_id:
+        return None
+    sessions = request.app.get("admin_sessions", {})
+    data = sessions.get(session_id)
+    if not data:
+        return None
+    if float(data.get("expires_at") or 0) <= time.time():
+        sessions.pop(session_id, None)
+        return None
+    return data
+
+
+def _admin_display_name(session: dict | None) -> str:
+    if not session:
+        return "Discord admin"
+    username = session.get("global_name") or session.get("username") or session.get("discord_user_id") or "Discord admin"
+    return str(username)
+
+
+def _active_guild(bot) -> discord.Guild | None:
+    guilds = list(getattr(bot, "guilds", []) or [])
+    return guilds[0] if guilds else None
+
+
+async def _fetch_admin_member(bot, discord_user_id: int) -> discord.Member | None:
+    guild = _active_guild(bot)
+    if guild is None:
+        return None
+    member = guild.get_member(discord_user_id)
+    if member is not None:
+        return member
+    try:
+        return await guild.fetch_member(discord_user_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
+
+def _member_has_admin_access(member: discord.Member | None) -> bool:
+    if member is None:
+        return False
+    permissions = getattr(member, "guild_permissions", None)
+    return bool(permissions and (permissions.administrator or permissions.manage_guild))
 
 
 def _status_chip(ok: bool, on_text: str = "ON", off_text: str = "OFF") -> str:
@@ -308,8 +372,10 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     summary = policy_summary()
     if request is not None:
         summary["client_ip"] = _client_ip(request)
+    admin_session = _current_admin_session(request) if request is not None else None
     remote_configured = bool(REMOTE_MODEL_API_URL and REMOTE_MODEL_API_TOKEN)
     bot_name = escape(str(bot.user) if bot.user else "bot not ready")
+    admin_name = escape(_admin_display_name(admin_session))
     client_ip = escape(str(summary.get("client_ip", "")))
     allowed_ips = escape(str(summary.get("web_admin_allowed_ips", "") or "not set"))
     notice = (
@@ -367,10 +433,11 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
   <div class="wrap">
     <div class="card">
       <h1>{escape(WEB_ADMIN_TITLE)}</h1>
-      <p class="help">Панель работает только по токену и ничего не включает на VPS автоматически, кроме безопасного переключателя удалённой тяжёлой модели.</p>
+      <p class="help">Панель открывается через Discord OAuth и пускает только участников сервера с правами Administrator или Manage Server.</p>
       {notice}
       <div class="grid">
         <div class="item"><div class="label">Бот</div><div class="value">{bot_name}</div></div>
+        <div class="item"><div class="label">Вход</div><div class="value">{admin_name}</div></div>
         <div class="item"><div class="label">Хост</div><div class="value">{escape(summary["hostname"])}</div></div>
         <div class="item"><div class="label">Режим сервера</div><div class="value">{_status_chip(summary["is_server_runtime"], "VPS", "Local")}</div></div>
         <div class="item"><div class="label">Удалённый bridge</div><div class="value">{_status_chip(remote_configured, "Configured", "Not set")}</div></div>
@@ -463,30 +530,99 @@ async def _index(request: web.Request) -> web.Response:
     _assert_ip_allowed(request)
     if not _is_authorized(request):
         return web.Response(
-            text="""<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Admin Login</title></head>
+            text=f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Admin Login</title></head>
 <body style="font-family:Segoe UI,Arial,sans-serif;background:#f4f7fb;padding:32px;">
-<form method="post" action="/login" style="max-width:420px;margin:40px auto;background:#fff;padding:24px;border-radius:16px;box-shadow:0 12px 32px rgba(15,23,42,.08);">
-<h2 style="margin-top:0;">Вход в панель</h2>
-<p>Введи токен администратора.</p>
-<input type="password" name="token" placeholder="WEB_ADMIN_TOKEN" style="width:100%;padding:12px;border:1px solid #cbd5e1;border-radius:10px;margin-bottom:12px;">
-<button type="submit" style="border:0;border-radius:10px;padding:12px 16px;background:#1d4ed8;color:#fff;font-weight:700;">Открыть панель</button>
-</form></body></html>""",
+<div style="max-width:420px;margin:40px auto;background:#fff;padding:24px;border-radius:16px;box-shadow:0 12px 32px rgba(15,23,42,.08);">
+<h2 style="margin-top:0;">Вход в админ-панель</h2>
+<p style="line-height:1.5;color:#475569;">Войди через Discord. Панель откроется только если у тебя на сервере есть права администратора или управления сервером.</p>
+<a href="/login" style="display:inline-block;text-decoration:none;border-radius:10px;padding:12px 16px;background:#5865f2;color:#fff;font-weight:700;">Войти через Discord</a>
+<p style="margin-top:14px;color:#64748b;font-size:13px;">Redirect URI: <code>{escape(get_web_admin_discord_redirect_uri())}</code></p>
+</div></body></html>""",
             status=401,
             content_type="text/html",
         )
     response = web.Response(text=_render_page(request.app["bot"], request=request), content_type="text/html")
-    response.set_cookie("vipik_admin_token", WEB_ADMIN_TOKEN, httponly=True, samesite="Strict")
     return response
 
 
 async def _login(request: web.Request) -> web.StreamResponse:
     _assert_ip_allowed(request)
-    data = await request.post()
-    token = (data.get("token") or "").strip()
-    if not WEB_ADMIN_TOKEN or token != WEB_ADMIN_TOKEN:
-        raise web.HTTPUnauthorized(text="Invalid admin token")
+    if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
+        raise web.HTTPServiceUnavailable(text="Discord OAuth is not configured")
+
+    state = secrets.token_urlsafe(24)
+    redirect_uri = get_web_admin_discord_redirect_uri()
+    response = web.HTTPFound(
+        "https://discord.com/oauth2/authorize?"
+        + urlencode(
+            {
+                "response_type": "code",
+                "client_id": DISCORD_CLIENT_ID,
+                "scope": "identify",
+                "state": state,
+                "redirect_uri": redirect_uri,
+                "prompt": "none",
+            }
+        )
+    )
+    response.set_cookie(ADMIN_STATE_COOKIE, state, httponly=True, samesite="Lax", max_age=900)
+    return response
+
+
+async def _discord_callback(request: web.Request) -> web.StreamResponse:
+    _assert_ip_allowed(request)
+    if request.query.get("state") != request.cookies.get(ADMIN_STATE_COOKIE):
+        raise web.HTTPBadRequest(text="Bad OAuth state")
+    code = (request.query.get("code") or "").strip()
+    if not code:
+        raise web.HTTPBadRequest(text="Missing OAuth code")
+
+    redirect_uri = get_web_admin_discord_redirect_uri()
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+        async with session.post(
+            f"{DISCORD_API}/oauth2/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+            auth=aiohttp.BasicAuth(DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ) as resp:
+            if resp.status >= 400:
+                raise web.HTTPUnauthorized(text="Discord token exchange failed")
+            token_data = await resp.json()
+
+        headers = {"Authorization": f"Bearer {token_data.get('access_token', '')}"}
+        async with session.get(f"{DISCORD_API}/users/@me", headers=headers) as resp:
+            if resp.status >= 400:
+                raise web.HTTPUnauthorized(text="Discord user lookup failed")
+            user_data = await resp.json()
+
+    discord_user_id = int(user_data["id"])
+    member = await _fetch_admin_member(request.app["bot"], discord_user_id)
+    if not _member_has_admin_access(member):
+        raise web.HTTPForbidden(text="Discord user is not a server admin")
+
+    session_id = secrets.token_urlsafe(32)
+    request.app["admin_sessions"][session_id] = {
+        "discord_user_id": discord_user_id,
+        "username": user_data.get("username", ""),
+        "global_name": user_data.get("global_name") or "",
+        "guild_id": int(member.guild.id),
+        "expires_at": time.time() + ADMIN_SESSION_TTL_SECONDS,
+        "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+    }
     response = web.HTTPFound("/")
-    response.set_cookie("vipik_admin_token", WEB_ADMIN_TOKEN, httponly=True, samesite="Strict")
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        session_id,
+        httponly=True,
+        samesite="Lax",
+        max_age=ADMIN_SESSION_TTL_SECONDS,
+    )
+    response.del_cookie(ADMIN_STATE_COOKIE)
+    response.del_cookie("vipik_admin_token")
     return response
 
 
@@ -592,7 +728,12 @@ async def _feature_payload(request: web.Request) -> web.Response:
 
 async def _logout(request: web.Request) -> web.StreamResponse:
     _assert_ip_allowed(request)
+    session_id = (request.cookies.get(ADMIN_SESSION_COOKIE) or "").strip()
+    if session_id:
+        request.app.get("admin_sessions", {}).pop(session_id, None)
     response = web.HTTPFound("/")
+    response.del_cookie(ADMIN_SESSION_COOKIE)
+    response.del_cookie(ADMIN_STATE_COOKIE)
     response.del_cookie("vipik_admin_token")
     return response
 
@@ -601,14 +742,15 @@ async def start_admin_panel(bot, log) -> None:
     if not WEB_ADMIN_ENABLED:
         log.bind(src="admin-web").info("Веб-панель отключена")
         return
-    if not WEB_ADMIN_TOKEN:
-        log.bind(src="admin-web").warning("Веб-панель не запущена: WEB_ADMIN_TOKEN пустой")
-        return
+    if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
+        log.bind(src="admin-web").warning("Discord OAuth для веб-панели не настроен")
 
     app = web.Application()
     app["bot"] = bot
+    app["admin_sessions"] = {}
     app.router.add_get("/", _index)
-    app.router.add_post("/login", _login)
+    app.router.add_get("/login", _login)
+    app.router.add_get("/auth/discord/callback", _discord_callback)
     app.router.add_post("/remote-models", _remote_models)
     app.router.add_post("/features/{feature}/enabled", _feature_enabled)
     app.router.add_post("/features/{feature}/channel", _feature_channel)

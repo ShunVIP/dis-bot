@@ -168,6 +168,7 @@ WEB_ADMIN_ENABLED=false
 WEB_ADMIN_HOST=127.0.0.1
 WEB_ADMIN_PORT=8080
 WEB_ADMIN_PUBLIC_URL=
+WEB_ADMIN_DISCORD_REDIRECT_URI=http://127.0.0.1:8080/auth/discord/callback
 WEB_ADMIN_CHANNEL_NAME=whitehouse
 WEB_ADMIN_CHANNEL_ID=0
 WEB_ADMIN_TOKEN=
@@ -185,8 +186,10 @@ WEB_ADMIN_TITLE=ViPik Bot Control
 - `ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER=true` — ежедневный добор сообщений.
 - `WEB_ADMIN_ENABLED=true` — включает веб-панель.
 - `WEB_ADMIN_PUBLIC_URL=` — адрес, который команда `/админ` отдаёт кнопкой в Discord; если пусто, используется `http://WEB_ADMIN_HOST:WEB_ADMIN_PORT`.
+- `WEB_ADMIN_DISCORD_REDIRECT_URI=` — Discord OAuth callback для админ-панели; должен быть добавлен в Discord Developer Portal.
 - `WEB_ADMIN_CHANNEL_NAME=whitehouse` — канал, где бот держит постоянную кнопку админ-панели.
 - `WEB_ADMIN_CHANNEL_ID=0` — точный ID канала для постоянной кнопки; если задан, важнее имени.
+- `WEB_ADMIN_TOKEN=` — аварийный fallback для API/header, обычный вход идет через Discord OAuth.
 - `WEB_ADMIN_ALLOWED_IPS=` — IP/CIDR allowlist для веб-панели.
 
 ## Что работает автоматически
@@ -334,9 +337,10 @@ WEB_ADMIN_ENABLED=true
 WEB_ADMIN_HOST=100.90.24.117
 WEB_ADMIN_PORT=8080
 WEB_ADMIN_PUBLIC_URL=http://100.90.24.117:8080
+WEB_ADMIN_DISCORD_REDIRECT_URI=http://100.90.24.117:8080/auth/discord/callback
 WEB_ADMIN_CHANNEL_NAME=whitehouse
 WEB_ADMIN_CHANNEL_ID=0
-WEB_ADMIN_TOKEN=LONG_RANDOM_TOKEN
+WEB_ADMIN_TOKEN=
 WEB_ADMIN_ALLOWED_IPS=
 ```
 
