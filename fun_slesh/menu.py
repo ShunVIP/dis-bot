@@ -22,7 +22,8 @@ from discord import app_commands
 from discord.ext import commands
 from core.economy import get_balance
 from core.economy_profile import can_receive_currency, currency_amount, economy_profile_required_text
-from core.runtime_policy import get_web_admin_url
+from core.runtime_policy import WEB_ADMIN_CHANNEL_ID, WEB_ADMIN_CHANNEL_NAME, get_web_admin_url
+from core.settings_store import get_feature_payload, set_feature_payload
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,7 @@ ACTIVITY_ROOTS = ACTIVITY_STATS_ROOTS | ACTIVITY_ADMIN_ROOTS | ACTIVITY_HIDDEN_R
 REMINDER_ROOTS = {"напоминания"}
 CHAT_ROOTS = {"болтовня"}
 MENU_ROOTS = {"команды", "админ"}
+FEATURE_ADMIN_PANEL_ENTRY = "admin_panel_entry"
 
 MENU_ONLY_ACTIONS: tuple[MenuOnlyAction, ...] = (
     MenuOnlyAction("ping", "Пинг", "Быстрый ответ с текущей задержкой бота.", "👤 Профиль", "menu_ping", "🏓"),
@@ -1842,13 +1844,71 @@ class MenuView(discord.ui.View):
 
 class AdminPanelLinkView(discord.ui.View):
     def __init__(self, url: str):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.add_item(discord.ui.Button(label="Админ-панель", style=discord.ButtonStyle.link, url=url))
+
+
+def _admin_panel_entry_content() -> str:
+    return "\u200b"
+
+
+async def _find_admin_panel_channel(bot: commands.Bot) -> discord.TextChannel | None:
+    if WEB_ADMIN_CHANNEL_ID:
+        channel = bot.get_channel(WEB_ADMIN_CHANNEL_ID)
+        if isinstance(channel, discord.TextChannel):
+            return channel
+
+    wanted = WEB_ADMIN_CHANNEL_NAME.strip().lower()
+    for guild in bot.guilds:
+        for channel in guild.text_channels:
+            if channel.name.lower() == wanted:
+                return channel
+    return None
+
+
+async def _ensure_admin_panel_entry(bot: commands.Bot) -> bool:
+    channel = await _find_admin_panel_channel(bot)
+    if not channel:
+        return False
+
+    payload = get_feature_payload(channel.guild.id, FEATURE_ADMIN_PANEL_ENTRY)
+    message_id = int(payload.get("message_id") or 0)
+    view = AdminPanelLinkView(get_web_admin_url())
+
+    if message_id:
+        try:
+            message = await channel.fetch_message(message_id)
+            if message.author == bot.user:
+                await message.edit(content=_admin_panel_entry_content(), embed=None, view=view)
+                return True
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    try:
+        message = await channel.send(content=_admin_panel_entry_content(), view=view)
+    except discord.HTTPException:
+        return False
+
+    set_feature_payload(
+        channel.guild.id,
+        FEATURE_ADMIN_PANEL_ENTRY,
+        {"channel_id": channel.id, "message_id": message.id},
+    )
+    return True
 
 
 class Menu(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._admin_panel_entry_ready = False
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if self._admin_panel_entry_ready:
+            return
+        self._admin_panel_entry_ready = True
+        await _ensure_admin_panel_entry(self.bot)
+
 
     @app_commands.command(name="команды", description="Живой каталог всех обычных команд бота")
     async def команды(self, interaction: discord.Interaction):

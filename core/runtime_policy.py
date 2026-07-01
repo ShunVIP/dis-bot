@@ -28,6 +28,8 @@ WEB_ADMIN_TOKEN = os.getenv("WEB_ADMIN_TOKEN", "").strip()
 WEB_ADMIN_TITLE = os.getenv("WEB_ADMIN_TITLE", "ViPik Bot Control").strip() or "ViPik Bot Control"
 WEB_ADMIN_ALLOWED_IPS = os.getenv("WEB_ADMIN_ALLOWED_IPS", "").strip()
 WEB_ADMIN_PUBLIC_URL = os.getenv("WEB_ADMIN_PUBLIC_URL", "").strip()
+WEB_ADMIN_CHANNEL_NAME = os.getenv("WEB_ADMIN_CHANNEL_NAME", "whitehouse").strip() or "whitehouse"
+WEB_ADMIN_CHANNEL_ID = int(os.getenv("WEB_ADMIN_CHANNEL_ID", "0") or "0")
 
 _runtime_state = {
     "remote_model_inference": ALLOW_REMOTE_MODEL_INFERENCE,
@@ -79,5 +81,7 @@ def policy_summary() -> dict:
         "web_admin_host": WEB_ADMIN_HOST,
         "web_admin_port": WEB_ADMIN_PORT,
         "web_admin_public_url": get_web_admin_url(),
+        "web_admin_channel_name": WEB_ADMIN_CHANNEL_NAME,
+        "web_admin_channel_id": WEB_ADMIN_CHANNEL_ID,
         "web_admin_allowed_ips": WEB_ADMIN_ALLOWED_IPS,
     }
