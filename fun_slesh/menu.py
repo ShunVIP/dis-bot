@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 from collections import OrderedDict
@@ -1917,10 +1918,19 @@ async def _ensure_admin_panel_entry(bot: commands.Bot) -> bool:
 async def ensure_admin_panel_entry(bot: commands.Bot) -> bool:
     if getattr(bot, "admin_panel_entry_ready", False):
         return True
-    ok = await _ensure_admin_panel_entry(bot)
-    if ok:
-        bot.admin_panel_entry_ready = True
-    return ok
+
+    lock = getattr(bot, "admin_panel_entry_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        bot.admin_panel_entry_lock = lock
+
+    async with lock:
+        if getattr(bot, "admin_panel_entry_ready", False):
+            return True
+        ok = await _ensure_admin_panel_entry(bot)
+        if ok:
+            bot.admin_panel_entry_ready = True
+        return ok
 
 
 class Menu(commands.Cog):
