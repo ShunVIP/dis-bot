@@ -22,7 +22,7 @@ from discord import app_commands
 from discord.ext import commands
 from core.economy import get_balance
 from core.economy_profile import can_receive_currency, currency_amount, economy_profile_required_text
-from core.runtime_policy import WEB_ADMIN_ENABLED, get_web_admin_url
+from core.runtime_policy import get_web_admin_url
 
 
 @dataclass(frozen=True)
@@ -1843,7 +1843,7 @@ class MenuView(discord.ui.View):
 class AdminPanelLinkView(discord.ui.View):
     def __init__(self, url: str):
         super().__init__(timeout=300)
-        self.add_item(discord.ui.Button(label="Открыть админ-панель", style=discord.ButtonStyle.link, url=url))
+        self.add_item(discord.ui.Button(label="Админ-панель", style=discord.ButtonStyle.link, url=url))
 
 
 class Menu(commands.Cog):
@@ -1863,30 +1863,11 @@ class Menu(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="админ", description="(Админ) Живой каталог административных команд")
+    @app_commands.command(name="админ", description="(Админ) Открыть админ-панель")
     @app_commands.checks.has_permissions(administrator=True)
     async def админ(self, interaction: discord.Interaction):
-        admin_url = get_web_admin_url()
-        embed = discord.Embed(
-            title="🛡️ Админ-панель",
-            description=(
-                "Админские настройки открываются в отдельной панели/app.\n"
-                "Туда уходят каналы, ДР админов, токсичность, болтовня, автопосты, модели и maintenance."
-            ),
-            color=discord.Color.dark_gold(),
-        )
-        embed.add_field(name="Адрес панели", value=f"`{admin_url}`", inline=False)
-        embed.add_field(
-            name="Статус",
-            value=(
-                "Панель включена." if WEB_ADMIN_ENABLED
-                else "Панель выключена в env. Включи `WEB_ADMIN_ENABLED=true` на машине, где работает бот."
-            ),
-            inline=False,
-        )
         await interaction.response.send_message(
-            embed=embed,
-            view=AdminPanelLinkView(admin_url),
+            view=AdminPanelLinkView(get_web_admin_url()),
             ephemeral=True,
         )
 
