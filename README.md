@@ -191,6 +191,7 @@ WEB_ADMIN_TITLE=ViPik Bot Control
 - `WEB_ADMIN_CHANNEL_ID=0` — точный ID канала для постоянной кнопки; если задан, важнее имени.
 - `WEB_ADMIN_TOKEN=` — аварийный fallback для API/header, обычный вход идет через Discord OAuth.
 - `WEB_ADMIN_ALLOWED_IPS=` — IP/CIDR allowlist для веб-панели.
+- Если `DISCORD_CLIENT_ID` пустой, админка использует application id запущенного бота; если `DISCORD_CLIENT_SECRET` пустой, вход работает через Discord token-flow без ручного секрета.
 
 ## Что работает автоматически
 

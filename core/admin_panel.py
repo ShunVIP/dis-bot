@@ -148,6 +148,40 @@ def _member_has_admin_access(member: discord.Member | None) -> bool:
     return bool(permissions and (permissions.administrator or permissions.manage_guild))
 
 
+def _discord_client_id(bot) -> str:
+    if DISCORD_CLIENT_ID:
+        return DISCORD_CLIENT_ID
+    application_id = getattr(bot, "application_id", None)
+    if application_id:
+        return str(application_id)
+    user = getattr(bot, "user", None)
+    user_id = getattr(user, "id", None)
+    return str(user_id or "")
+
+
+def _create_admin_session_response(request: web.Request, user_data: dict, member: discord.Member) -> web.HTTPFound:
+    session_id = secrets.token_urlsafe(32)
+    request.app["admin_sessions"][session_id] = {
+        "discord_user_id": int(user_data["id"]),
+        "username": user_data.get("username", ""),
+        "global_name": user_data.get("global_name") or "",
+        "guild_id": int(member.guild.id),
+        "expires_at": time.time() + ADMIN_SESSION_TTL_SECONDS,
+        "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+    }
+    response = web.HTTPFound("/")
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        session_id,
+        httponly=True,
+        samesite="Lax",
+        max_age=ADMIN_SESSION_TTL_SECONDS,
+    )
+    response.del_cookie(ADMIN_STATE_COOKIE)
+    response.del_cookie("vipik_admin_token")
+    return response
+
+
 def _status_chip(ok: bool, on_text: str = "ON", off_text: str = "OFF") -> str:
     color = "#1f8f4d" if ok else "#9b2c2c"
     text = on_text if ok else off_text
@@ -547,17 +581,19 @@ async def _index(request: web.Request) -> web.Response:
 
 async def _login(request: web.Request) -> web.StreamResponse:
     _assert_ip_allowed(request)
-    if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
-        raise web.HTTPServiceUnavailable(text="Discord OAuth is not configured")
+    client_id = _discord_client_id(request.app["bot"])
+    if not client_id:
+        raise web.HTTPServiceUnavailable(text="Discord OAuth client_id is not configured")
 
     state = secrets.token_urlsafe(24)
     redirect_uri = get_web_admin_discord_redirect_uri()
+    response_type = "code" if DISCORD_CLIENT_SECRET else "token"
     response = web.HTTPFound(
         "https://discord.com/oauth2/authorize?"
         + urlencode(
             {
-                "response_type": "code",
-                "client_id": DISCORD_CLIENT_ID,
+                "response_type": response_type,
+                "client_id": client_id,
                 "scope": "identify",
                 "state": state,
                 "redirect_uri": redirect_uri,
@@ -571,6 +607,41 @@ async def _login(request: web.Request) -> web.StreamResponse:
 
 async def _discord_callback(request: web.Request) -> web.StreamResponse:
     _assert_ip_allowed(request)
+    if "access_token" not in request.query and "code" not in request.query:
+        return web.Response(
+            text="""<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Discord Login</title></head>
+<body style="font-family:Segoe UI,Arial,sans-serif;background:#f4f7fb;padding:32px;">
+<div style="max-width:520px;margin:40px auto;background:#fff;padding:24px;border-radius:16px;box-shadow:0 12px 32px rgba(15,23,42,.08);">
+<h2 style="margin-top:0;">Завершаю вход через Discord</h2>
+<p id="status" style="line-height:1.5;color:#475569;">Проверяю Discord-сессию...</p>
+</div>
+<script>
+const params = new URLSearchParams(window.location.hash.slice(1));
+const token = params.get("access_token");
+const state = params.get("state");
+const statusNode = document.getElementById("status");
+if (!token || !state) {
+  statusNode.textContent = "Discord не вернул access token. Попробуй открыть вход ещё раз.";
+} else {
+  fetch("/auth/discord/token", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({access_token: token, state})
+  }).then((resp) => {
+    if (resp.ok) {
+      window.location = "/";
+      return;
+    }
+    return resp.text().then((text) => { throw new Error(text || "Ошибка входа"); });
+  }).catch((err) => {
+    statusNode.textContent = err.message;
+  });
+}
+</script>
+</body></html>""",
+            content_type="text/html",
+        )
+
     if request.query.get("state") != request.cookies.get(ADMIN_STATE_COOKIE):
         raise web.HTTPBadRequest(text="Bad OAuth state")
     code = (request.query.get("code") or "").strip()
@@ -604,26 +675,31 @@ async def _discord_callback(request: web.Request) -> web.StreamResponse:
     if not _member_has_admin_access(member):
         raise web.HTTPForbidden(text="Discord user is not a server admin")
 
-    session_id = secrets.token_urlsafe(32)
-    request.app["admin_sessions"][session_id] = {
-        "discord_user_id": discord_user_id,
-        "username": user_data.get("username", ""),
-        "global_name": user_data.get("global_name") or "",
-        "guild_id": int(member.guild.id),
-        "expires_at": time.time() + ADMIN_SESSION_TTL_SECONDS,
-        "created_at": datetime.utcnow().isoformat(timespec="seconds"),
-    }
-    response = web.HTTPFound("/")
-    response.set_cookie(
-        ADMIN_SESSION_COOKIE,
-        session_id,
-        httponly=True,
-        samesite="Lax",
-        max_age=ADMIN_SESSION_TTL_SECONDS,
-    )
-    response.del_cookie(ADMIN_STATE_COOKIE)
-    response.del_cookie("vipik_admin_token")
-    return response
+    return _create_admin_session_response(request, user_data, member)
+
+
+async def _discord_token_login(request: web.Request) -> web.StreamResponse:
+    _assert_ip_allowed(request)
+    data = await request.json()
+    if data.get("state") != request.cookies.get(ADMIN_STATE_COOKIE):
+        raise web.HTTPBadRequest(text="Bad OAuth state")
+    access_token = str(data.get("access_token") or "").strip()
+    if not access_token:
+        raise web.HTTPBadRequest(text="Missing Discord access token")
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+        headers = {"Authorization": f"Bearer {access_token}"}
+        async with session.get(f"{DISCORD_API}/users/@me", headers=headers) as resp:
+            if resp.status >= 400:
+                raise web.HTTPUnauthorized(text="Discord user lookup failed")
+            user_data = await resp.json()
+
+    discord_user_id = int(user_data["id"])
+    member = await _fetch_admin_member(request.app["bot"], discord_user_id)
+    if not _member_has_admin_access(member):
+        raise web.HTTPForbidden(text="Discord user is not a server admin")
+
+    return _create_admin_session_response(request, user_data, member)
 
 
 async def _remote_models(request: web.Request) -> web.Response:
@@ -742,8 +818,10 @@ async def start_admin_panel(bot, log) -> None:
     if not WEB_ADMIN_ENABLED:
         log.bind(src="admin-web").info("Веб-панель отключена")
         return
-    if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
-        log.bind(src="admin-web").warning("Discord OAuth для веб-панели не настроен")
+    if not DISCORD_CLIENT_ID:
+        log.bind(src="admin-web").info("Discord OAuth для веб-панели использует application id бота")
+    if not DISCORD_CLIENT_SECRET:
+        log.bind(src="admin-web").info("Discord OAuth для веб-панели использует token-flow без client secret")
 
     app = web.Application()
     app["bot"] = bot
@@ -751,6 +829,7 @@ async def start_admin_panel(bot, log) -> None:
     app.router.add_get("/", _index)
     app.router.add_get("/login", _login)
     app.router.add_get("/auth/discord/callback", _discord_callback)
+    app.router.add_post("/auth/discord/token", _discord_token_login)
     app.router.add_post("/remote-models", _remote_models)
     app.router.add_post("/features/{feature}/enabled", _feature_enabled)
     app.router.add_post("/features/{feature}/channel", _feature_channel)
