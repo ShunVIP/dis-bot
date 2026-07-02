@@ -4,6 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import discord
 
+from core.birthday_store import ensure_birthday_tables
 from core.paths import BIRTHDAYS_DB
 from core.settings_store import get_feature_policy, has_feature_setting
 
@@ -16,6 +17,7 @@ FEATURE_BIRTHDAY = "birthday"
 
 
 def _birthday_channel_id(guild_id: int) -> int | None:
+    ensure_birthday_tables()
     policy = get_feature_policy(guild_id, FEATURE_BIRTHDAY)
     if policy.output_channel_id:
         return int(policy.output_channel_id)
@@ -46,12 +48,7 @@ def setup_birthday_checker(bot: discord.Client):
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             # <-- гарантируем схему на случай чистой установки
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS birthdays (
-                    user_id INTEGER PRIMARY KEY,
-                    birthday TEXT NOT NULL
-                )
-            """)
+            ensure_birthday_tables()
             # выборка с учётом 29.02
             if today == "28.02" and not is_leap:
                 cur.execute("SELECT user_id FROM birthdays WHERE birthday IN (?, ?)", ("28.02", "29.02"))

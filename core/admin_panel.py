@@ -15,6 +15,13 @@ import discord
 from aiohttp import web
 
 from config import DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, REMOTE_MODEL_API_URL, REMOTE_MODEL_API_TOKEN
+from core.birthday_store import (
+    get_birthday,
+    list_birthdays,
+    remove_birthday,
+    set_birthday,
+    validate_birthday,
+)
 from core.runtime_policy import (
     DAILY_MARKOV_RETRAIN_HOUR,
     DAILY_MARKOV_RETRAIN_MINUTE,
@@ -450,6 +457,52 @@ def _render_feature_registry(guild_id: int = 0) -> str:
     return "\n".join(cards)
 
 
+def _render_birthdays_panel(bot) -> str:
+    rows = list_birthdays()
+    if rows:
+        items = []
+        for row in rows[:80]:
+            user_id = int(row["user_id"])
+            guild = _active_guild(bot)
+            member = guild.get_member(user_id) if guild else None
+            name = member.display_name if member else str(user_id)
+            source = str(row.get("source") or "unknown")
+            updated_by = int(row.get("updated_by") or user_id)
+            items.append(
+                "<tr>"
+                f"<td>{escape(name)}<br><code>{user_id}</code></td>"
+                f"<td><b>{escape(str(row['birthday']))}</b></td>"
+                f"<td>{escape(source)}<br><code>{updated_by}</code></td>"
+                f"<td>"
+                f"<form method=\"post\" action=\"/user-data/birthdays/delete\" onsubmit=\"return confirm('Удалить ДР пользователя?');\">"
+                f"<input type=\"hidden\" name=\"user_id\" value=\"{user_id}\">"
+                f"<button type=\"submit\" class=\"button-secondary\">Удалить</button>"
+                f"</form>"
+                f"</td>"
+                "</tr>"
+            )
+        rows_html = "".join(items)
+    else:
+        rows_html = "<tr><td colspan=\"4\" class=\"muted\">Дни рождения пока не заполнены.</td></tr>"
+
+    return f"""
+    <div class="card">
+      <h2>Пользовательские ДР</h2>
+      <p class="help">Админка и Discord-команда <code>/др</code> пишут в одну базу. Админ может заполнить дату за участника, но сам участник всегда может исправить свою дату через бота.</p>
+      <form method="post" action="/user-data/birthdays" class="inline-form">
+        <input name="user_id" inputmode="numeric" placeholder="Discord user id">
+        <input name="birthday" placeholder="ДД.ММ">
+        <input name="reason" placeholder="Комментарий">
+        <button type="submit">Сохранить ДР</button>
+      </form>
+      <table class="data-table">
+        <thead><tr><th>Участник</th><th>Дата</th><th>Источник</th><th></th></tr></thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+    </div>
+    """
+
+
 def _render_page(bot, request: web.Request | None = None, message: str = "") -> str:
     summary = policy_summary()
     if request is not None:
@@ -471,6 +524,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     admin_area_registry = _render_admin_area_registry()
     active_guild_id = _admin_guild_id(bot)
     feature_registry = _render_feature_registry(active_guild_id)
+    birthdays_panel = _render_birthdays_panel(bot)
     restart_card = _render_restart_card(request)
     return f"""<!doctype html>
 <html lang="ru">
@@ -510,6 +564,9 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     .channel-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin:14px 0; }}
     .inline-form {{ display:grid; grid-template-columns:minmax(120px,1fr) minmax(120px,1fr) auto auto auto; gap:8px; align-items:center; margin:8px 0; }}
     .payload-form {{ display:grid; gap:10px; margin-top:10px; }}
+    .data-table {{ width:100%; border-collapse:collapse; margin-top:14px; }}
+    .data-table th, .data-table td {{ border-top:1px solid #e2e8f0; padding:10px; text-align:left; vertical-align:top; }}
+    .data-table th {{ color:#475569; font-size:13px; }}
     @media (max-width:720px) {{ .feature-head, .inline-form {{ display:grid; grid-template-columns:1fr; }} }}
   </style>
 </head>
@@ -558,6 +615,8 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
         {feature_registry}
       </div>
     </div>
+
+    {birthdays_panel}
 
     <div class="card">
       <h2>Быстрый переключатель</h2>
@@ -874,6 +933,40 @@ async def _feature_payload(request: web.Request) -> web.Response:
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
+async def _birthday_save(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    data = await request.post()
+    user_raw = str(data.get("user_id") or "").strip()
+    birthday_raw = str(data.get("birthday") or "").strip()
+    if not user_raw.isdigit():
+        raise web.HTTPBadRequest(text="user_id must be numeric")
+    try:
+        birthday = validate_birthday(birthday_raw)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="birthday must use DD.MM format") from exc
+    session = _current_admin_session(request)
+    updated_by = int((session or {}).get("discord_user_id") or 0) or int(user_raw)
+    set_birthday(int(user_raw), birthday, updated_by=updated_by, source="admin_panel")
+    current = get_birthday(int(user_raw))
+    message = f"ДР пользователя {user_raw} сохранен: {current['birthday'] if current else birthday}. Пользователь может исправить его через /др."
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
+async def _birthday_delete(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    data = await request.post()
+    user_raw = str(data.get("user_id") or "").strip()
+    if not user_raw.isdigit():
+        raise web.HTTPBadRequest(text="user_id must be numeric")
+    remove_birthday(int(user_raw))
+    message = f"ДР пользователя {user_raw} удален."
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
 async def _logout(request: web.Request) -> web.StreamResponse:
     _assert_ip_allowed(request)
     session_id = (request.cookies.get(ADMIN_SESSION_COOKIE) or "").strip()
@@ -912,6 +1005,8 @@ async def start_admin_panel(bot, log) -> None:
     app.router.add_post("/features/{feature}/channel", _feature_channel)
     app.router.add_post("/features/{feature}/channel/delete", _feature_channel_delete)
     app.router.add_post("/features/{feature}/payload", _feature_payload)
+    app.router.add_post("/user-data/birthdays", _birthday_save)
+    app.router.add_post("/user-data/birthdays/delete", _birthday_delete)
     app.router.add_post("/logout", _logout)
 
     runner = web.AppRunner(app)

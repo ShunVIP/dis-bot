@@ -2,8 +2,15 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import sqlite3
-from datetime import datetime
 
+from core.birthday_store import (
+    ensure_birthday_tables,
+    get_birthday,
+    list_birthdays,
+    remove_birthday,
+    set_birthday,
+    validate_birthday,
+)
 from core.paths import BIRTHDAYS_DB
 from core.settings_store import get_feature_policy, has_feature_setting, set_feature_channel
 
@@ -12,21 +19,7 @@ FEATURE_BIRTHDAY = "birthday"
 
 def _ensure_table():
     """Гарантируем наличие таблицы дней рождения (на случай чистой установки)."""
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS birthdays (
-                user_id INTEGER PRIMARY KEY,
-                birthday TEXT NOT NULL
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS birthday_config (
-                guild_id INTEGER PRIMARY KEY,
-                channel_id INTEGER
-            )
-        """)
-        conn.commit()
+    ensure_birthday_tables()
 
 
 def _birthday_channel_id(guild_id: int) -> int | None:
@@ -44,32 +37,19 @@ class Birthday(commands.Cog):
         self.bot = bot
         _ensure_table()  # <-- добавлено
 
-
-    def set_birthday(self, user_id: int, date_str: str):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("REPLACE INTO birthdays (user_id, birthday) VALUES (?, ?)", (user_id, date_str))
-            conn.commit()
-
-    def remove_birthday(self, user_id: int):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("DELETE FROM birthdays WHERE user_id = ?", (user_id,))
-            conn.commit()
-
     @app_commands.command(name="др", description="Установить свой день рождения")
     @app_commands.describe(дата="Введите дату в формате ДД.ММ (например, 20.04)")
     async def др(self, interaction: discord.Interaction, дата: str):
         try:
-            datetime.strptime(f"{дата}.2020", "%d.%m.%Y")
-            self.set_birthday(interaction.user.id, дата)
+            дата = validate_birthday(дата)
+            set_birthday(interaction.user.id, дата, updated_by=interaction.user.id, source="discord_user")
             await interaction.response.send_message(f"✅ День рождения установлен: {дата}")
         except ValueError:
             await interaction.response.send_message("❌ Неверный формат даты. Используй: ДД.ММ")
 
     @app_commands.command(name="д-р", description="Удалить свой день рождения")
     async def д_р(self, interaction: discord.Interaction):
-        self.remove_birthday(interaction.user.id)
+        remove_birthday(interaction.user.id)
         await interaction.response.send_message("✅ День рождения удалён.")
 
     @app_commands.command(name="др_ад", description="(Админ) Установить день рождения другому пользователю")
@@ -80,9 +60,13 @@ class Birthday(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def др_ад(self, interaction: discord.Interaction, пользователь: discord.Member, дата: str):
         try:
-            datetime.strptime(f"{дата}.2020", "%d.%m.%Y")
-            self.set_birthday(пользователь.id, дата)
-            await interaction.response.send_message(f"✅ Установлен день рождения {пользователь.mention}: {дата}")
+            дата = validate_birthday(дата)
+            set_birthday(пользователь.id, дата, updated_by=interaction.user.id, source="discord_admin")
+            await interaction.response.send_message(
+                f"✅ Установлен день рождения {пользователь.mention}: {дата}\n"
+                "Если дата неверная, пользователь может сам исправить её через `/др`.",
+                ephemeral=True,
+            )
         except ValueError:
             await interaction.response.send_message("❌ Неверный формат даты. Используй: ДД.ММ")
 
@@ -107,22 +91,21 @@ class Birthday(commands.Cog):
     @app_commands.describe(пользователь="Пользователь, у которого удалить день рождения")
     @app_commands.checks.has_permissions(administrator=True)
     async def д_р_ад(self, interaction: discord.Interaction, пользователь: discord.Member):
-        self.remove_birthday(пользователь.id)
+        remove_birthday(пользователь.id)
         await interaction.response.send_message(f"✅ День рождения {пользователь.mention} удалён.")
 
     @app_commands.command(name="все_др", description="Показать все установленные дни рождения")
     async def все_др(self, interaction: discord.Interaction):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT user_id, birthday FROM birthdays")
-            rows = cur.fetchall()
+        rows = list_birthdays()
 
         if not rows:
             await interaction.response.send_message("❌ Ни один пользователь не установил дату рождения.")
             return
 
         lines = []
-        for user_id, birthday in rows:
+        for row in rows:
+            user_id = row["user_id"]
+            birthday = row["birthday"]
             member = interaction.guild.get_member(user_id)
             name = member.display_name if member else f"<@{user_id}> (не на сервере)"
             lines.append(f"**{name}** — `{birthday}`")
@@ -134,17 +117,13 @@ class Birthday(commands.Cog):
     @app_commands.describe(пользователь="Пользователь, чью дату рождения хотите узнать")
     async def когда_др(self, interaction: discord.Interaction, пользователь: discord.Member = None):
         target = пользователь or interaction.user
-
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT birthday FROM birthdays WHERE user_id = ?", (target.id,))
-            row = cur.fetchone()
+        row = get_birthday(target.id)
 
         if row:
             if пользователь:
-                await interaction.response.send_message(f"📅 День рождения {target.mention}: `{row[0]}`")
+                await interaction.response.send_message(f"📅 День рождения {target.mention}: `{row['birthday']}`")
             else:
-                await interaction.response.send_message(f"📅 Ваш день рождения: `{row[0]}`")
+                await interaction.response.send_message(f"📅 Ваш день рождения: `{row['birthday']}`")
         else:
             if пользователь:
                 await interaction.response.send_message(f"❌ Пользователь {target.mention} не установил дату рождения.")
