@@ -193,6 +193,38 @@ def _status_chip(ok: bool, on_text: str = "ON", off_text: str = "OFF") -> str:
     )
 
 
+def _feature_requires_restart(feature: dict) -> bool:
+    return bool(feature.get("restart_on_change"))
+
+
+def _mark_restart_required(request: web.Request, feature: dict, action: str):
+    if not _feature_requires_restart(feature):
+        return
+    reason = f"{feature['title']}: {action}"
+    request.app["restart_required"] = True
+    reasons = request.app.setdefault("restart_reasons", [])
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+def _render_restart_card(request: web.Request | None) -> str:
+    if request is None or not request.app.get("restart_required"):
+        return ""
+    reasons = request.app.get("restart_reasons") or []
+    reason_items = "".join(f"<li>{escape(str(reason))}</li>" for reason in reasons)
+    reason_block = f"<ul>{reason_items}</ul>" if reason_items else ""
+    return f"""
+    <div class="card">
+      <h2>Сохранить и перезапустить</h2>
+      <p class="help">Есть изменения, которые применятся только после чистого старта бота.</p>
+      {reason_block}
+      <form method="post" action="/maintenance/restart" onsubmit="return confirm('Перезапустить бота сейчас?');">
+        <button type="submit" class="button-danger">Сохранить и перезапустить бота</button>
+      </form>
+    </div>
+    """
+
+
 async def _delayed_process_restart(delay_seconds: float = 1.5):
     await asyncio.sleep(delay_seconds)
     os._exit(0)
@@ -298,6 +330,7 @@ FEATURE_REGISTRY = (
         "description": "Markov, Persona, GPT, фильтры и безопасное обучение.",
         "channel_modes": ("allow", "exclude"),
         "payload_hint": '{"allow_gpt_training": false}',
+        "restart_on_change": True,
     },
     {
         "id": "maintenance",
@@ -306,6 +339,7 @@ FEATURE_REGISTRY = (
         "description": "Сбор сообщений, индексация, профилактика и ручные проверки.",
         "channel_modes": (),
         "payload_hint": '{"requires_confirmation": true}',
+        "restart_on_change": True,
     },
     {
         "id": "fallback_platform",
@@ -314,6 +348,7 @@ FEATURE_REGISTRY = (
         "description": "Сайт/app, чат, комнаты, voice rooms и screen share.",
         "channel_modes": (),
         "payload_hint": '{"fallback_mode": false}',
+        "restart_on_change": True,
     },
 )
 
@@ -373,6 +408,11 @@ def _render_feature_registry(guild_id: int = 0) -> str:
             current = {"output": output, "allow": allow, "exclude": exclude}.get(mode, "-")
             modes.append(_render_mode_form(feature_id, mode, current))
         payload = escape(json.dumps(policy.extra or {}, ensure_ascii=False, indent=2))
+        restart_badge = (
+            '<span class="area-status restart-badge">нужен рестарт</span>'
+            if _feature_requires_restart(feature)
+            else ""
+        )
         cards.append(
             f"""
             <div class="feature-card">
@@ -389,6 +429,7 @@ def _render_feature_registry(guild_id: int = 0) -> str:
               <div class="feature-meta">
                 <span>{_status_chip(policy.enabled, "Enabled", "Disabled")}</span>
                 <span class="area-status">{escape(feature["group"])}</span>
+                {restart_badge}
               </div>
               <div class="channel-grid">
                 <div><b>Output</b><br><code>{escape(output)}</code></div>
@@ -430,6 +471,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     admin_area_registry = _render_admin_area_registry()
     active_guild_id = _admin_guild_id(bot)
     feature_registry = _render_feature_registry(active_guild_id)
+    restart_card = _render_restart_card(request)
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -532,13 +574,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
       <p class="help" style="margin-top:12px;">Этот переключатель управляет только использованием уже подключённой удалённой модели. Он не запускает обучение и не меняет файлы на диске.</p>
     </div>
 
-    <div class="card">
-      <h2>Сохранить и перезапустить</h2>
-      <p class="help">Настройки в карточках сохраняются сразу в базу. Эта кнопка применяет изменения, которым нужен чистый старт: бот завершит текущий процесс, а systemd поднимет его заново через несколько секунд.</p>
-      <form method="post" action="/maintenance/restart" onsubmit="return confirm('Перезапустить бота сейчас?');">
-        <button type="submit" class="button-danger">Сохранить и перезапустить бота</button>
-      </form>
-    </div>
+    {restart_card}
 
     <div class="card">
       <h2>Что можно делать здесь</h2>
@@ -743,6 +779,8 @@ async def _maintenance_restart(request: web.Request) -> web.Response:
         message = "Перезапуск уже запланирован. Подожди несколько секунд и обнови страницу."
     else:
         request.app["restart_scheduled"] = True
+        request.app["restart_required"] = False
+        request.app["restart_reasons"] = []
         request.app["log"].bind(src="admin-web").warning("Перезапуск бота запрошен из админ-панели")
         asyncio.create_task(_delayed_process_restart())
         message = "Сохранено. Бот перезапускается; страница может быть недоступна несколько секунд."
@@ -761,11 +799,12 @@ async def _feature_enabled(request: web.Request) -> web.Response:
     if not _is_authorized(request):
         raise web.HTTPUnauthorized(text="Admin token required")
     feature_id = request.match_info["feature"]
-    _feature_or_404(feature_id)
+    feature = _feature_or_404(feature_id)
     data = await request.post()
     enabled = str(data.get("enabled") or "0").strip() in {"1", "true", "on", "yes"}
     guild_id = _admin_guild_id(request.app["bot"])
     set_feature_enabled(guild_id, feature_id, enabled)
+    _mark_restart_required(request, feature, "enabled")
     message = f"Фича {feature_id} {'включена' if enabled else 'выключена'}."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
@@ -786,6 +825,7 @@ async def _feature_channel(request: web.Request) -> web.Response:
     reason = str(data.get("reason") or "")
     guild_id = _admin_guild_id(request.app["bot"])
     set_feature_channel(guild_id, feature_id, int(channel_raw), mode, reason)
+    _mark_restart_required(request, feature, f"{mode} channel")
     message = f"Канал {channel_raw} добавлен в {feature_id}:{mode}."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
@@ -805,6 +845,7 @@ async def _feature_channel_delete(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="channel_id must be numeric")
     guild_id = _admin_guild_id(request.app["bot"])
     deleted = clear_feature_channel(guild_id, feature_id, int(channel_raw), mode)
+    _mark_restart_required(request, feature, f"{mode} channel delete")
     message = f"Удалено записей {feature_id}:{mode}: {deleted}."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
@@ -828,6 +869,7 @@ async def _feature_payload(request: web.Request) -> web.Response:
         payload = {}
     guild_id = _admin_guild_id(request.app["bot"])
     set_feature_payload(guild_id, feature_id, payload)
+    _mark_restart_required(request, _feature_or_404(feature_id), "payload")
     message = f"Payload для {feature_id} сохранен."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
@@ -857,6 +899,9 @@ async def start_admin_panel(bot, log) -> None:
     app["bot"] = bot
     app["log"] = log
     app["admin_sessions"] = {}
+    app["restart_required"] = False
+    app["restart_reasons"] = []
+    app["restart_scheduled"] = False
     app.router.add_get("/", _index)
     app.router.add_get("/login", _login)
     app.router.add_get("/auth/discord/callback", _discord_callback)
