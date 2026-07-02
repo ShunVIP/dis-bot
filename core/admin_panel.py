@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import secrets
 import time
 from datetime import datetime
@@ -189,6 +191,11 @@ def _status_chip(ok: bool, on_text: str = "ON", off_text: str = "OFF") -> str:
         f"<span style=\"display:inline-block;padding:6px 10px;border-radius:999px;"
         f"background:{color};color:#fff;font-weight:700;\">{escape(text)}</span>"
     )
+
+
+async def _delayed_process_restart(delay_seconds: float = 1.5):
+    await asyncio.sleep(delay_seconds)
+    os._exit(0)
 
 
 ADMIN_AREAS = (
@@ -443,6 +450,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     input, textarea {{ border:1px solid #cbd5e1; border-radius:10px; padding:10px 12px; font:inherit; }}
     textarea {{ min-height:88px; width:100%; box-sizing:border-box; font-family:Consolas, monospace; }}
     .button-secondary {{ background:#475569; }}
+    .button-danger {{ background:#b91c1c; }}
     .actions {{ display:flex; gap:12px; flex-wrap:wrap; }}
     .actions form {{ margin:0; }}
     .actions a {{ display:inline-block; text-decoration:none; border-radius:12px; padding:12px 16px; font-size:15px; font-weight:700; background:#475569; color:#fff; }}
@@ -525,11 +533,19 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     </div>
 
     <div class="card">
+      <h2>Сохранить и перезапустить</h2>
+      <p class="help">Настройки в карточках сохраняются сразу в базу. Эта кнопка применяет изменения, которым нужен чистый старт: бот завершит текущий процесс, а systemd поднимет его заново через несколько секунд.</p>
+      <form method="post" action="/maintenance/restart" onsubmit="return confirm('Перезапустить бота сейчас?');">
+        <button type="submit" class="button-danger">Сохранить и перезапустить бота</button>
+      </form>
+    </div>
+
+    <div class="card">
       <h2>Что можно делать здесь</h2>
       <ul>
         <li>Смотреть статус защиты, bridge и режима сервера.</li>
         <li>Включать и выключать использование удалённой тяжёлой модели для текущего процесса бота.</li>
-        <li>Открывать панель только через Tailscale и токен администратора.</li>
+        <li>Открывать панель через Discord OAuth с проверкой прав администратора сервера.</li>
       </ul>
     </div>
 
@@ -719,6 +735,20 @@ async def _remote_models(request: web.Request) -> web.Response:
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
+async def _maintenance_restart(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    if request.app.get("restart_scheduled"):
+        message = "Перезапуск уже запланирован. Подожди несколько секунд и обнови страницу."
+    else:
+        request.app["restart_scheduled"] = True
+        request.app["log"].bind(src="admin-web").warning("Перезапуск бота запрошен из админ-панели")
+        asyncio.create_task(_delayed_process_restart())
+        message = "Сохранено. Бот перезапускается; страница может быть недоступна несколько секунд."
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
 def _feature_or_404(feature_id: str) -> dict:
     feature = FEATURES_BY_ID.get(feature_id)
     if not feature:
@@ -825,12 +855,14 @@ async def start_admin_panel(bot, log) -> None:
 
     app = web.Application()
     app["bot"] = bot
+    app["log"] = log
     app["admin_sessions"] = {}
     app.router.add_get("/", _index)
     app.router.add_get("/login", _login)
     app.router.add_get("/auth/discord/callback", _discord_callback)
     app.router.add_post("/auth/discord/token", _discord_token_login)
     app.router.add_post("/remote-models", _remote_models)
+    app.router.add_post("/maintenance/restart", _maintenance_restart)
     app.router.add_post("/features/{feature}/enabled", _feature_enabled)
     app.router.add_post("/features/{feature}/channel", _feature_channel)
     app.router.add_post("/features/{feature}/channel/delete", _feature_channel_delete)
