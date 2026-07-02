@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core.paths import SOCIAL_DB
-from core.settings_store import get_feature_policy, set_feature_channel, set_feature_payload
+from core.settings_store import get_feature_policy, has_feature_setting, set_feature_channel, set_feature_payload
 
 DB_PATH = SOCIAL_DB
 FEATURE_WWM_GUILD = "wwm_guild"
@@ -70,7 +70,11 @@ def _config(guild_id: int) -> tuple[int | None, int | None, bool, str]:
     welcome_channel_id, reception_channel_id, auto_nickname, nickname_template = _legacy_config(guild_id)
     policy = get_feature_policy(guild_id, FEATURE_WWM_GUILD)
     payload = policy.extra or {}
+    configured = has_feature_setting(guild_id, FEATURE_WWM_GUILD) or policy.output_channel_id is not None or bool(payload)
 
+    if configured:
+        welcome_channel_id = None
+        reception_channel_id = None
     if policy.output_channel_id:
         welcome_channel_id = int(policy.output_channel_id)
     try:

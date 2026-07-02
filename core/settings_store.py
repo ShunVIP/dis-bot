@@ -139,6 +139,13 @@ def set_feature_channel(
         raise ValueError("mode must be output, allow or exclude")
     ensure_settings_tables()
     with sqlite3.connect(SOCIAL_DB) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO feature_settings(guild_id, feature, enabled, payload, updated_at)
+            VALUES(?, ?, 1, '{}', ?)
+            """,
+            (guild_id, feature, _now()),
+        )
         if mode == "output":
             conn.execute(
                 "DELETE FROM feature_channels WHERE guild_id=? AND feature=? AND mode='output'",

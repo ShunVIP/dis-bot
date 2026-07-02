@@ -154,8 +154,8 @@ def _get_config(guild_id: int) -> tuple[bool, int, set[int], set[int]]:
     if configured:
         enabled = policy.enabled
         threshold = int(payload.get("threshold") or threshold)
-        allowed = set(policy.allowed_channel_ids) or allowed
-        excluded = excluded | set(policy.excluded_channel_ids)
+        allowed = set(policy.allowed_channel_ids)
+        excluded = set(policy.excluded_channel_ids)
     return enabled, max(1, min(threshold, 3)), allowed, excluded
 
 

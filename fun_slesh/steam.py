@@ -25,7 +25,7 @@ from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from core.paths import SOCIAL_DB
-from core.settings_store import get_feature_policy, set_feature_channel, set_feature_payload
+from core.settings_store import get_feature_policy, has_feature_setting, set_feature_channel, set_feature_payload
 
 DB_PATH = SOCIAL_DB
 FEATURE_STEAM = "steam"
@@ -283,7 +283,11 @@ def _steam_notify_configs(bot: commands.Bot) -> list[tuple[int, int, int]]:
     }
     for guild in bot.guilds:
         policy = get_feature_policy(guild.id, FEATURE_STEAM)
-        if not policy.output_channel_id:
+        configured = has_feature_setting(guild.id, FEATURE_STEAM) or policy.output_channel_id is not None
+        if not configured:
+            continue
+        if not policy.enabled or not policy.output_channel_id:
+            by_guild.pop(guild.id, None)
             continue
         payload = policy.extra or {}
         legacy_min_pct = by_guild.get(guild.id, (guild.id, int(policy.output_channel_id), 50))[2]

@@ -187,6 +187,14 @@ async def on_ready():
     except Exception as e:
         log.bind(src="gateway").error(f"    Ошибка синхронизации: {e}")
 
+    if not getattr(bot, "admin_settings_seeded", False):
+        try:
+            from core.settings_migration import seed_admin_settings_from_legacy
+            seed_admin_settings_from_legacy(log)
+            bot.admin_settings_seeded = True
+        except Exception as e:
+            log.bind(src="settings").error(f"Ошибка миграции настроек в админ-панель: {e}")
+
     try:
         from fun_slesh.menu import ensure_admin_panel_entry
         ok = await ensure_admin_panel_entry(bot)

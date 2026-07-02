@@ -192,16 +192,19 @@ def _get_config(guild_id: int) -> tuple[bool, int, bool, set[int], set[int]]:
     legacy_enabled, legacy_chance, legacy_mention_only, legacy_channel_ids = _get_legacy_config(guild_id)
     policy = get_feature_policy(guild_id, FEATURE_SOCIAL_CHAT)
     payload = policy.extra or {}
+    configured = has_feature_setting(guild_id, FEATURE_SOCIAL_CHAT) or bool(
+        policy.allowed_channel_ids or policy.excluded_channel_ids or payload
+    )
 
-    enabled = policy.enabled if has_feature_setting(guild_id, FEATURE_SOCIAL_CHAT) else legacy_enabled
+    enabled = policy.enabled if configured else legacy_enabled
     try:
         chance_percent = int(payload.get("chance_percent", legacy_chance))
     except (TypeError, ValueError):
         chance_percent = legacy_chance
     chance_percent = max(0, min(100, chance_percent))
     mention_only = bool(payload.get("mention_only", legacy_mention_only))
-    allowed_channel_ids = set(policy.allowed_channel_ids) or legacy_channel_ids
-    excluded_channel_ids = _social_excluded_channel_ids(guild_id) | set(policy.excluded_channel_ids)
+    allowed_channel_ids = set(policy.allowed_channel_ids) if configured else legacy_channel_ids
+    excluded_channel_ids = set(policy.excluded_channel_ids) if configured else _social_excluded_channel_ids(guild_id)
     return enabled, chance_percent, mention_only, allowed_channel_ids, excluded_channel_ids
 
 

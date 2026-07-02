@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime
 
 from core.paths import BIRTHDAYS_DB
-from core.settings_store import get_feature_policy, set_feature_channel
+from core.settings_store import get_feature_policy, has_feature_setting, set_feature_channel
 
 DB_PATH = BIRTHDAYS_DB
 FEATURE_BIRTHDAY = "birthday"
@@ -33,6 +33,8 @@ def _birthday_channel_id(guild_id: int) -> int | None:
     policy = get_feature_policy(guild_id, FEATURE_BIRTHDAY)
     if policy.output_channel_id:
         return int(policy.output_channel_id)
+    if has_feature_setting(guild_id, FEATURE_BIRTHDAY):
+        return None
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute("SELECT channel_id FROM birthday_config WHERE guild_id=?", (guild_id,)).fetchone()
     return int(row[0]) if row and row[0] else None

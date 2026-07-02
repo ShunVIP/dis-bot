@@ -79,17 +79,22 @@ def _legacy_excluded_channel_ids(guild_id: int) -> set[int]:
 
 def _excluded_channel_ids(guild_id: int) -> set[int]:
     policy = get_feature_policy(guild_id, FEATURE_VOICE_ROLES)
-    return _legacy_excluded_channel_ids(guild_id) | set(policy.excluded_channel_ids)
+    if has_feature_setting(guild_id, FEATURE_VOICE_ROLES) or policy.excluded_channel_ids:
+        return set(policy.excluded_channel_ids)
+    return _legacy_excluded_channel_ids(guild_id)
 
 
 def _excluded_rows(guild_id: int) -> list[tuple[int, str]]:
+    policy = get_feature_policy(guild_id, FEATURE_VOICE_ROLES)
+    if has_feature_setting(guild_id, FEATURE_VOICE_ROLES) or policy.excluded_channel_ids:
+        return [(int(channel_id), "admin panel") for channel_id in sorted(policy.excluded_channel_ids)]
+
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT channel_id, reason FROM voice_roles_excluded_channels WHERE guild_id=? ORDER BY channel_id",
             (guild_id,),
         ).fetchall()
     reasons = {int(channel_id): str(reason or "") for channel_id, reason in rows}
-    policy = get_feature_policy(guild_id, FEATURE_VOICE_ROLES)
     for channel_id in policy.excluded_channel_ids:
         reasons.setdefault(int(channel_id), "feature policy")
     return sorted(reasons.items())

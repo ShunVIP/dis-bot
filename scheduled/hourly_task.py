@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 import discord
 
 from core.paths import BIRTHDAYS_DB
-from core.settings_store import get_feature_policy
+from core.settings_store import get_feature_policy, has_feature_setting
 
 # ── Часовой пояс для крон-задачи ──────────────────────────────────────────────
 MSK = ZoneInfo("Europe/Moscow")
@@ -19,6 +19,8 @@ def _birthday_channel_id(guild_id: int) -> int | None:
     policy = get_feature_policy(guild_id, FEATURE_BIRTHDAY)
     if policy.output_channel_id:
         return int(policy.output_channel_id)
+    if has_feature_setting(guild_id, FEATURE_BIRTHDAY):
+        return None
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS birthday_config (
