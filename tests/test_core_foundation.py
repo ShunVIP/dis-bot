@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, platform_store, profile_service, settings_migration, settings_store, web_app_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -40,6 +40,8 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
             patch.object(platform_store, "SOCIAL_DB", self.db_path),
+            patch.object(parody_message_store, "DB_PATH", self.db_path),
+            patch.object(parody_feedback_store, "PARODY_RATINGS_DB", self.db_path),
         ]
         for item in self.patches:
             item.start()
@@ -333,6 +335,52 @@ class MlArtifactTests(unittest.TestCase):
                 manifest = ml_artifacts.load_artifact_manifest()
             self.assertEqual(result, {"registered": 1, "artifacts": 1, "available": 1})
             self.assertEqual(manifest["artifacts"][0]["source_rows"], 321)
+
+
+class ParodyLayerTests(IsolatedDatabaseTest):
+    def test_message_store_owns_corpus_checkpoints_ranges_and_merge(self):
+        rows = [
+            (10, "first", 1, 2, 100, "old", "2024-01-01T00:00:00+00:00"),
+            (10, "first", 1, 2, 101, "new", "2025-01-01T00:00:00+00:00"),
+            (20, "second", 1, 2, 102, "merge", "2025-02-01T00:00:00+00:00"),
+        ]
+        self.assertEqual(parody_message_store.save_messages(rows), 3)
+        self.assertEqual(parody_message_store.save_messages(rows), 0)
+        parody_message_store.upsert_user(10, "first")
+        parody_message_store.update_checkpoint(2, 101)
+        self.assertEqual(parody_message_store.get_checkpoint(2), 101)
+        self.assertEqual(parody_message_store.get_user_messages_between_years(10, 2024, 2025), ["old", "new"])
+        self.assertEqual(parody_message_store.get_user_stats(10)["count"], 2)
+        self.assertEqual(parody_message_store.merge_user_messages(10, 20), 1)
+        self.assertEqual(parody_message_store.get_user_messages(10), ["old", "new", "merge"])
+        self.assertEqual(parody_message_store.reset_checkpoints(), 1)
+
+    def test_feedback_store_validates_and_reads_training_signals(self):
+        parody_feedback_store.save_rating(10, "разум", "good", 1, 99)
+        parody_feedback_store.save_rating(10, "разум", "bad", -1, 98)
+        self.assertEqual(parody_feedback_store.get_good_phrases(10, "разум"), ["good"])
+        self.assertEqual(parody_feedback_store.get_bad_phrases(10, "разум"), {"bad"})
+        with self.assertRaises(ValueError):
+            parody_feedback_store.save_rating(10, "разум", "invalid", 0, 99)
+
+    def test_model_service_writes_atomically_and_registers_artifact(self):
+        class FakeModel:
+            @staticmethod
+            def to_json():
+                return '{"model": "ok"}'
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "models"
+            with patch.object(parody_model_service, "MODELS_DIR", root), patch.object(
+                ml_artifacts, "MODELS_DIR", root
+            ), patch.object(ml_artifacts, "MANIFEST_PATH", root / "manifest.json"):
+                parody_model_service.save_model(10, "мем", FakeModel(), source_rows=55)
+                manifest = ml_artifacts.load_artifact_manifest(verify_files=True)
+                self.assertEqual(manifest["artifacts"][0]["source_rows"], 55)
+                self.assertTrue(manifest["artifacts"][0]["available"])
+                self.assertEqual(list(root.glob("*.tmp.*")), [])
+                self.assertEqual(parody_model_service.remove_user_models(10), 1)
+                self.assertEqual(ml_artifacts.load_artifact_manifest()["artifacts"], [])
 
 
 class PermissionTests(IsolatedDatabaseTest):

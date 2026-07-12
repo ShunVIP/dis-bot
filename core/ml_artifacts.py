@@ -131,3 +131,23 @@ def register_artifact(
         )
         _write_unlocked(manifest)
     return record
+
+
+def remove_artifacts(*, pipeline: str, user_id: int | None, kinds: set[str] | None = None) -> int:
+    key_user = int(user_id) if user_id is not None else None
+    with _LOCK:
+        manifest = _read_unlocked()
+        kept = []
+        removed = 0
+        for item in manifest["artifacts"]:
+            matches = item.get("pipeline") == pipeline and item.get("user_id") == key_user
+            if matches and kinds is not None:
+                matches = str(item.get("kind")) in kinds
+            if matches:
+                removed += 1
+            else:
+                kept.append(item)
+        if removed:
+            manifest["artifacts"] = kept
+            _write_unlocked(manifest)
+        return removed

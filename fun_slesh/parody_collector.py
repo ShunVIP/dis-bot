@@ -7,9 +7,7 @@
 - Фильтрует мусор: команды, ссылки, упоминания, короткие сообщения, боты
 """
 
-import os
 import re
-import sqlite3
 import asyncio
 from datetime import datetime, timezone
 from typing import Optional
@@ -17,6 +15,18 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+from core.parody_message_store import (
+    DB_PATH,
+    ensure_message_tables,
+    get_all_user_ids,
+    get_checkpoint as store_get_checkpoint,
+    get_user_messages,
+    get_user_stats,
+    reset_checkpoints,
+    save_messages as store_save_messages,
+    update_checkpoint as store_update_checkpoint,
+    upsert_user as store_upsert_user,
+)
 from fun_slesh.parody_channel_settings import (
     clear_parody_channel_excluded,
     filter_parody_channels,
@@ -25,7 +35,6 @@ from fun_slesh.parody_channel_settings import (
 )
 from fun_slesh.parody_filters import get_ignored_channels
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "messages.db"))
 UTC = timezone.utc
 
 # ─── Фильтры ──────────────────────────────────────────────────────────────────
@@ -57,112 +66,20 @@ def _is_valid(text: str) -> bool:
 
 # ─── БД ───────────────────────────────────────────────────────────────────────
 def _ensure_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        # Сырые сообщения
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_messages (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     INTEGER NOT NULL,
-                username    TEXT    NOT NULL,
-                guild_id    INTEGER NOT NULL,
-                channel_id  INTEGER NOT NULL,
-                message_id  INTEGER NOT NULL UNIQUE,
-                content     TEXT    NOT NULL,
-                created_at  TEXT    NOT NULL
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_um_user ON user_messages(user_id)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_um_created ON user_messages(created_at)")
-
-        # Чекпоинты по каналам
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS collect_checkpoints (
-                channel_id      INTEGER PRIMARY KEY,
-                last_message_id INTEGER,
-                last_collected  TEXT
-            )
-        """)
-
-        # Метаданные пользователей (id → последний известный ник)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS known_users (
-                user_id     INTEGER PRIMARY KEY,
-                username    TEXT    NOT NULL,
-                updated_at  TEXT    NOT NULL
-            )
-        """)
-        conn.commit()
+    ensure_message_tables()
 
 def _save_messages(rows: list[tuple]) -> int:
     """Пакетная запись. Возвращает кол-во реально вставленных строк."""
-    if not rows:
-        return 0
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.executemany("""
-            INSERT OR IGNORE INTO user_messages
-                (user_id, username, guild_id, channel_id, message_id, content, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, rows)
-        inserted = cur.rowcount
-        conn.commit()
-    return inserted
+    return store_save_messages(rows)
 
 def _update_checkpoint(channel_id: int, last_msg_id: int):
-    now = datetime.now(UTC).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO collect_checkpoints (channel_id, last_message_id, last_collected)
-            VALUES (?, ?, ?)
-            ON CONFLICT(channel_id) DO UPDATE SET
-                last_message_id = excluded.last_message_id,
-                last_collected  = excluded.last_collected
-        """, (channel_id, last_msg_id, now))
-        conn.commit()
+    store_update_checkpoint(channel_id, last_msg_id)
 
 def _get_checkpoint(channel_id: int) -> Optional[int]:
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT last_message_id FROM collect_checkpoints WHERE channel_id = ?", (channel_id,))
-        row = cur.fetchone()
-        return int(row[0]) if row else None
+    return store_get_checkpoint(channel_id)
 
 def _upsert_user(user_id: int, username: str):
-    now = datetime.now(UTC).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO known_users (user_id, username, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, updated_at = excluded.updated_at
-        """, (user_id, username, now))
-        conn.commit()
-
-def get_user_messages(user_id: int) -> list[str]:
-    """Все очищенные сообщения пользователя для обучения модели."""
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT content FROM user_messages WHERE user_id = ? ORDER BY created_at ASC", (user_id,))
-        return [row[0] for row in cur.fetchall()]
-
-def get_user_stats(user_id: int) -> dict:
-    """Статистика по пользователю для команды /стиль_статистика."""
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM user_messages WHERE user_id = ?", (user_id,))
-        count, first, last = cur.fetchone()
-        cur.execute("SELECT username FROM known_users WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
-        username = row[0] if row else str(user_id)
-    return {"count": count or 0, "first": first, "last": last, "username": username}
-
-def get_all_user_ids() -> list[int]:
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT user_id FROM user_messages")
-        return [row[0] for row in cur.fetchall()]
+    store_upsert_user(user_id, username)
 
 # ─── Сборщик ──────────────────────────────────────────────────────────────────
 # ─── Rate-limit настройки ─────────────────────────────────────────────────────
@@ -383,11 +300,7 @@ class ParodyCollector(commands.Cog):
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def сбросить_чекпоинты(self, interaction: discord.Interaction):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("DELETE FROM collect_checkpoints")
-            deleted = cur.rowcount
-            conn.commit()
+        deleted = reset_checkpoints()
         await interaction.response.send_message(
             f"✅ Сброшено **{deleted}** чекпоинтов. "
             f"Следующий `/собрать_сообщения` перечитает все каналы с самого начала.",

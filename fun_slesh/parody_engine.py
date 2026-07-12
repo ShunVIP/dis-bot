@@ -15,10 +15,8 @@ ML-движок пародии.
 /список_пользователей, /модели_статус
 """
 
-import os
 import re
 import sys
-import sqlite3
 import asyncio
 import random
 import ctypes
@@ -62,8 +60,38 @@ from core.runtime_policy import (
     is_full_maintenance_allowed,
     is_gpt_training_allowed,
 )
-from core.ml_artifacts import register_artifact
-from core.paths import MODELS_DIR as CANONICAL_MODELS_DIR
+from core.parody_feedback_store import (
+    ensure_feedback_tables as _ensure_ratings_db,
+    get_bad_phrases,
+    get_good_phrases,
+    save_rating,
+)
+from core.parody_message_store import (
+    get_available_years,
+    get_user_messages_by_year,
+    get_user_messages_between_years,
+    merge_user_messages,
+    reset_checkpoints,
+)
+from core.paths import MODELS_DIR
+from core.parody_model_service import (
+    DEFAULT_MODEL,
+    MARKOV_OK,
+    QUALITY_LEVELS,
+    build_model as _build_model,
+    generate_collage,
+    generate_epoch,
+    generate_phrase,
+    generate_topic,
+    load_model as _load_model,
+    markov_model_exists,
+    model_path as _model_path,
+    remove_user_models,
+    strip_roles as _strip_roles,
+    train_all_users as train_markov_users,
+    train_user,
+    train_user_all_qualities,
+)
 
 try:
     from fun_slesh.parody_engine_wakelock import prevent_sleep, allow_sleep
@@ -75,14 +103,8 @@ except Exception:
 
 from fun_slesh.parody_collector import (
     get_user_messages, get_user_stats, get_all_user_ids,
-    collect_channel, _ensure_db as ensure_collector_db, DB_PATH,
+    collect_channel, _ensure_db as ensure_collector_db,
 )
-
-try:
-    import markovify
-    MARKOV_OK = True
-except ImportError:
-    MARKOV_OK = False
 
 # Persona — без GPU
 try:
@@ -137,17 +159,8 @@ async def fine_tune_user(user_id: int, messages: list[str], epochs: int = 3) -> 
 
 MSK = ZoneInfo("Europe/Moscow")
 UTC = timezone.utc
-MODELS_DIR = str(CANONICAL_MODELS_DIR)
-RATINGS_DB  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "parody_ratings.db"))
 
 _MK_EXECUTOR = ThreadPoolExecutor(max_workers=1)
-
-# ─── Уровни markovify ─────────────────────────────────────────────────────────
-QUALITY_LEVELS = {
-    "мем":   {"state_size": 2, "emoji": "🎲", "desc": "абсурдный рандом",      "candidates": 5,  "min_words": 2},
-    "разум": {"state_size": 3, "emoji": "🧠", "desc": "максимум осознанности", "candidates": 30, "min_words": 5},
-}
-DEFAULT_MODEL = "мем"
 
 
 def _gpt_requested(mode: str) -> bool:
@@ -167,97 +180,18 @@ KNOWN_DUPLICATES: dict[int, list[int]] = {
     226003307338924032: [347707345998053377],
 }
 
-# ─── Рейтинги ─────────────────────────────────────────────────────────────────
-def _ensure_ratings_db():
-    os.makedirs(os.path.dirname(RATINGS_DB), exist_ok=True)
-    with sqlite3.connect(RATINGS_DB) as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS phrase_ratings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL, quality TEXT NOT NULL,
-            phrase TEXT NOT NULL, rating INTEGER NOT NULL,
-            rated_by INTEGER NOT NULL, rated_at TEXT NOT NULL
-        )""")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_pr_user ON phrase_ratings(user_id, quality, rating)")
-        conn.commit()
-
-def save_rating(user_id: int, quality: str, phrase: str, rating: int, rated_by: int):
-    _ensure_ratings_db()
-    with sqlite3.connect(RATINGS_DB) as conn:
-        conn.execute(
-            "INSERT INTO phrase_ratings (user_id,quality,phrase,rating,rated_by,rated_at) VALUES (?,?,?,?,?,?)",
-            (user_id, quality, phrase, rating, rated_by, datetime.now(UTC).isoformat())
-        )
-        conn.commit()
-
-def get_bad_phrases(user_id: int, quality: str) -> set:
-    _ensure_ratings_db()
-    with sqlite3.connect(RATINGS_DB) as conn:
-        cur = conn.execute("SELECT phrase FROM phrase_ratings WHERE user_id=? AND quality=? AND rating=-1", (user_id, quality))
-        return {r[0] for r in cur.fetchall()}
-
-def get_good_phrases(user_id: int, quality: str) -> list:
-    _ensure_ratings_db()
-    with sqlite3.connect(RATINGS_DB) as conn:
-        cur = conn.execute("SELECT phrase FROM phrase_ratings WHERE user_id=? AND quality=? AND rating=1", (user_id, quality))
-        return [r[0] for r in cur.fetchall()]
-
-# ─── Пути к moделям ───────────────────────────────────────────────────────────
-def _model_path(user_id: int, quality: str = DEFAULT_MODEL) -> str:
-    os.makedirs(MODELS_DIR, exist_ok=True)
-    return os.path.join(MODELS_DIR, f"{user_id}_{quality}.json")
-
-def _save_model(user_id: int, quality: str, model, source_rows: int = 0):
-    path = _model_path(user_id, quality)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(model.to_json())
-    register_artifact(
-        pipeline="parody_markov",
-        user_id=user_id,
-        kind=quality,
-        path=path,
-        source_rows=source_rows,
-        execution_location="vps" if IS_SERVER_RUNTIME else "local_pc",
-        metadata={"state_size": QUALITY_LEVELS[quality]["state_size"]},
-    )
-
-def _load_model(user_id: int, quality: str = DEFAULT_MODEL):
-    path = _model_path(user_id, quality)
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return markovify.Text.from_json(f.read())
-    except Exception:
-        try:
-            os.remove(path)
-            print(f"[parody] ⚠️ Удалён битый файл: {path}")
-        except Exception:
-            pass
-        return None
-
 def model_exists(user_id: int, quality: str = DEFAULT_MODEL) -> bool:
     if quality == "автор":
         return PERSONA_OK and persona_exists(user_id)
     if quality == "нейро":
         return GPT_OK and gpt_model_exists(user_id)
-    return os.path.exists(_model_path(user_id, quality))
+    return markov_model_exists(user_id, quality)
 
 # ─── Объединение дублей ───────────────────────────────────────────────────────
 def _merge_accounts(primary_id: int, secondary_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM user_messages WHERE user_id=?", (secondary_id,))
-        if cur.fetchone()[0] == 0:
-            return 0
-        cur.execute("UPDATE OR IGNORE user_messages SET user_id=? WHERE user_id=?", (primary_id, secondary_id))
-        moved = cur.rowcount
-        cur.execute("DELETE FROM user_messages WHERE user_id=?", (secondary_id,))
-        cur.execute("DELETE FROM known_users WHERE user_id=?", (secondary_id,))
-        conn.commit()
-    for q in QUALITY_LEVELS:
-        p = _model_path(secondary_id, q)
-        if os.path.exists(p):
-            os.remove(p)
+    moved = merge_user_messages(primary_id, secondary_id)
+    if moved:
+        remove_user_models(secondary_id)
     return moved
 
 def apply_known_duplicates():
@@ -267,64 +201,8 @@ def apply_known_duplicates():
             if moved > 0:
                 print(f"[parody] 🔀 {primary} ← {sec} (+{moved} сообщ.)")
 
-# ─── Обучение markovify ───────────────────────────────────────────────────────
-_MARKOV_CMD_RE = re.compile(r'^/\S')
-
-def _preprocess_for_markov(messages: list) -> list:
-    """Убираем slash-команды из обучающего корпуса markovify."""
-    clean = []
-    for m in messages:
-        s = m.strip()
-        if not s:
-            continue
-        if _MARKOV_CMD_RE.match(s) and ' ' not in s and len(s) < 40:
-            continue
-        clean.append(s)
-    return clean
-
-def _build_model(messages: list, state_size: int):
-    if not messages:
-        return None
-    try:
-        filtered = _preprocess_for_markov(messages)
-        if not filtered:
-            return None
-        return markovify.NewlineText("\n".join(filtered), state_size=state_size)
-    except Exception:
-        return None
-
-def train_user(user_id: int, messages: list, quality: str = DEFAULT_MODEL):
-    if not MARKOV_OK or not messages:
-        return None
-    cfg = QUALITY_LEVELS[quality]
-    if quality == "разум":
-        good = get_good_phrases(user_id, quality)
-        if good:
-            messages = messages + good * 3
-    new_model = _build_model(messages, cfg["state_size"])
-    if not new_model:
-        return None
-    old_model = _load_model(user_id, quality)
-    if old_model:
-        try:
-            combined = markovify.combine([new_model, old_model], [0.7, 0.3])
-            _save_model(user_id, quality, combined, len(messages))
-            return combined
-        except Exception:
-            pass
-    _save_model(user_id, quality, new_model, len(messages))
-    return new_model
-
-def train_user_all_qualities(user_id: int, messages: list) -> dict:
-    return {q: (train_user(user_id, messages, q) is not None) for q in QUALITY_LEVELS}
-
 def _train_all_users_sync(min_messages: int = 50) -> dict:
-    results = {}
-    for uid in get_all_user_ids():
-        msgs = get_user_messages(uid)
-        if len(msgs) >= min_messages:
-            results[uid] = train_user_all_qualities(uid, msgs)
-    return results
+    return train_markov_users(get_all_user_ids(), minimum_messages=min_messages)
 
 async def train_all_users_async(min_messages: int = 50) -> dict:
     loop = asyncio.get_event_loop()
@@ -332,124 +210,6 @@ async def train_all_users_async(min_messages: int = 50) -> dict:
 
 def train_all_users(min_messages: int = 50) -> dict:
     return _train_all_users_sync(min_messages)
-
-# ─── Генерация markovify ──────────────────────────────────────────────────────
-import re as _re
-_ROLE_RE = _re.compile(r'<@&\d+>')
-
-def _strip_roles(text: str) -> str:
-    text = _ROLE_RE.sub('', text)
-    return _re.sub(r'  +', ' ', text).strip()
-
-def _is_coherent(phrase: str, min_words: int) -> bool:
-    if not phrase:
-        return False
-    words = phrase.split()
-    if len(words) < min_words:
-        return False
-    bad_endings = {"и","или","но","а","в","на","с","к","по","за","из","от","до"}
-    if words[-1].lower().rstrip(".,!?") in bad_endings:
-        return False
-    return True
-
-def _score_phrase(phrase: str) -> float:
-    words = phrase.split()
-    score = len(words) * 1.0
-    if phrase.rstrip()[-1] in ".!?":
-        score += 3.0
-    if 8 <= len(words) <= 20:
-        score += 2.0
-    return score
-
-def generate_phrase(user_id: int, quality: str = DEFAULT_MODEL,
-                    tries: int = 200, context_word: str = None) -> Optional[str]:
-    if not MARKOV_OK:
-        return None
-    model = _load_model(user_id, quality)
-    if not model:
-        return None
-    cfg = QUALITY_LEVELS[quality]
-    bad = get_bad_phrases(user_id, quality)
-    candidates = []
-    for _ in range(cfg["candidates"]):
-        try:
-            if context_word:
-                p = model.make_sentence_with_start(context_word, tries=20, strict=False)
-            else:
-                p = model.make_sentence(tries=tries // cfg["candidates"])
-            if p and p not in bad and _is_coherent(p, cfg["min_words"]):
-                candidates.append(p)
-        except Exception:
-            pass
-    if not candidates:
-        for _ in range(20):
-            p = model.make_sentence(tries=10)
-            if p and p not in bad:
-                return p
-        return model.make_short_sentence(max_chars=200, tries=50)
-    return max(candidates, key=_score_phrase) if quality == "разум" else random.choice(candidates)
-
-def generate_collage(id1: int, id2: int, quality: str = DEFAULT_MODEL) -> Optional[str]:
-    if not MARKOV_OK:
-        return None
-    m1, m2 = _load_model(id1, quality), _load_model(id2, quality)
-    if not m1 or not m2:
-        return None
-    try:
-        combined = markovify.combine([m1, m2], [0.5, 0.5])
-        cfg = QUALITY_LEVELS[quality]
-        bad = get_bad_phrases(id1, quality) | get_bad_phrases(id2, quality)
-        candidates = [p for _ in range(cfg["candidates"])
-                      if (p := combined.make_sentence(tries=20))
-                      and p not in bad and _is_coherent(p, cfg["min_words"])]
-        return max(candidates, key=_score_phrase) if quality == "разум" and candidates \
-            else (random.choice(candidates) if candidates else combined.make_sentence(tries=100))
-    except Exception:
-        return None
-
-def get_user_messages_by_year(user_id: int, year: int) -> list:
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT content FROM user_messages WHERE user_id=? AND strftime('%Y', created_at)=? ORDER BY created_at ASC",
-                    (user_id, str(year)))
-        return [r[0] for r in cur.fetchall()]
-
-def get_available_years(user_id: int) -> list:
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT strftime('%Y', created_at) yr, COUNT(*) cnt FROM user_messages WHERE user_id=? GROUP BY yr HAVING cnt >= 20 ORDER BY yr DESC",
-                    (user_id,))
-        return [int(r[0]) for r in cur.fetchall()]
-
-def generate_epoch(user_id: int, year: int, quality: str = DEFAULT_MODEL) -> Optional[str]:
-    msgs = get_user_messages_by_year(user_id, year)
-    if len(msgs) < 20:
-        return None
-    model = _build_model(msgs, QUALITY_LEVELS[quality]["state_size"])
-    if not model:
-        return None
-    cfg = QUALITY_LEVELS[quality]
-    bad = get_bad_phrases(user_id, quality)
-    candidates = [p for _ in range(cfg["candidates"])
-                  if (p := model.make_sentence(tries=20))
-                  and p not in bad and _is_coherent(p, cfg["min_words"])]
-    return max(candidates, key=_score_phrase) if quality == "разум" and candidates \
-        else (random.choice(candidates) if candidates else model.make_sentence(tries=50))
-
-def generate_topic(user_id: int, keyword: str, quality: str = DEFAULT_MODEL) -> Optional[str]:
-    filtered = [m for m in get_user_messages(user_id) if keyword.lower() in m.lower()]
-    if len(filtered) < 15:
-        return None
-    model = _build_model(filtered, QUALITY_LEVELS[quality]["state_size"])
-    if not model:
-        return None
-    cfg = QUALITY_LEVELS[quality]
-    bad = get_bad_phrases(user_id, quality)
-    candidates = [p for _ in range(cfg["candidates"])
-                  if (p := model.make_sentence(tries=20))
-                  and p not in bad and _is_coherent(p, cfg["min_words"])]
-    return max(candidates, key=_score_phrase) if quality == "разум" and candidates \
-        else (random.choice(candidates) if candidates else model.make_sentence(tries=50))
 
 # ─── Резолюция пользователя ───────────────────────────────────────────────────
 def resolve_user(guild: discord.Guild, value: str):
@@ -624,7 +384,7 @@ class ParodyEngine(commands.Cog):
         _ensure_ratings_db()
         if PERSONA_OK:
             _ensure_persona_db()
-        os.makedirs(MODELS_DIR, exist_ok=True)
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
         if not MARKOV_OK:
             print("[parody] ⚠️  markovify не установлен!")
         apply_known_duplicates()
@@ -939,13 +699,7 @@ class ParodyEngine(commands.Cog):
 
         # Промежуток дат
         if год_до and год_до > год:
-            import sqlite3 as _sq3
-            _DB = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'datebase', 'messages.db'))
-            with _sq3.connect(_DB) as _conn:
-                _rows = _conn.execute(
-                    "SELECT content FROM messages WHERE user_id=? AND CAST(strftime('%Y', timestamp) AS INT) BETWEEN ? AND ?",
-                    (target_id, год, год_до)).fetchall()
-            period_msgs = [r[0] for r in _rows]
+            period_msgs = get_user_messages_between_years(target_id, год, год_до)
             period_label = f"{год}–{год_до}"
         else:
             period_msgs = get_user_messages_by_year(target_id, год)
@@ -1313,11 +1067,7 @@ class ParodyEngine(commands.Cog):
         prevent_sleep()
 
         # Шаг 1: сброс чекпоинтов
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("DELETE FROM collect_checkpoints")
-            deleted = cur.rowcount
-            conn.commit()
+        deleted = reset_checkpoints()
 
         status = await interaction.followup.send(
             embed=discord.Embed(
