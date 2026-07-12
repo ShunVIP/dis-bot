@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, profile_service, settings_migration, settings_store, web_app_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, platform_store, profile_service, settings_migration, settings_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -38,6 +38,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(game_profiles, "SOCIAL_DB", self.db_path),
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
+            patch.object(platform_store, "SOCIAL_DB", self.db_path),
         ]
         for item in self.patches:
             item.start()
@@ -193,7 +194,11 @@ class WebSecurityTests(IsolatedDatabaseTest):
             app = web.Application(middlewares=[security_middleware])
             async def write(_request):
                 return web.json_response({"ok": True})
+            async def parse_json(request):
+                await request.json()
+                return web.json_response({"ok": True})
             app.router.add_post("/write", write)
+            app.router.add_post("/parse-json", parse_json)
             runner = web.AppRunner(app)
             await runner.setup()
             site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -207,9 +212,67 @@ class WebSecurityTests(IsolatedDatabaseTest):
                     self.assertEqual(response.status, 200)
                     self.assertEqual(response.headers["X-Frame-Options"], "DENY")
                     self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+                async with session.post(
+                    base + "/parse-json",
+                    data="{bad\\json}",
+                    headers={"Origin": base, "Content-Type": "application/json"},
+                ) as response:
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual((await response.json())["error"], "bad_json")
+                    self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
             await runner.cleanup()
 
         asyncio.run(scenario())
+
+
+class PlatformDmTests(IsolatedDatabaseTest):
+    def test_dm_pair_uses_one_shared_thread_and_rejects_third_user(self):
+        for user_id in (1, 2, 3):
+            web_app_store.upsert_web_user(user_id, f"user-{user_id}")
+        first = platform_store.get_or_create_dm(1, 2)
+        second = platform_store.get_or_create_dm(2, 1)
+        self.assertEqual(first["id"], second["id"])
+        message_id = platform_store.add_platform_message("dm", first["id"], 1, "one", "secret")
+        self.assertTrue(platform_store.can_access_platform_target("dm", first["id"], 1))
+        self.assertTrue(platform_store.can_access_platform_target("dm", first["id"], 2))
+        self.assertFalse(platform_store.can_access_platform_target("dm", first["id"], 3))
+        self.assertEqual(platform_store.list_platform_messages("dm", first["id"])[0]["id"], message_id)
+        self.assertEqual(platform_store.list_dm_threads(1)[0]["peer_id"], 2)
+        self.assertEqual(platform_store.list_dm_threads(2)[0]["peer_id"], 1)
+        self.assertFalse(platform_store.edit_platform_message(message_id, 2, "changed", can_admin=True))
+        self.assertFalse(platform_store.delete_platform_message(message_id, 2, can_admin=True))
+        self.assertEqual(platform_store.list_platform_messages("dm", first["id"])[0]["content"], "secret")
+
+    def test_legacy_reciprocal_threads_are_merged_with_messages(self):
+        platform_store.ensure_platform_tables()
+        with db_connection(self.db_path) as conn:
+            conn.execute("DROP INDEX idx_platform_dm_pair")
+            conn.execute(
+                "INSERT INTO platform_dm_threads(owner_id, peer_id, title, created_at, updated_at) VALUES(10,20,'','now','now')"
+            )
+            first_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "INSERT INTO platform_dm_threads(owner_id, peer_id, title, created_at, updated_at) VALUES(20,10,'','now','now')"
+            )
+            second_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "INSERT INTO platform_messages(scope,target_id,author_id,author_name,content,created_at) VALUES('dm',?,20,'two','old','now')",
+                (second_id,),
+            )
+        platform_store.ensure_platform_tables()
+        with db_connection(self.db_path) as conn:
+            threads = conn.execute("SELECT id, member_low, member_high FROM platform_dm_threads").fetchall()
+            message = conn.execute("SELECT id, target_id FROM platform_messages WHERE content='old'").fetchone()
+            archived_threads = conn.execute(
+                "SELECT id, owner_id, peer_id FROM platform_dm_threads_legacy_backup ORDER BY id"
+            ).fetchall()
+            archived_target = conn.execute(
+                "SELECT message_id, original_target_id FROM platform_dm_message_target_backup"
+            ).fetchone()
+        self.assertEqual(threads, [(first_id, 10, 20)])
+        self.assertEqual(message[1], first_id)
+        self.assertEqual(archived_threads, [(first_id, 10, 20), (second_id, 20, 10)])
+        self.assertEqual(archived_target, (message[0], second_id))
 
 
 class PermissionTests(IsolatedDatabaseTest):

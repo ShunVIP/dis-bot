@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.paths import SOCIAL_DB
+from core.db import connection as db_connection
 
 
 def _now() -> str:
@@ -13,7 +14,7 @@ def _now() -> str:
 
 
 def ensure_platform_tables():
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS platform_servers (
@@ -45,6 +46,8 @@ def ensure_platform_tables():
                 title       TEXT NOT NULL DEFAULT '',
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL,
+                member_low  INTEGER NOT NULL DEFAULT 0,
+                member_high INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(owner_id, peer_id)
             );
 
@@ -81,6 +84,12 @@ def ensure_platform_tables():
         )
         _ensure_column(conn, "platform_messages", "edited_at", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "platform_messages", "deleted_at", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "platform_dm_threads", "member_low", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "platform_dm_threads", "member_high", "INTEGER NOT NULL DEFAULT 0")
+        _normalize_dm_threads(conn)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_dm_pair ON platform_dm_threads(member_low, member_high)"
+        )
         now = _now()
         conn.execute(
             """
@@ -117,9 +126,76 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
+def _normalize_dm_threads(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS platform_dm_threads_legacy_backup (
+            id INTEGER PRIMARY KEY,
+            owner_id INTEGER NOT NULL,
+            peer_id INTEGER NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS platform_dm_message_target_backup (
+            message_id INTEGER PRIMARY KEY,
+            original_target_id INTEGER NOT NULL,
+            archived_at TEXT NOT NULL
+        );
+        """
+    )
+    rows = conn.execute(
+        "SELECT id, owner_id, peer_id, title, created_at, updated_at FROM platform_dm_threads ORDER BY id"
+    ).fetchall()
+    pairs: dict[tuple[int, int], list[tuple]] = {}
+    for row in rows:
+        low, high = sorted((int(row[1]), int(row[2])))
+        pairs.setdefault((low, high), []).append(row)
+    for (low, high), items in pairs.items():
+        canonical = items[0]
+        canonical_id = int(canonical[0])
+        title = next((str(item[3]) for item in items if item[3]), "")
+        updated_at = max(str(item[5]) for item in items)
+        duplicate_ids = [int(item[0]) for item in items[1:]]
+        if duplicate_ids:
+            placeholders = ",".join("?" for _ in duplicate_ids)
+            archived_at = _now()
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO platform_dm_threads_legacy_backup(
+                    id, owner_id, peer_id, title, created_at, updated_at, archived_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                [(*item[:6], archived_at) for item in items],
+            )
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO platform_dm_message_target_backup(
+                    message_id, original_target_id, archived_at
+                )
+                SELECT id, target_id, ? FROM platform_messages
+                WHERE scope='dm' AND target_id IN ({placeholders})
+                """,
+                (archived_at, *duplicate_ids),
+            )
+            conn.execute(
+                f"UPDATE platform_messages SET target_id=? WHERE scope='dm' AND target_id IN ({placeholders})",
+                (canonical_id, *duplicate_ids),
+            )
+            conn.execute(
+                f"DELETE FROM platform_dm_threads WHERE id IN ({placeholders})",
+                duplicate_ids,
+            )
+        conn.execute(
+            "UPDATE platform_dm_threads SET owner_id=?, peer_id=?, member_low=?, member_high=?, title=?, updated_at=? WHERE id=?",
+            (low, high, low, high, title, updated_at, canonical_id),
+        )
+
+
 def list_servers() -> list[dict[str, Any]]:
     ensure_platform_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             "SELECT id, name, description, icon, banner, updated_at FROM platform_servers ORDER BY id"
         ).fetchall()
@@ -138,7 +214,7 @@ def list_servers() -> list[dict[str, Any]]:
 
 def get_server(server_id: int = 0) -> dict[str, Any]:
     ensure_platform_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             """
             SELECT id, name, description, icon, banner, updated_at
@@ -181,7 +257,7 @@ def update_server(
     clean_icon = icon.strip()[:80]
     clean_banner = banner.strip()[:40] or current["banner"] or "midnight"
     now = _now()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
             INSERT INTO platform_servers(id, name, description, icon, banner, created_at, updated_at)
@@ -209,7 +285,7 @@ def update_server(
 
 def list_text_channels(server_id: int = 0) -> list[dict[str, Any]]:
     ensure_platform_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
             SELECT id, server_id, category, name, topic, position, is_private
@@ -237,7 +313,7 @@ def create_text_channel(server_id: int, category: str, name: str, topic: str = "
     ensure_platform_tables()
     clean_name = name.strip().lower().replace(" ", "-")[:60] or "new-channel"
     clean_category = category.strip()[:60] or "Текстовые"
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             "SELECT COALESCE(MAX(position), 0) FROM platform_text_channels WHERE server_id=?",
             (int(server_id),),
@@ -257,51 +333,72 @@ def create_text_channel(server_id: int, category: str, name: str, topic: str = "
 
 def list_dm_threads(owner_id: int) -> list[dict[str, Any]]:
     ensure_platform_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
-            SELECT d.id, d.owner_id, d.peer_id, d.title, d.updated_at,
+            SELECT d.id, d.member_low, d.member_high, d.title, d.updated_at,
                    u.username, u.global_name, u.avatar
             FROM platform_dm_threads d
-            LEFT JOIN web_users u ON u.discord_user_id=d.peer_id
-            WHERE d.owner_id=?
+            LEFT JOIN web_users u ON u.discord_user_id=(CASE WHEN d.member_low=? THEN d.member_high ELSE d.member_low END)
+            WHERE d.member_low=? OR d.member_high=?
             ORDER BY d.updated_at DESC
             """,
-            (int(owner_id),),
+            (int(owner_id), int(owner_id), int(owner_id)),
         ).fetchall()
-    return [
-        {
-            "id": row[0],
-            "owner_id": row[1],
-            "peer_id": row[2],
-            "title": row[3] or row[6] or row[5] or str(row[2]),
+    result = []
+    for row in rows:
+        peer_id = int(row[2]) if int(row[1]) == int(owner_id) else int(row[1])
+        result.append({
+            "id": int(row[0]),
+            "owner_id": int(owner_id),
+            "peer_id": peer_id,
+            "title": row[3] or row[6] or row[5] or str(peer_id),
             "updated_at": row[4],
-            "peer": {"id": row[2], "username": row[5], "global_name": row[6], "avatar": row[7]},
-        }
-        for row in rows
-    ]
+            "peer": {"id": peer_id, "username": row[5], "global_name": row[6], "avatar": row[7]},
+        })
+    return result
 
 
 def get_or_create_dm(owner_id: int, peer_id: int, title: str = "") -> dict[str, Any]:
     ensure_platform_tables()
     now = _now()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    low, high = sorted((int(owner_id), int(peer_id)))
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
-            INSERT OR IGNORE INTO platform_dm_threads(owner_id, peer_id, title, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO platform_dm_threads(
+                owner_id, peer_id, title, created_at, updated_at, member_low, member_high
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
             """,
-            (int(owner_id), int(peer_id), title.strip()[:80], now, now),
+            (low, high, title.strip()[:80], now, now, low, high),
         )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO platform_dm_threads(owner_id, peer_id, title, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?)
-            """,
-            (int(peer_id), int(owner_id), title.strip()[:80], now, now),
-        )
-        conn.commit()
     return next(item for item in list_dm_threads(owner_id) if item["peer_id"] == int(peer_id))
+
+
+def can_access_platform_target(scope: str, target_id: int, user_id: int, can_admin: bool = False) -> bool:
+    ensure_platform_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        if scope == "dm":
+            row = conn.execute(
+                "SELECT 1 FROM platform_dm_threads WHERE id=? AND (member_low=? OR member_high=?)",
+                (int(target_id), int(user_id), int(user_id)),
+            ).fetchone()
+            return bool(row)
+        row = conn.execute(
+            "SELECT is_private FROM platform_text_channels WHERE id=?",
+            (int(target_id),),
+        ).fetchone()
+        return bool(row and (not bool(row[0]) or can_admin))
+
+
+def get_platform_message_context(message_id: int) -> dict[str, Any] | None:
+    ensure_platform_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        row = conn.execute(
+            "SELECT scope, target_id, author_id FROM platform_messages WHERE id=?",
+            (int(message_id),),
+        ).fetchone()
+    return {"scope": row[0], "target_id": int(row[1]), "author_id": int(row[2])} if row else None
 
 
 def add_platform_message(
@@ -318,7 +415,7 @@ def add_platform_message(
     clean_attachments = _clean_attachments(attachments or [])
     if not text and not clean_attachments:
         raise ValueError("empty message")
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         cur = conn.execute(
             """
             INSERT INTO platform_messages(scope, target_id, author_id, author_name, content, attachment_json, created_at)
@@ -360,7 +457,7 @@ def _clean_attachments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def list_platform_messages(scope: str, target_id: int, limit: int = 80) -> list[dict[str, Any]]:
     ensure_platform_tables()
     clean_scope = "dm" if scope == "dm" else "channel"
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
             SELECT id, scope, target_id, author_id, author_name, content, attachment_json, edited_at, deleted_at, created_at
@@ -423,14 +520,14 @@ def edit_platform_message(message_id: int, author_id: int, content: str, can_adm
     text = content.strip()[:1800]
     if not text:
         raise ValueError("empty message")
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
-            "SELECT author_id, deleted_at FROM platform_messages WHERE id=?",
+            "SELECT author_id, deleted_at, scope FROM platform_messages WHERE id=?",
             (int(message_id),),
         ).fetchone()
         if not row or row[1]:
             return False
-        if int(row[0]) != int(author_id) and not can_admin:
+        if int(row[0]) != int(author_id) and not (can_admin and row[2] != "dm"):
             return False
         conn.execute(
             "UPDATE platform_messages SET content=?, edited_at=? WHERE id=?",
@@ -442,14 +539,14 @@ def edit_platform_message(message_id: int, author_id: int, content: str, can_adm
 
 def delete_platform_message(message_id: int, author_id: int, can_admin: bool = False) -> bool:
     ensure_platform_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
-            "SELECT author_id, deleted_at FROM platform_messages WHERE id=?",
+            "SELECT author_id, deleted_at, scope FROM platform_messages WHERE id=?",
             (int(message_id),),
         ).fetchone()
         if not row or row[1]:
             return False
-        if int(row[0]) != int(author_id) and not can_admin:
+        if int(row[0]) != int(author_id) and not (can_admin and row[2] != "dm"):
             return False
         conn.execute(
             "UPDATE platform_messages SET content='', deleted_at=? WHERE id=?",
@@ -462,7 +559,7 @@ def delete_platform_message(message_id: int, author_id: int, can_admin: bool = F
 def toggle_platform_reaction(message_id: int, author_id: int, emoji: str) -> bool:
     ensure_platform_tables()
     clean = emoji.strip()[:24] or "+"
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         exists = conn.execute(
             """
             SELECT 1 FROM platform_message_reactions
@@ -494,7 +591,7 @@ def toggle_platform_reaction(message_id: int, author_id: int, emoji: str) -> boo
 
 def list_activities() -> list[dict[str, Any]]:
     ensure_platform_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
             SELECT a.discord_user_id, a.activity_type, a.title, a.subtitle, a.image, a.updated_at,

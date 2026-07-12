@@ -58,11 +58,13 @@ from core.profile_service import get_unified_profile, update_unified_profile
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
 from core.platform_store import (
     add_platform_message,
+    can_access_platform_target,
     create_text_channel,
     delete_platform_message,
     edit_platform_message,
     get_server,
     get_or_create_dm,
+    get_platform_message_context,
     list_activities,
     list_dm_threads,
     list_platform_messages,
@@ -91,6 +93,7 @@ from core.web_app_store import (
     edit_chat_message,
     ensure_web_tables,
     get_session_user,
+    get_web_user,
     list_chat_messages,
     toggle_chat_reaction,
     upsert_login_profile,
@@ -142,6 +145,8 @@ async def security_middleware(request: web.Request, handler):
             return _json({"error": "bad_origin"}, 403)
     try:
         response = await handler(request)
+    except json.JSONDecodeError:
+        response = _json({"error": "bad_json"}, 400)
     except web.HTTPException as exc:
         response = exc
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -509,16 +514,20 @@ async def api_platform_dm_create(request: web.Request):
     peer_id = int(data.get("peer_id") or 0)
     if not peer_id or peer_id == user["id"]:
         return _json({"error": "bad_peer"}, 400)
+    if not get_web_user(peer_id):
+        return _json({"error": "peer_not_registered"}, 404)
     thread = get_or_create_dm(user["id"], peer_id, str(data.get("title") or ""))
     return _json({"ok": True, "thread": thread})
 
 
 async def api_platform_messages(request: web.Request):
-    _require_user(request)
+    user = _require_user(request)
     scope = str(request.query.get("scope") or "channel")
     target_id = int(request.query.get("target_id") or 0)
     if not target_id:
         return _json({"messages": []})
+    if not can_access_platform_target(scope, target_id, user["id"], has_admin_access(user["id"])):
+        return _json({"error": "target_forbidden"}, 403)
     return _json({"messages": list_platform_messages(scope, target_id)})
 
 
@@ -553,10 +562,13 @@ async def _sse_json(request: web.Request, producer):
 
 
 async def api_platform_messages_stream(request: web.Request):
+    user = _require_user(request)
     scope = str(request.query.get("scope") or "channel")
     target_id = int(request.query.get("target_id") or 0)
     if not target_id:
         return _json({"error": "target_required"}, 400)
+    if not can_access_platform_target(scope, target_id, user["id"], has_admin_access(user["id"])):
+        return _json({"error": "target_forbidden"}, 403)
     return await _sse_json(
         request,
         lambda: {"messages": list_platform_messages(scope, target_id)},
@@ -570,6 +582,10 @@ async def api_platform_message_post(request: web.Request):
     target_id = int(data.get("target_id") or 0)
     content = str(data.get("content") or "")
     attachments = data.get("attachments") if isinstance(data.get("attachments"), list) else []
+    if not target_id:
+        return _json({"error": "target_required"}, 400)
+    if not can_access_platform_target(scope, target_id, user["id"], has_admin_access(user["id"])):
+        return _json({"error": "target_forbidden"}, 403)
     message_id = add_platform_message(
         scope,
         target_id,
@@ -585,6 +601,11 @@ async def api_platform_message_edit(request: web.Request):
     user = _require_user(request)
     message_id = int(request.match_info["message_id"])
     data = await request.json()
+    context = get_platform_message_context(message_id)
+    if not context or not can_access_platform_target(
+        context["scope"], context["target_id"], user["id"], has_admin_access(user["id"])
+    ):
+        return _json({"error": "message_forbidden"}, 403)
     ok = edit_platform_message(
         message_id,
         user["id"],
@@ -597,6 +618,11 @@ async def api_platform_message_edit(request: web.Request):
 async def api_platform_message_delete(request: web.Request):
     user = _require_user(request)
     message_id = int(request.match_info["message_id"])
+    context = get_platform_message_context(message_id)
+    if not context or not can_access_platform_target(
+        context["scope"], context["target_id"], user["id"], has_admin_access(user["id"])
+    ):
+        return _json({"error": "message_forbidden"}, 403)
     ok = delete_platform_message(message_id, user["id"], can_admin=has_admin_access(user["id"]))
     return _json({"ok": ok}, 200 if ok else 403)
 
@@ -605,6 +631,11 @@ async def api_platform_message_reaction(request: web.Request):
     user = _require_user(request)
     message_id = int(request.match_info["message_id"])
     data = await request.json()
+    context = get_platform_message_context(message_id)
+    if not context or not can_access_platform_target(
+        context["scope"], context["target_id"], user["id"], has_admin_access(user["id"])
+    ):
+        return _json({"error": "message_forbidden"}, 403)
     active = toggle_platform_reaction(message_id, user["id"], str(data.get("emoji") or "+"))
     return _json({"ok": True, "active": active})
 
