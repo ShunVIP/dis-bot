@@ -53,6 +53,7 @@ from core.community_store import (
     upsert_profile,
     upsert_role,
 )
+from core.profile_service import get_unified_profile, update_unified_profile
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
 from core.platform_store import (
     add_platform_message,
@@ -327,6 +328,23 @@ async def api_community_me(request: web.Request):
         "roles": get_user_roles(user["id"]),
         "all_roles": list_roles(),
     })
+
+
+async def api_profile(request: web.Request):
+    user = _require_user(request)
+    return _json({"profile": get_unified_profile(user["id"])})
+
+
+async def api_profile_update(request: web.Request):
+    user = _require_user(request)
+    data = await request.json()
+    if not isinstance(data, dict):
+        return _json({"error": "invalid_profile_payload"}, 400)
+    try:
+        profile = update_unified_profile(user["id"], data)
+    except ValueError as exc:
+        return _json({"error": str(exc)}, 400)
+    return _json({"ok": True, "profile": profile})
 
 
 async def api_community_me_update(request: web.Request):
@@ -829,6 +847,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/me", api_me)
     app.router.add_patch("/api/me/login-profile", api_login_profile_update)
     app.router.add_get("/api/community/me", api_community_me)
+    app.router.add_get("/api/profile", api_profile)
+    app.router.add_patch("/api/profile", api_profile_update)
     app.router.add_patch("/api/community/me", api_community_me_update)
     app.router.add_get("/api/community/members", api_community_members)
     app.router.add_post("/api/community/roles", api_community_role_upsert)

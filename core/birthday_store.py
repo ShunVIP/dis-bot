@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from core.paths import BIRTHDAYS_DB
+from core.db import connection as db_connection
 
 
 def _now() -> str:
@@ -11,7 +12,7 @@ def _now() -> str:
 
 
 def ensure_birthday_tables():
-    with sqlite3.connect(BIRTHDAYS_DB) as conn:
+    with db_connection(BIRTHDAYS_DB) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS birthdays (
@@ -45,7 +46,7 @@ def validate_birthday(date_str: str) -> str:
 def set_birthday(user_id: int, birthday: str, *, updated_by: int | None = None, source: str = "user"):
     clean = validate_birthday(birthday)
     ensure_birthday_tables()
-    with sqlite3.connect(BIRTHDAYS_DB) as conn:
+    with db_connection(BIRTHDAYS_DB) as conn:
         conn.execute(
             """
             INSERT INTO birthdays(user_id, birthday, updated_by, source, updated_at)
@@ -63,14 +64,14 @@ def set_birthday(user_id: int, birthday: str, *, updated_by: int | None = None, 
 
 def remove_birthday(user_id: int):
     ensure_birthday_tables()
-    with sqlite3.connect(BIRTHDAYS_DB) as conn:
+    with db_connection(BIRTHDAYS_DB) as conn:
         conn.execute("DELETE FROM birthdays WHERE user_id=?", (int(user_id),))
         conn.commit()
 
 
 def get_birthday(user_id: int) -> dict | None:
     ensure_birthday_tables()
-    with sqlite3.connect(BIRTHDAYS_DB) as conn:
+    with db_connection(BIRTHDAYS_DB) as conn:
         row = conn.execute(
             "SELECT user_id, birthday, updated_by, source, updated_at FROM birthdays WHERE user_id=?",
             (int(user_id),),
@@ -88,7 +89,7 @@ def get_birthday(user_id: int) -> dict | None:
 
 def list_birthdays() -> list[dict]:
     ensure_birthday_tables()
-    with sqlite3.connect(BIRTHDAYS_DB) as conn:
+    with db_connection(BIRTHDAYS_DB) as conn:
         rows = conn.execute(
             """
             SELECT user_id, birthday, updated_by, source, updated_at

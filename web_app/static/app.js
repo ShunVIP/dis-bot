@@ -27,6 +27,7 @@ const state = {
   },
   deferredInstallPrompt: null,
   server: null,
+  profile: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -119,9 +120,10 @@ async function applyInitialVoiceInvite() {
 
 async function applyInitialView() {
   const view = new URLSearchParams(location.search).get("view");
-  const allowed = new Set(["overview", "server", "members", "chat", "voice", "games", "settings"]);
+  const allowed = new Set(["overview", "profile", "server", "members", "chat", "voice", "games", "settings"]);
   if (!view || !allowed.has(view)) return;
   setView(view);
+  if (view === "profile") await loadUnifiedProfile().catch(console.error);
   if (view === "server") await loadPlatform().catch(console.error);
   if (view === "members") await loadCommunity().catch(console.error);
   if (view === "chat") await loadChat().catch(console.error);
@@ -700,6 +702,73 @@ async function loadCommunity() {
   renderMembers(memberData.members || []);
 }
 
+function renderUnifiedProfile(payload) {
+  const profile = payload || {};
+  state.profile = profile;
+  const community = profile.community || {};
+  const economy = profile.economy || {};
+  const economyProfile = economy.profile || {};
+  const games = profile.games || {};
+  const steam = games.steam;
+  const lol = games.lol || {};
+  const wwm = games.wwm;
+  const birthday = profile.birthday || {};
+  const displayName = community.display_name || state.me?.user?.global_name || state.me?.user?.username || "Мой профиль";
+
+  $("unifiedProfileName").textContent = displayName;
+  $("unifiedProfileStatus").textContent = community.status_text || "Личность, игры и активность в одном месте.";
+  $("unifiedProfileHero").style.setProperty("--profile-accent", community.accent_color || "#4fc3b1");
+  $("unifiedProfileRoles").innerHTML = (profile.roles || []).map((role) => (
+    `<span class="role-chip" style="border-color:${escapeHtml(role.color)};color:${escapeHtml(role.color)}">${escapeHtml(role.name)}</span>`
+  )).join("") || `<span class="role-chip">без роли</span>`;
+
+  $("unifiedDisplayName").value = community.display_name || displayName;
+  $("unifiedStatusText").value = community.status_text || "";
+  $("unifiedBio").value = community.bio || "";
+  $("unifiedBirthday").value = birthday.birthday || "";
+  $("unifiedAccent").value = /^#[0-9a-f]{6}$/i.test(community.accent_color || "") ? community.accent_color : "#4fc3b1";
+  $("unifiedGender").value = economyProfile.gender || "";
+  $("unifiedAgeConfirmed").checked = Boolean(economyProfile.age_confirmed);
+
+  $("unifiedBalance").textContent = String(economy.balance || 0);
+  $("unifiedEconomyState").textContent = economyProfile.age_confirmed ? "Экономический профиль активен" : "Заполни профиль и подтверди 18+";
+  $("unifiedSteam").textContent = steam ? `Steam ${steam.steam_id}` : "Не привязан";
+  $("unifiedSteamMeta").textContent = steam ? `${steam.cached_games} игр · ${Math.round((steam.playtime_minutes || 0) / 60)} ч` : "Привязка доступна через бота";
+  $("unifiedLol").textContent = lol.account?.display_name || "Не привязан";
+  const lolLabel = lol.model?.labels ? Object.values(lol.model.labels).filter(Boolean).join(", ") : "";
+  $("unifiedLolMeta").textContent = lolLabel || (lol.account ? "Профиль связан, обнови игровую модель" : "Riot ID и модель игрока");
+  $("unifiedWwm").textContent = wwm?.game_nick || "Не привязан";
+  $("unifiedWwmMeta").textContent = wwm ? (wwm.nick_synced ? "Ник синхронизирован с Discord" : "Ник сохранён") : "Игровой ник не указан";
+}
+
+async function loadUnifiedProfile() {
+  if (!state.me?.authenticated) return;
+  const data = await api("/api/profile");
+  renderUnifiedProfile(data.profile);
+}
+
+async function saveUnifiedProfile() {
+  const gender = $("unifiedGender").value;
+  const data = await api("/api/profile", {
+    method: "PATCH",
+    body: JSON.stringify({
+      community: {
+        display_name: $("unifiedDisplayName").value.trim(),
+        status_text: $("unifiedStatusText").value.trim(),
+        bio: $("unifiedBio").value.trim(),
+        accent_color: $("unifiedAccent").value,
+      },
+      birthday: $("unifiedBirthday").value.trim(),
+      economy: gender ? {
+        gender,
+        age_confirmed: $("unifiedAgeConfirmed").checked,
+      } : null,
+    }),
+  });
+  renderUnifiedProfile(data.profile);
+  $("unifiedProfileMessage").textContent = "Профиль сохранён и доступен боту, админке и приложению.";
+}
+
 async function saveCommunityProfile() {
   const badges = $("communityBadges").value
     .split(",")
@@ -941,6 +1010,7 @@ function escapeHtml(value) {
 document.querySelectorAll(".nav").forEach((button) => {
   button.addEventListener("click", async () => {
     setView(button.dataset.view);
+    if (button.dataset.view === "profile") await loadUnifiedProfile().catch(console.error);
     if (button.dataset.view === "server") await loadPlatform().catch(console.error);
     if (button.dataset.view === "members") await loadCommunity().catch(console.error);
     if (button.dataset.view === "chat") await loadChat().catch(console.error);
@@ -1059,6 +1129,22 @@ $("communityProfileForm").addEventListener("submit", async (event) => {
   await saveCommunityProfile().catch((error) => {
     console.error(error);
     $("communityStatusLine").textContent = "Не удалось сохранить косметику.";
+  });
+});
+
+$("unifiedProfileForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await saveUnifiedProfile().catch((error) => {
+    console.error(error);
+    $("unifiedProfileMessage").textContent = "Не удалось сохранить профиль. Проверь дату и обязательные поля.";
+  });
+});
+
+$("reloadProfile").addEventListener("click", () => loadUnifiedProfile().catch(console.error));
+document.querySelectorAll(".profile-jump").forEach((button) => {
+  button.addEventListener("click", async () => {
+    setView(button.dataset.targetView);
+    if (button.dataset.targetView === "games") await loadLol().catch(console.error);
   });
 });
 

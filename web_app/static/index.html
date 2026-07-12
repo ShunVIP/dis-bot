@@ -25,6 +25,7 @@
   <main class="layout">
     <aside class="sidebar">
       <button class="nav active" data-view="overview">Обзор</button>
+      <button class="nav" data-view="profile">Мой профиль</button>
       <button class="nav" data-view="server">Сервер</button>
       <button class="nav" data-view="members">Участники</button>
       <button class="nav" data-view="chat">Чат</button>
@@ -75,6 +76,67 @@
               <button class="button primary" type="submit">Сохранить резервный доступ</button>
             </form>
             <p id="loginProfileStatus"></p>
+          </section>
+        </div>
+      </section>
+
+      <section id="profile" class="view">
+        <div class="profile-hero" id="unifiedProfileHero">
+          <div>
+            <span class="eyebrow">Единая карточка ViPik</span>
+            <h1 id="unifiedProfileName">Мой профиль</h1>
+            <p id="unifiedProfileStatus">Личность, игры и активность в одном месте.</p>
+          </div>
+          <div id="unifiedProfileRoles" class="role-row"></div>
+        </div>
+
+        <div class="profile-layout">
+          <section class="panel profile-editor">
+            <div class="section-head">
+              <h2>Основное</h2>
+              <button id="reloadProfile" class="button ghost" type="button">Обновить</button>
+            </div>
+            <form id="unifiedProfileForm" class="profile-form">
+              <label>Имя<input id="unifiedDisplayName" maxlength="80" placeholder="Как тебя показывать"></label>
+              <label>Статус<input id="unifiedStatusText" maxlength="120" placeholder="Чем занят"></label>
+              <label class="wide">О себе<textarea id="unifiedBio" maxlength="500" placeholder="Коротко о себе"></textarea></label>
+              <label>День рождения<input id="unifiedBirthday" inputmode="numeric" placeholder="ДД.ММ"></label>
+              <label>Цвет профиля<input id="unifiedAccent" type="color" value="#4fc3b1"></label>
+              <label>Экономический профиль
+                <select id="unifiedGender">
+                  <option value="">Не заполнен</option>
+                  <option value="male">Мужчина</option>
+                  <option value="female">Девушка</option>
+                </select>
+              </label>
+              <label class="check-line"><input id="unifiedAgeConfirmed" type="checkbox"> Подтверждаю 18+</label>
+              <button class="button primary wide" type="submit">Сохранить профиль</button>
+            </form>
+            <p id="unifiedProfileMessage" class="status-line"></p>
+          </section>
+
+          <section class="profile-connections">
+            <article class="panel connection-card">
+              <span class="connection-kicker">Экономика</span>
+              <strong id="unifiedBalance">0</strong>
+              <p id="unifiedEconomyState" class="muted">Профиль не заполнен</p>
+            </article>
+            <article class="panel connection-card">
+              <span class="connection-kicker">Steam</span>
+              <strong id="unifiedSteam">Не привязан</strong>
+              <p id="unifiedSteamMeta" class="muted">Привязка доступна через бота</p>
+            </article>
+            <article class="panel connection-card">
+              <span class="connection-kicker">League of Legends</span>
+              <strong id="unifiedLol">Не привязан</strong>
+              <p id="unifiedLolMeta" class="muted">Riot ID и модель игрока</p>
+              <button class="button ghost profile-jump" type="button" data-target-view="games">Открыть LoL</button>
+            </article>
+            <article class="panel connection-card">
+              <span class="connection-kicker">Where Winds Meet</span>
+              <strong id="unifiedWwm">Не привязан</strong>
+              <p id="unifiedWwmMeta" class="muted">Игровой ник не указан</p>
+            </article>
           </section>
         </div>
       </section>

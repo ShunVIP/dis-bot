@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from core import community_store, economy, economy_profile, settings_migration, settings_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, profile_service, settings_migration, settings_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -31,6 +31,9 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(economy_profile, "DB_PATH", self.db_path),
             patch.object(settings_migration, "SOCIAL_DB", self.db_path),
             patch.object(settings_migration, "BIRTHDAYS_DB", self.db_path),
+            patch.object(birthday_store, "BIRTHDAYS_DB", self.db_path),
+            patch.object(game_profiles, "SOCIAL_DB", self.db_path),
+            patch.object(profile_service, "SOCIAL_DB", self.db_path),
         ]
         for item in self.patches:
             item.start()
@@ -117,6 +120,44 @@ class EconomyTests(IsolatedDatabaseTest):
         self.assertIn("economy_profiles", tables)
         self.assertIn("coins_wallet", tables)
         self.assertIn("coin_ledger", tables)
+
+
+class UnifiedProfileTests(IsolatedDatabaseTest):
+    def test_profile_combines_user_owned_data_and_game_connections(self):
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE steam_profiles(user_id INTEGER PRIMARY KEY, steam_id TEXT NOT NULL, added_at TEXT NOT NULL);
+                CREATE TABLE steam_owned_games_cache(
+                    user_id INTEGER NOT NULL, appid INTEGER NOT NULL, name TEXT NOT NULL,
+                    playtime_forever INTEGER NOT NULL, playtime_2weeks INTEGER NOT NULL DEFAULT 0,
+                    last_played INTEGER NOT NULL DEFAULT 0, checked_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id, appid)
+                );
+                CREATE TABLE wwm_profiles(
+                    guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, game_nick TEXT NOT NULL,
+                    nick_synced INTEGER NOT NULL, character_card TEXT NOT NULL DEFAULT '',
+                    character_updated_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, PRIMARY KEY(guild_id, user_id)
+                );
+                INSERT INTO steam_profiles VALUES(77, '76561198000000000', 'now');
+                INSERT INTO steam_owned_games_cache VALUES(77, 1, 'Game', 120, 0, 0, 'now');
+                INSERT INTO wwm_profiles VALUES(1, 77, 'WindFox', 1, '', '', 'now', 'now');
+                """
+            )
+        profile = profile_service.update_unified_profile(
+            77,
+            {
+                "community": {"display_name": "Fox", "status_text": "В игре", "accent_color": "#123456"},
+                "birthday": "12.07",
+                "economy": {"gender": "male", "age_confirmed": True},
+            },
+        )
+        self.assertEqual(profile["community"]["display_name"], "Fox")
+        self.assertEqual(profile["birthday"]["birthday"], "12.07")
+        self.assertTrue(profile["economy"]["profile"]["age_confirmed"])
+        self.assertEqual(profile["games"]["steam"]["cached_games"], 1)
+        self.assertEqual(profile["games"]["wwm"]["game_nick"], "WindFox")
 
 
 class PermissionTests(IsolatedDatabaseTest):

@@ -47,13 +47,6 @@ def _ensure_tables():
                 added_at   TEXT    NOT NULL
             );
 
-            -- Конфиг уведомлений по гильдии
-            CREATE TABLE IF NOT EXISTS steam_config (
-                guild_id         INTEGER PRIMARY KEY,
-                notify_channel   INTEGER,
-                discount_min_pct INTEGER NOT NULL DEFAULT 50
-            );
-
             -- Кэш вишлистов: appid → last_price / release_date
             CREATE TABLE IF NOT EXISTS steam_wishlist_cache (
                 user_id    INTEGER NOT NULL,
@@ -270,31 +263,16 @@ def _mark_auto_log(user_id: int, kind: str, period_key: str, appid: int | None =
 
 
 def _steam_notify_configs(bot: commands.Bot) -> list[tuple[int, int, int]]:
-    with sqlite3.connect(DB_PATH) as conn:
-        legacy_rows = conn.execute(
-            "SELECT guild_id, notify_channel, discount_min_pct FROM steam_config"
-            " WHERE notify_channel IS NOT NULL"
-        ).fetchall()
-
-    by_guild: dict[int, tuple[int, int, int]] = {
-        int(guild_id): (int(guild_id), int(channel_id), int(discount_min_pct))
-        for guild_id, channel_id, discount_min_pct in legacy_rows
-        if channel_id
-    }
+    by_guild: dict[int, tuple[int, int, int]] = {}
     for guild in bot.guilds:
         policy = get_feature_policy(guild.id, FEATURE_STEAM)
-        configured = has_feature_setting(guild.id, FEATURE_STEAM) or policy.output_channel_id is not None
-        if not configured:
-            continue
         if not policy.enabled or not policy.output_channel_id:
-            by_guild.pop(guild.id, None)
             continue
         payload = policy.extra or {}
-        legacy_min_pct = by_guild.get(guild.id, (guild.id, int(policy.output_channel_id), 50))[2]
         try:
-            min_pct = int(payload.get("discount_min_pct", legacy_min_pct))
+            min_pct = int(payload.get("discount_min_pct", 50))
         except (TypeError, ValueError):
-            min_pct = legacy_min_pct
+            min_pct = 50
         by_guild[guild.id] = (guild.id, int(policy.output_channel_id), max(0, min(100, min_pct)))
     return list(by_guild.values())
 
@@ -1027,15 +1005,6 @@ class Steam(commands.Cog):
     async def релизы_канал(self, interaction: discord.Interaction,
                             канал: discord.TextChannel,
                             минимальная_скидка: app_commands.Range[int, 10, 100] = 50):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO steam_config(guild_id, notify_channel, discount_min_pct)"
-                " VALUES(?,?,?)"
-                " ON CONFLICT(guild_id) DO UPDATE SET"
-                " notify_channel=excluded.notify_channel,"
-                " discount_min_pct=excluded.discount_min_pct",
-                (interaction.guild.id, канал.id, минимальная_скидка)
-            )
         set_feature_channel(interaction.guild.id, FEATURE_STEAM, канал.id, "output", "Discord command")
         set_feature_payload(interaction.guild.id, FEATURE_STEAM, {"discount_min_pct": int(минимальная_скидка)})
         await interaction.response.send_message(

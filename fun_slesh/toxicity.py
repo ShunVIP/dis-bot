@@ -94,13 +94,6 @@ SHAME_TEMPLATES = {
 def _ensure_tables():
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript("""
-            CREATE TABLE IF NOT EXISTS toxicity_config (
-                guild_id      INTEGER PRIMARY KEY,
-                enabled       INTEGER NOT NULL DEFAULT 1,
-                threshold_lvl INTEGER NOT NULL DEFAULT 1,
-                channel_ids   TEXT    NOT NULL DEFAULT ''
-            );
-
             CREATE TABLE IF NOT EXISTS toxicity_log (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id   INTEGER NOT NULL,
@@ -119,53 +112,21 @@ def _ensure_tables():
                 PRIMARY KEY (user_id, guild_id, week)
             );
 
-            CREATE TABLE IF NOT EXISTS toxicity_excluded_channels (
-                guild_id   INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                reason     TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (guild_id, channel_id)
-            );
         """)
-
-
-def _get_legacy_config(guild_id: int) -> tuple[bool, int, set[int]]:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT enabled, threshold_lvl, channel_ids"
-            " FROM toxicity_config WHERE guild_id=?",
-            (guild_id,)
-        ).fetchone()
-    if not row:
-        return True, 1, set()
-    ch_ids = set(int(x) for x in row[2].split(",") if x.strip().isdigit())
-    return bool(row[0]), row[1], ch_ids
 
 
 def _get_config(guild_id: int) -> tuple[bool, int, set[int], set[int]]:
     """Возвращает (enabled, threshold_lvl, allowed_channel_ids, excluded_channel_ids)."""
-    enabled, threshold, allowed = _get_legacy_config(guild_id)
-    excluded = _legacy_toxicity_excluded_channel_ids(guild_id)
-
     policy = get_feature_policy(guild_id, FEATURE_TOXICITY)
     payload = get_feature_payload(guild_id, FEATURE_TOXICITY)
-    configured = has_feature_setting(guild_id, FEATURE_TOXICITY) or bool(
-        policy.allowed_channel_ids or policy.excluded_channel_ids or payload
-    )
-    if configured:
-        enabled = policy.enabled
-        threshold = int(payload.get("threshold") or threshold)
-        allowed = set(policy.allowed_channel_ids)
-        excluded = set(policy.excluded_channel_ids)
+    enabled = policy.enabled
+    try:
+        threshold = int(payload.get("threshold") or 1)
+    except (TypeError, ValueError):
+        threshold = 1
+    allowed = set(policy.allowed_channel_ids)
+    excluded = set(policy.excluded_channel_ids)
     return enabled, max(1, min(threshold, 3)), allowed, excluded
-
-
-def _legacy_toxicity_excluded_channel_ids(guild_id: int) -> set[int]:
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT channel_id FROM toxicity_excluded_channels WHERE guild_id=?",
-            (guild_id,),
-        ).fetchall()
-    return {int(row[0]) for row in rows}
 
 
 def _toxicity_excluded_channel_ids(guild_id: int) -> set[int]:
@@ -178,13 +139,6 @@ def _is_toxicity_channel_excluded(guild_id: int, channel_id: int) -> bool:
 
 def _save_toxicity_enabled(guild_id: int, enabled: bool):
     set_feature_enabled(guild_id, FEATURE_TOXICITY, enabled)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO toxicity_config(guild_id, enabled) VALUES(?,?)"
-            " ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
-            (guild_id, int(enabled)),
-        )
-        conn.commit()
 
 
 def _save_toxicity_threshold(guild_id: int, threshold: int):
@@ -192,52 +146,20 @@ def _save_toxicity_threshold(guild_id: int, threshold: int):
     payload = get_feature_payload(guild_id, FEATURE_TOXICITY)
     payload["threshold"] = threshold
     set_feature_payload(guild_id, FEATURE_TOXICITY, payload)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO toxicity_config(guild_id, threshold_lvl) VALUES(?,?)"
-            " ON CONFLICT(guild_id) DO UPDATE SET threshold_lvl=excluded.threshold_lvl",
-            (guild_id, threshold),
-        )
-        conn.commit()
 
 
 def _save_toxicity_allow_channels(guild_id: int, channel_ids: set[int]):
     clear_feature_channels(guild_id, FEATURE_TOXICITY, "allow")
     for channel_id in sorted(channel_ids):
         set_feature_channel(guild_id, FEATURE_TOXICITY, channel_id, "allow", "Discord admin command")
-    ch_str = ",".join(str(x) for x in sorted(channel_ids))
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO toxicity_config(guild_id, channel_ids) VALUES(?,?)"
-            " ON CONFLICT(guild_id) DO UPDATE SET channel_ids=excluded.channel_ids",
-            (guild_id, ch_str),
-        )
-        conn.commit()
 
 
 def _save_toxicity_excluded_channel(guild_id: int, channel_id: int, reason: str = ""):
     set_feature_channel(guild_id, FEATURE_TOXICITY, channel_id, "exclude", reason or "Discord admin command")
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO toxicity_excluded_channels(guild_id, channel_id, reason)
-            VALUES(?, ?, ?)
-            ON CONFLICT(guild_id, channel_id) DO UPDATE SET reason=excluded.reason
-            """,
-            (guild_id, channel_id, reason[:200]),
-        )
-        conn.commit()
 
 
 def _clear_toxicity_excluded_channel(guild_id: int, channel_id: int) -> int:
-    feature_deleted = clear_feature_channel(guild_id, FEATURE_TOXICITY, channel_id, "exclude")
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.execute(
-            "DELETE FROM toxicity_excluded_channels WHERE guild_id=? AND channel_id=?",
-            (guild_id, channel_id),
-        )
-        conn.commit()
-    return max(feature_deleted, cur.rowcount)
+    return clear_feature_channel(guild_id, FEATURE_TOXICITY, channel_id, "exclude")
 
 
 def _detect_level(text: str) -> int:

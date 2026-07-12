@@ -22,7 +22,6 @@ from core.paths import SOCIAL_DB
 from core.settings_store import (
     clear_feature_channel,
     get_feature_policy,
-    has_feature_setting,
     set_feature_channel,
     set_feature_enabled,
 )
@@ -35,10 +34,6 @@ UTC     = timezone.utc
 def _ensure_tables():
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript("""
-            CREATE TABLE IF NOT EXISTS voice_roles_config (
-                guild_id INTEGER PRIMARY KEY,
-                enabled  INTEGER NOT NULL DEFAULT 1
-            );
             -- Отслеживаем какие роли мы создали для каналов
             CREATE TABLE IF NOT EXISTS voice_auto_roles (
                 guild_id   INTEGER NOT NULL,
@@ -46,58 +41,20 @@ def _ensure_tables():
                 role_id    INTEGER NOT NULL,
                 PRIMARY KEY (guild_id, channel_id)
             );
-            CREATE TABLE IF NOT EXISTS voice_roles_excluded_channels (
-                guild_id   INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                reason     TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (guild_id, channel_id)
-            );
         """)
 
 
-def _legacy_is_enabled(guild_id: int) -> bool:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT enabled FROM voice_roles_config WHERE guild_id=?", (guild_id,)
-        ).fetchone()
-    return bool(row[0]) if row else True  # по умолчанию включено
-
-
 def _is_enabled(guild_id: int) -> bool:
-    policy = get_feature_policy(guild_id, FEATURE_VOICE_ROLES)
-    return policy.enabled if has_feature_setting(guild_id, FEATURE_VOICE_ROLES) else _legacy_is_enabled(guild_id)
-
-
-def _legacy_excluded_channel_ids(guild_id: int) -> set[int]:
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT channel_id FROM voice_roles_excluded_channels WHERE guild_id=?",
-            (guild_id,),
-        ).fetchall()
-    return {int(row[0]) for row in rows}
+    return get_feature_policy(guild_id, FEATURE_VOICE_ROLES).enabled
 
 
 def _excluded_channel_ids(guild_id: int) -> set[int]:
-    policy = get_feature_policy(guild_id, FEATURE_VOICE_ROLES)
-    if has_feature_setting(guild_id, FEATURE_VOICE_ROLES) or policy.excluded_channel_ids:
-        return set(policy.excluded_channel_ids)
-    return _legacy_excluded_channel_ids(guild_id)
+    return set(get_feature_policy(guild_id, FEATURE_VOICE_ROLES).excluded_channel_ids)
 
 
 def _excluded_rows(guild_id: int) -> list[tuple[int, str]]:
     policy = get_feature_policy(guild_id, FEATURE_VOICE_ROLES)
-    if has_feature_setting(guild_id, FEATURE_VOICE_ROLES) or policy.excluded_channel_ids:
-        return [(int(channel_id), "admin panel") for channel_id in sorted(policy.excluded_channel_ids)]
-
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT channel_id, reason FROM voice_roles_excluded_channels WHERE guild_id=? ORDER BY channel_id",
-            (guild_id,),
-        ).fetchall()
-    reasons = {int(channel_id): str(reason or "") for channel_id, reason in rows}
-    for channel_id in policy.excluded_channel_ids:
-        reasons.setdefault(int(channel_id), "feature policy")
-    return sorted(reasons.items())
+    return [(int(channel_id), "admin panel") for channel_id in sorted(policy.excluded_channel_ids)]
 
 
 def _is_excluded(guild_id: int, channel_id: int) -> bool:
@@ -230,12 +187,6 @@ class VoiceRoles(commands.Cog):
     @app_commands.describe(включить="Включить или выключить")
     @app_commands.checks.has_permissions(administrator=True)
     async def войс_роли_вкл(self, interaction: discord.Interaction, включить: bool):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO voice_roles_config(guild_id, enabled) VALUES(?,?)"
-                " ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
-                (interaction.guild.id, int(включить))
-            )
         set_feature_enabled(interaction.guild.id, FEATURE_VOICE_ROLES, включить)
         status = "✅ Включены" if включить else "⛔ Выключены"
         await interaction.response.send_message(
@@ -295,16 +246,6 @@ class VoiceRoles(commands.Cog):
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def войс_роли_исключить(self, interaction: discord.Interaction, канал: discord.VoiceChannel, причина: str = ""):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO voice_roles_excluded_channels(guild_id, channel_id, reason)
-                VALUES(?,?,?)
-                ON CONFLICT(guild_id, channel_id) DO UPDATE SET reason=excluded.reason
-                """,
-                (interaction.guild.id, канал.id, причина.strip()[:120]),
-            )
-            conn.commit()
         set_feature_channel(interaction.guild.id, FEATURE_VOICE_ROLES, канал.id, "exclude", причина.strip()[:120])
         await interaction.response.send_message(f"✅ {канал.mention} исключен из авто-ролей.", ephemeral=True)
 
@@ -313,12 +254,6 @@ class VoiceRoles(commands.Cog):
     @app_commands.describe(канал="Голосовой канал, который снова нужно учитывать")
     @app_commands.checks.has_permissions(administrator=True)
     async def войс_роли_вернуть(self, interaction: discord.Interaction, канал: discord.VoiceChannel):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "DELETE FROM voice_roles_excluded_channels WHERE guild_id=? AND channel_id=?",
-                (interaction.guild.id, канал.id),
-            )
-            conn.commit()
         clear_feature_channel(interaction.guild.id, FEATURE_VOICE_ROLES, канал.id, "exclude")
         await interaction.response.send_message(f"✅ {канал.mention} снова участвует в авто-ролях.", ephemeral=True)
 

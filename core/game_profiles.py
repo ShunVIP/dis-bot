@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.paths import SOCIAL_DB
+from core.db import connection as db_connection
 
 GAME_LOL = "lol"
 PROVIDER_RIOT = "riot"
@@ -17,7 +18,7 @@ def _now() -> str:
 
 
 def ensure_game_profile_tables():
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS game_accounts (
@@ -88,7 +89,7 @@ def upsert_game_account(
 ):
     ensure_game_profile_tables()
     now = _now()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
             INSERT INTO game_accounts(
@@ -119,7 +120,7 @@ def upsert_game_account(
 
 def get_game_account(discord_user_id: int, game: str, provider: str = PROVIDER_RIOT) -> dict[str, Any] | None:
     ensure_game_profile_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             """
             SELECT discord_user_id, game, provider, region, external_id,
@@ -147,7 +148,7 @@ def get_game_account(discord_user_id: int, game: str, provider: str = PROVIDER_R
 
 def unlink_game_account(discord_user_id: int, game: str, provider: str = PROVIDER_RIOT) -> int:
     ensure_game_profile_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         cur = conn.execute(
             "DELETE FROM game_accounts WHERE discord_user_id=? AND game=? AND provider=?",
             (int(discord_user_id), game, provider),
@@ -158,7 +159,7 @@ def unlink_game_account(discord_user_id: int, game: str, provider: str = PROVIDE
 
 def save_lol_snapshot(discord_user_id: int, puuid: str, region: str, snapshot: dict[str, Any]):
     ensure_game_profile_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
             INSERT INTO lol_profile_snapshots(discord_user_id, puuid, region, snapshot_json, created_at)
@@ -171,7 +172,7 @@ def save_lol_snapshot(discord_user_id: int, puuid: str, region: str, snapshot: d
 
 def get_latest_lol_snapshot(discord_user_id: int) -> dict[str, Any] | None:
     ensure_game_profile_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             """
             SELECT snapshot_json FROM lol_profile_snapshots
@@ -212,7 +213,7 @@ def save_lol_match_features(puuid: str, features: list[dict[str, Any]]):
                 now,
             )
         )
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.executemany(
             """
             INSERT OR REPLACE INTO lol_match_features(
@@ -236,7 +237,7 @@ def save_player_model_profile(
     explanation: str,
 ):
     ensure_game_profile_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
             INSERT INTO player_model_profiles(
@@ -265,7 +266,7 @@ def save_player_model_profile(
 
 def get_player_model_profile(discord_user_id: int, game: str, model_version: str = "lol_rules_v1") -> dict[str, Any] | None:
     ensure_game_profile_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             """
             SELECT features_json, labels_json, explanation, updated_at
