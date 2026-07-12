@@ -20,14 +20,6 @@ def ensure_birthday_tables():
             )
             """
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS birthday_config (
-                guild_id INTEGER PRIMARY KEY,
-                channel_id INTEGER
-            )
-            """
-        )
         for statement in (
             "ALTER TABLE birthdays ADD COLUMN updated_by INTEGER",
             "ALTER TABLE birthdays ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'",

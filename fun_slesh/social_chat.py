@@ -150,125 +150,19 @@ CARD_COLORS = [
 ]
 
 
-def _ensure_tables():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS social_chat_config (
-                guild_id         INTEGER PRIMARY KEY,
-                enabled          INTEGER NOT NULL DEFAULT 1,
-                chance_percent   INTEGER NOT NULL DEFAULT 12,
-                mention_only     INTEGER NOT NULL DEFAULT 0,
-                channel_ids      TEXT    NOT NULL DEFAULT ''
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS social_chat_excluded_channels (
-                guild_id   INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                reason     TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (guild_id, channel_id)
-            )
-            """
-        )
-        conn.commit()
-
-
-def _get_legacy_config(guild_id: int) -> tuple[bool, int, bool, set[int]]:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT enabled, chance_percent, mention_only, channel_ids FROM social_chat_config WHERE guild_id=?",
-            (guild_id,),
-        ).fetchone()
-    if not row:
-        return True, 12, False, set()
-    channel_ids = set(int(x) for x in (row[3] or "").split(",") if x.strip().isdigit())
-    return bool(row[0]), int(row[1]), bool(row[2]), channel_ids
-
-
 def _get_config(guild_id: int) -> tuple[bool, int, bool, set[int], set[int]]:
-    legacy_enabled, legacy_chance, legacy_mention_only, legacy_channel_ids = _get_legacy_config(guild_id)
     policy = get_feature_policy(guild_id, FEATURE_SOCIAL_CHAT)
     payload = policy.extra or {}
-    configured = has_feature_setting(guild_id, FEATURE_SOCIAL_CHAT) or bool(
-        policy.allowed_channel_ids or policy.excluded_channel_ids or payload
-    )
-
-    enabled = policy.enabled if configured else legacy_enabled
+    enabled = policy.enabled
     try:
-        chance_percent = int(payload.get("chance_percent", legacy_chance))
+        chance_percent = int(payload.get("chance_percent", 12))
     except (TypeError, ValueError):
-        chance_percent = legacy_chance
+        chance_percent = 12
     chance_percent = max(0, min(100, chance_percent))
-    mention_only = bool(payload.get("mention_only", legacy_mention_only))
-    allowed_channel_ids = set(policy.allowed_channel_ids) if configured else legacy_channel_ids
-    excluded_channel_ids = set(policy.excluded_channel_ids) if configured else _social_excluded_channel_ids(guild_id)
+    mention_only = bool(payload.get("mention_only", False))
+    allowed_channel_ids = set(policy.allowed_channel_ids)
+    excluded_channel_ids = set(policy.excluded_channel_ids)
     return enabled, chance_percent, mention_only, allowed_channel_ids, excluded_channel_ids
-
-
-def _set_enabled(guild_id: int, enabled: bool):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO social_chat_config(guild_id, enabled)
-            VALUES(?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled
-            """,
-            (guild_id, int(enabled)),
-        )
-        conn.commit()
-
-
-def _set_chance(guild_id: int, chance_percent: int):
-    chance_percent = max(0, min(100, int(chance_percent)))
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO social_chat_config(guild_id, chance_percent)
-            VALUES(?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET chance_percent=excluded.chance_percent
-            """,
-            (guild_id, int(chance_percent)),
-        )
-        conn.commit()
-
-
-def _set_mention_only(guild_id: int, mention_only: bool):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO social_chat_config(guild_id, mention_only)
-            VALUES(?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET mention_only=excluded.mention_only
-            """,
-            (guild_id, int(mention_only)),
-        )
-        conn.commit()
-
-
-def _set_channels(guild_id: int, channel_ids: set[int]):
-    raw = ",".join(str(x) for x in sorted(channel_ids))
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO social_chat_config(guild_id, channel_ids)
-            VALUES(?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET channel_ids=excluded.channel_ids
-            """,
-            (guild_id, raw),
-        )
-        conn.commit()
-
-
-def _social_excluded_channel_ids(guild_id: int) -> set[int]:
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT channel_id FROM social_chat_excluded_channels WHERE guild_id=?",
-            (guild_id,),
-        ).fetchall()
-    return {int(row[0]) for row in rows}
 
 
 def _normalize_text(text: str) -> str:
@@ -482,7 +376,6 @@ class SocialChat(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        _ensure_tables()
         self._channel_cooldowns: dict[tuple[int, int], datetime] = {}
         self._user_cooldowns: dict[tuple[int, int], datetime] = {}
         self._image_cooldowns: dict[tuple[int, int], datetime] = {}
@@ -689,7 +582,6 @@ class SocialChat(commands.Cog):
     @chat_group.command(name="вкл", description="(Админ) Включить или выключить разговорчивость")
     @app_commands.checks.has_permissions(administrator=True)
     async def вкл(self, interaction: discord.Interaction, включить: bool):
-        _set_enabled(interaction.guild.id, включить)
         set_feature_enabled(interaction.guild.id, FEATURE_SOCIAL_CHAT, включить)
         await interaction.response.send_message(
             f"{'✅' if включить else '⛔'} Болтовня бота {'включена' if включить else 'выключена'}.",
@@ -699,7 +591,6 @@ class SocialChat(commands.Cog):
     @chat_group.command(name="шанс", description="(Админ) Шанс случайного ответа вне прямого обращения")
     @app_commands.checks.has_permissions(administrator=True)
     async def шанс(self, interaction: discord.Interaction, процент: app_commands.Range[int, 0, 100]):
-        _set_chance(interaction.guild.id, int(процент))
         set_feature_payload(interaction.guild.id, FEATURE_SOCIAL_CHAT, {"chance_percent": int(процент)})
         await interaction.response.send_message(
             f"✅ Новый шанс случайного ответа: **{процент}%**.",
@@ -709,7 +600,6 @@ class SocialChat(commands.Cog):
     @chat_group.command(name="режим", description="(Админ) Только по обращению к боту или и обычная болтовня тоже")
     @app_commands.checks.has_permissions(administrator=True)
     async def режим(self, interaction: discord.Interaction, только_по_обращению: bool):
-        _set_mention_only(interaction.guild.id, только_по_обращению)
         set_feature_payload(interaction.guild.id, FEATURE_SOCIAL_CHAT, {"mention_only": bool(только_по_обращению)})
         await interaction.response.send_message(
             "✅ Режим обновлён: "
@@ -729,7 +619,6 @@ class SocialChat(commands.Cog):
             clear_feature_channel(interaction.guild.id, FEATURE_SOCIAL_CHAT, канал.id, "allow")
             if not current:
                 clear_feature_channels(interaction.guild.id, FEATURE_SOCIAL_CHAT, "allow")
-        _set_channels(interaction.guild.id, current)
         if current:
             mentions = ", ".join(f"<#{cid}>" for cid in sorted(current))
             text = f"✅ Болтовня разрешена только в: {mentions}"
@@ -746,15 +635,6 @@ class SocialChat(commands.Cog):
         канал: discord.TextChannel,
         причина: str = "",
     ):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO social_chat_excluded_channels(guild_id, channel_id, reason)
-                VALUES(?, ?, ?)
-                ON CONFLICT(guild_id, channel_id) DO UPDATE SET reason=excluded.reason
-                """,
-                (interaction.guild.id, канал.id, причина[:200]),
-            )
         set_feature_channel(interaction.guild.id, FEATURE_SOCIAL_CHAT, канал.id, "exclude", причина[:200])
         await interaction.response.send_message(
             f"✅ {канал.mention} исключён из болтовни бота.", ephemeral=True
@@ -763,12 +643,7 @@ class SocialChat(commands.Cog):
     @chat_group.command(name="вернуть", description="(Админ) Вернуть канал в болтовню бота")
     @app_commands.checks.has_permissions(administrator=True)
     async def chat_include_channel(self, interaction: discord.Interaction, канал: discord.TextChannel):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.execute(
-                "DELETE FROM social_chat_excluded_channels WHERE guild_id=? AND channel_id=?",
-                (interaction.guild.id, канал.id),
-            )
-        removed = cur.rowcount + clear_feature_channel(interaction.guild.id, FEATURE_SOCIAL_CHAT, канал.id, "exclude")
+        removed = clear_feature_channel(interaction.guild.id, FEATURE_SOCIAL_CHAT, канал.id, "exclude")
         text = f"✅ {канал.mention} снова доступен для болтовни." if removed else "ℹ️ Этого канала не было в исключениях."
         await interaction.response.send_message(text, ephemeral=True)
 

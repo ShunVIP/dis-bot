@@ -6,7 +6,7 @@ import discord
 
 from core.birthday_store import ensure_birthday_tables
 from core.paths import BIRTHDAYS_DB
-from core.settings_store import get_feature_policy, has_feature_setting
+from core.settings_store import get_feature_policy
 
 # ── Часовой пояс для крон-задачи ──────────────────────────────────────────────
 MSK = ZoneInfo("Europe/Moscow")
@@ -19,20 +19,7 @@ FEATURE_BIRTHDAY = "birthday"
 def _birthday_channel_id(guild_id: int) -> int | None:
     ensure_birthday_tables()
     policy = get_feature_policy(guild_id, FEATURE_BIRTHDAY)
-    if policy.output_channel_id:
-        return int(policy.output_channel_id)
-    if has_feature_setting(guild_id, FEATURE_BIRTHDAY):
-        return None
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS birthday_config (
-                guild_id INTEGER PRIMARY KEY,
-                channel_id INTEGER
-            )
-        """)
-        row = conn.execute("SELECT channel_id FROM birthday_config WHERE guild_id=?", (guild_id,)).fetchone()
-        conn.commit()
-    return int(row[0]) if row and row[0] else None
+    return int(policy.output_channel_id) if policy.output_channel_id else None
 
 def setup_birthday_checker(bot: discord.Client):
     # Планировщик живёт в МСК, значит hour=9 → 09:00 МСК

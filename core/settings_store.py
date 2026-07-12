@@ -48,6 +48,17 @@ def ensure_settings_tables():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feature_runtime_state (
+                guild_id    INTEGER NOT NULL,
+                feature     TEXT NOT NULL,
+                state       TEXT NOT NULL DEFAULT '{}',
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (guild_id, feature)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -107,6 +118,40 @@ def set_feature_payload(guild_id: int, feature: str, payload: dict[str, Any], en
 
 def set_feature_enabled(guild_id: int, feature: str, enabled: bool):
     set_feature_payload(guild_id, feature, {}, enabled=enabled)
+
+
+def get_feature_runtime_state(
+    guild_id: int,
+    feature: str,
+    default: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ensure_settings_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        row = conn.execute(
+            "SELECT state FROM feature_runtime_state WHERE guild_id=? AND feature=?",
+            (guild_id, feature),
+        ).fetchone()
+    result = dict(default or {})
+    if row:
+        result.update(_loads(row[0]))
+    return result
+
+
+def set_feature_runtime_state(guild_id: int, feature: str, state: dict[str, Any]) -> None:
+    ensure_settings_tables()
+    existing = get_feature_runtime_state(guild_id, feature)
+    existing.update(state)
+    with db_connection(SOCIAL_DB) as conn:
+        conn.execute(
+            """
+            INSERT INTO feature_runtime_state(guild_id, feature, state, updated_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(guild_id, feature) DO UPDATE SET
+                state=excluded.state,
+                updated_at=excluded.updated_at
+            """,
+            (guild_id, feature, json.dumps(existing, ensure_ascii=False), _now()),
+        )
 
 
 def is_feature_enabled(guild_id: int, feature: str, default: bool = True) -> bool:

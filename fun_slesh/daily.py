@@ -39,7 +39,12 @@ from core.economy_profile import (
     get_economy_profile,
     set_economy_profile,
 )
-from core.settings_store import get_feature_payload, set_feature_payload
+from core.settings_store import (
+    get_feature_payload,
+    get_feature_runtime_state,
+    set_feature_payload,
+    set_feature_runtime_state,
+)
 from utils.events_bus import emit
 
 MSK  = ZoneInfo("Europe/Moscow")
@@ -80,21 +85,7 @@ def _ensure_tables():
                 expires_at  TEXT    NOT NULL
             );
 
-            -- Настройки налога
-            CREATE TABLE IF NOT EXISTS tax_config (
-                id          INTEGER PRIMARY KEY DEFAULT 1,
-                enabled     INTEGER NOT NULL DEFAULT 0,
-                rate_pct    INTEGER NOT NULL DEFAULT 10,
-                interval_h  INTEGER NOT NULL DEFAULT 168,
-                last_run    TEXT    NOT NULL DEFAULT ''
-            );
         """)
-        # Вставляем строку конфига если нет
-        conn.execute(
-            "INSERT OR IGNORE INTO tax_config(id, enabled, rate_pct, interval_h, last_run)"
-            " VALUES(1, 0, 10, 168, '')"
-        )
-        conn.commit()
 
 
 # ── Вспомогательные ───────────────────────────────────────────────────────────
@@ -107,14 +98,7 @@ def _compute_reward(streak: int) -> int:
     return base + series + _milestone_bonus(streak)
 
 def _tax_config(guild_id: int | None = None) -> dict:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT enabled, rate_pct, interval_h, last_run FROM tax_config WHERE id=1"
-        ).fetchone()
-    if not row:
-        cfg = {"enabled": 0, "rate_pct": 10, "interval_h": 168, "last_run": ""}
-    else:
-        cfg = {"enabled": row[0], "rate_pct": row[1], "interval_h": row[2], "last_run": row[3]}
+    cfg = {"enabled": 0, "rate_pct": 10, "interval_h": 168, "last_run": ""}
     if guild_id is None:
         return cfg
     payload = get_feature_payload(guild_id, FEATURE_ECONOMY)
@@ -130,6 +114,8 @@ def _tax_config(guild_id: int | None = None) -> dict:
             cfg["interval_h"] = max(1, min(720, int(payload["tax_interval_h"])))
         except (TypeError, ValueError):
             pass
+    state = get_feature_runtime_state(guild_id, FEATURE_ECONOMY)
+    cfg["last_run"] = str(state.get("tax_last_run") or "")
     return cfg
 
 
@@ -155,12 +141,9 @@ async def _run_tax(bot: commands.Bot):
         add_coins(user_id, -tax, reason="tax", meta={"rate": cfg["rate_pct"]})
         total_collected += tax
 
-    # Обновляем last_run
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "UPDATE tax_config SET last_run=? WHERE id=1",
-            (datetime.now(UTC).isoformat(),)
-        )
+    guild_id = _primary_guild_id(bot)
+    if guild_id is not None:
+        set_feature_runtime_state(guild_id, FEATURE_ECONOMY, {"tax_last_run": datetime.now(UTC).isoformat()})
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -176,6 +159,13 @@ class Daily(commands.Cog):
             self._reschedule_tax(cfg["interval_h"])
         if not scheduler.running:
             scheduler.start()
+
+    def refresh_tax_schedule(self):
+        cfg = _tax_config(_primary_guild_id(self.bot))
+        if cfg["enabled"]:
+            self._reschedule_tax(cfg["interval_h"])
+        elif scheduler.get_job("tax_job"):
+            scheduler.remove_job("tax_job")
 
     def _reschedule_tax(self, interval_h: int):
         job_id = "tax_job"
@@ -419,11 +409,6 @@ class Daily(commands.Cog):
                                включить: bool,
                                ставка: app_commands.Range[int, 1, 50] = 10,
                                каждые_часов: app_commands.Range[int, 1, 720] = 168):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "UPDATE tax_config SET enabled=?, rate_pct=?, interval_h=? WHERE id=1",
-                (int(включить), ставка, каждые_часов)
-            )
         set_feature_payload(
             interaction.guild.id,
             FEATURE_ECONOMY,

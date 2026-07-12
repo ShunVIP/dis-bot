@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core.paths import SOCIAL_DB
-from core.settings_store import get_feature_policy, has_feature_setting, set_feature_channel, set_feature_payload
+from core.settings_store import get_feature_policy, set_feature_channel, set_feature_payload
 
 DB_PATH = SOCIAL_DB
 FEATURE_WWM_GUILD = "wwm_guild"
@@ -34,19 +34,11 @@ def _ensure_tables():
                 PRIMARY KEY (guild_id, user_id)
             );
 
-            CREATE TABLE IF NOT EXISTS wwm_config (
-                guild_id           INTEGER PRIMARY KEY,
-                welcome_channel_id INTEGER,
-                reception_channel_id INTEGER,
-                auto_nickname      INTEGER NOT NULL DEFAULT 1,
-                nickname_template  TEXT    NOT NULL DEFAULT '{game_nick}'
-            );
             """
         )
         for statement in (
             "ALTER TABLE wwm_profiles ADD COLUMN character_card TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE wwm_profiles ADD COLUMN character_updated_at TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE wwm_config ADD COLUMN reception_channel_id INTEGER",
         ):
             try:
                 conn.execute(statement)
@@ -55,28 +47,13 @@ def _ensure_tables():
         conn.commit()
 
 
-def _legacy_config(guild_id: int) -> tuple[int | None, int | None, bool, str]:
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("INSERT OR IGNORE INTO wwm_config(guild_id) VALUES(?)", (guild_id,))
-        row = conn.execute(
-            "SELECT welcome_channel_id, reception_channel_id, auto_nickname, nickname_template FROM wwm_config WHERE guild_id=?",
-            (guild_id,),
-        ).fetchone()
-        conn.commit()
-    return (row[0], row[1], bool(row[2]), row[3] or "{game_nick}")
-
-
 def _config(guild_id: int) -> tuple[int | None, int | None, bool, str]:
-    welcome_channel_id, reception_channel_id, auto_nickname, nickname_template = _legacy_config(guild_id)
     policy = get_feature_policy(guild_id, FEATURE_WWM_GUILD)
     payload = policy.extra or {}
-    configured = has_feature_setting(guild_id, FEATURE_WWM_GUILD) or policy.output_channel_id is not None or bool(payload)
-
-    if configured:
-        welcome_channel_id = None
-        reception_channel_id = None
-    if policy.output_channel_id:
-        welcome_channel_id = int(policy.output_channel_id)
+    welcome_channel_id = int(policy.output_channel_id) if policy.output_channel_id else None
+    reception_channel_id = None
+    auto_nickname = True
+    nickname_template = "{game_nick}"
     try:
         reception_channel_id = int(payload.get("reception_channel_id") or reception_channel_id or 0) or None
     except (TypeError, ValueError):
@@ -416,32 +393,12 @@ class WWMGuild(commands.Cog):
     @wwm_group.command(name="канал", description="(Админ) Настроить канал WWM-приветствия")
     @app_commands.checks.has_permissions(administrator=True)
     async def wwm_канал(self, interaction: discord.Interaction, канал: discord.TextChannel):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO wwm_config(guild_id, welcome_channel_id)
-                VALUES(?,?)
-                ON CONFLICT(guild_id) DO UPDATE SET welcome_channel_id=excluded.welcome_channel_id
-                """,
-                (interaction.guild.id, канал.id),
-            )
-            conn.commit()
         set_feature_channel(interaction.guild.id, FEATURE_WWM_GUILD, канал.id, "output", "Discord command")
         await interaction.response.send_message(f"✅ WWM-приветствие будет отправляться в {канал.mention}.", ephemeral=True)
 
     @wwm_group.command(name="приемная", description="(Админ) Настроить канал обращений не-WWM участников")
     @app_commands.checks.has_permissions(administrator=True)
     async def wwm_приемная(self, interaction: discord.Interaction, канал: discord.TextChannel):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO wwm_config(guild_id, reception_channel_id)
-                VALUES(?,?)
-                ON CONFLICT(guild_id) DO UPDATE SET reception_channel_id=excluded.reception_channel_id
-                """,
-                (interaction.guild.id, канал.id),
-            )
-            conn.commit()
         set_feature_payload(interaction.guild.id, FEATURE_WWM_GUILD, {"reception_channel_id": канал.id})
         await interaction.response.send_message(f"✅ Обращения не-WWM участников будут уходить в {канал.mention}.", ephemeral=True)
 
@@ -456,18 +413,6 @@ class WWMGuild(commands.Cog):
         if "{game_nick}" not in template:
             await interaction.response.send_message("❌ В шаблоне должен быть `{game_nick}`.", ephemeral=True)
             return
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO wwm_config(guild_id, auto_nickname, nickname_template)
-                VALUES(?,?,?)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    auto_nickname=excluded.auto_nickname,
-                    nickname_template=excluded.nickname_template
-                """,
-                (interaction.guild.id, int(включить), template),
-            )
-            conn.commit()
         set_feature_payload(
             interaction.guild.id,
             FEATURE_WWM_GUILD,

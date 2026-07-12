@@ -199,8 +199,11 @@ async def on_ready():
     if not getattr(bot, "admin_settings_seeded", False):
         try:
             from core.settings_migration import seed_admin_settings_from_legacy
-            seed_admin_settings_from_legacy(log)
+            seed_admin_settings_from_legacy(log, guild_ids=[int(guild.id) for guild in bot.guilds])
             bot.admin_settings_seeded = True
+            daily_cog = bot.get_cog("Daily")
+            if daily_cog and hasattr(daily_cog, "refresh_tax_schedule"):
+                daily_cog.refresh_tax_schedule()
         except Exception as e:
             log.bind(src="settings").error(f"Ошибка миграции настроек в админ-панель: {e}")
 

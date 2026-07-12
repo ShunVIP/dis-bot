@@ -159,12 +159,6 @@ REIMI_HAIKU_REQUEST = (
 def _ensure_tables():
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript("""
-            CREATE TABLE IF NOT EXISTS daily_summary_config (
-                guild_id  INTEGER PRIMARY KEY,
-                channel_id INTEGER,
-                enabled   INTEGER NOT NULL DEFAULT 1
-            );
-
             CREATE TABLE IF NOT EXISTS summary_post_log (
                 guild_id     INTEGER NOT NULL,
                 summary_type TEXT    NOT NULL,
@@ -175,52 +169,22 @@ def _ensure_tables():
         """)
 
 
-def _legacy_summary_targets() -> dict[int, int]:
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT guild_id, channel_id FROM daily_summary_config"
-            " WHERE enabled=1 AND channel_id IS NOT NULL"
-        ).fetchall()
-    return {int(guild_id): int(channel_id) for guild_id, channel_id in rows}
-
-
 def _summary_targets(bot: commands.Bot) -> list[tuple[int, int]]:
-    targets = _legacy_summary_targets()
+    targets = {}
     for guild in bot.guilds:
         policy = get_feature_policy(guild.id, FEATURE_DAILY_SUMMARY)
-        configured = has_feature_setting(guild.id, FEATURE_DAILY_SUMMARY) or policy.output_channel_id is not None
-        if not configured:
-            continue
         if policy.enabled and policy.output_channel_id:
             targets[guild.id] = int(policy.output_channel_id)
-        else:
-            targets.pop(guild.id, None)
     return sorted(targets.items())
 
 
 def _save_summary_channel(guild_id: int, channel_id: int):
     set_feature_enabled(guild_id, FEATURE_DAILY_SUMMARY, True)
     set_feature_channel(guild_id, FEATURE_DAILY_SUMMARY, channel_id, "output", "Discord admin command")
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO daily_summary_config(guild_id, channel_id, enabled)"
-            " VALUES(?,?,1)"
-            " ON CONFLICT(guild_id) DO UPDATE SET"
-            " channel_id=excluded.channel_id, enabled=1",
-            (guild_id, channel_id),
-        )
-        conn.commit()
 
 
 def _save_summary_enabled(guild_id: int, enabled: bool):
     set_feature_enabled(guild_id, FEATURE_DAILY_SUMMARY, enabled)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO daily_summary_config(guild_id, enabled) VALUES(?,?)"
-            " ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
-            (guild_id, int(enabled)),
-        )
-        conn.commit()
 
 
 # ── Сбор статистики за день ───────────────────────────────────────────────────

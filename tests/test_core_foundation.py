@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from core import community_store, economy, economy_profile, settings_store
+from core import community_store, economy, economy_profile, settings_migration, settings_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -29,6 +29,8 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(community_store, "SOCIAL_DB", self.db_path),
             patch.object(economy, "DB_PATH", self.db_path),
             patch.object(economy_profile, "DB_PATH", self.db_path),
+            patch.object(settings_migration, "SOCIAL_DB", self.db_path),
+            patch.object(settings_migration, "BIRTHDAYS_DB", self.db_path),
         ]
         for item in self.patches:
             item.start()
@@ -62,6 +64,35 @@ class SettingsStoreTests(IsolatedDatabaseTest):
             settings_store.get_feature_payload(7, "daily_summary"),
             {"theme": "neon", "limit": 5},
         )
+
+    def test_runtime_state_is_separate_from_user_configuration(self):
+        settings_store.set_feature_payload(9, "economy", {"tax_rate_pct": 10})
+        settings_store.set_feature_runtime_state(9, "economy", {"tax_last_run": "2026-07-12T10:00:00+00:00"})
+        self.assertEqual(settings_store.get_feature_payload(9, "economy"), {"tax_rate_pct": 10})
+        self.assertEqual(
+            settings_store.get_feature_runtime_state(9, "economy"),
+            {"tax_last_run": "2026-07-12T10:00:00+00:00"},
+        )
+
+    def test_legacy_tax_config_migrates_once_for_active_guild(self):
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                "CREATE TABLE tax_config(id INTEGER PRIMARY KEY, enabled INTEGER, rate_pct INTEGER, interval_h INTEGER, last_run TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO tax_config VALUES(1, 1, 15, 72, '2026-07-01T00:00:00+00:00')"
+            )
+        result = settings_migration.seed_admin_settings_from_legacy(guild_ids=[123])
+        self.assertEqual(result["economy"], 1)
+        self.assertEqual(
+            settings_store.get_feature_payload(123, "economy"),
+            {"tax_enabled": True, "tax_rate_pct": 15, "tax_interval_h": 72},
+        )
+        self.assertEqual(
+            settings_store.get_feature_runtime_state(123, "economy")["tax_last_run"],
+            "2026-07-01T00:00:00+00:00",
+        )
+        self.assertEqual(settings_migration.seed_admin_settings_from_legacy(guild_ids=[123])["economy"], 0)
 
 
 class EconomyTests(IsolatedDatabaseTest):

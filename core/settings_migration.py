@@ -4,12 +4,14 @@ import sqlite3
 from typing import Any
 
 from core.paths import BIRTHDAYS_DB, SOCIAL_DB
+from core.db import connection as db_connection
 from core.settings_store import (
     get_feature_channel_ids,
     has_feature_setting,
     set_feature_channel,
     set_feature_enabled,
     set_feature_payload,
+    set_feature_runtime_state,
 )
 
 
@@ -38,7 +40,7 @@ def _int_set(raw: Any) -> set[int]:
 
 def _migrate_daily_summary() -> int:
     count = 0
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         if not _table_exists(conn, "daily_summary_config"):
             return 0
         rows = conn.execute(
@@ -57,7 +59,7 @@ def _migrate_daily_summary() -> int:
 
 def _migrate_birthday() -> int:
     count = 0
-    with sqlite3.connect(BIRTHDAYS_DB) as conn:
+    with db_connection(BIRTHDAYS_DB) as conn:
         if not _table_exists(conn, "birthday_config"):
             return 0
         rows = conn.execute("SELECT guild_id, channel_id FROM birthday_config").fetchall()
@@ -74,7 +76,7 @@ def _migrate_birthday() -> int:
 
 def _migrate_toxicity() -> int:
     count = 0
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         config_rows = (
             conn.execute("SELECT guild_id, enabled, threshold_lvl, channel_ids FROM toxicity_config").fetchall()
             if _table_exists(conn, "toxicity_config")
@@ -111,7 +113,7 @@ def _migrate_toxicity() -> int:
 
 def _migrate_social_chat() -> int:
     count = 0
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         config_rows = (
             conn.execute("SELECT guild_id, enabled, chance_percent, mention_only, channel_ids FROM social_chat_config").fetchall()
             if _table_exists(conn, "social_chat_config")
@@ -153,7 +155,7 @@ def _migrate_social_chat() -> int:
 
 def _migrate_voice_roles() -> int:
     count = 0
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         config_rows = (
             conn.execute("SELECT guild_id, enabled FROM voice_roles_config").fetchall()
             if _table_exists(conn, "voice_roles_config")
@@ -182,7 +184,7 @@ def _migrate_voice_roles() -> int:
 
 def _migrate_steam() -> int:
     count = 0
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         if not _table_exists(conn, "steam_config"):
             return 0
         rows = conn.execute("SELECT guild_id, notify_channel, discount_min_pct FROM steam_config").fetchall()
@@ -200,7 +202,7 @@ def _migrate_steam() -> int:
 
 def _migrate_wwm_guild() -> int:
     count = 0
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         if not _table_exists(conn, "wwm_config"):
             return 0
         rows = conn.execute(
@@ -223,7 +225,38 @@ def _migrate_wwm_guild() -> int:
     return count
 
 
-def seed_admin_settings_from_legacy(log=None) -> dict[str, int]:
+def _migrate_economy_tax(guild_ids: list[int] | tuple[int, ...] | None = None) -> int:
+    target_guild_ids = [int(guild_id) for guild_id in (guild_ids or []) if int(guild_id)]
+    if not target_guild_ids:
+        return 0
+    with db_connection(SOCIAL_DB) as conn:
+        if not _table_exists(conn, "tax_config"):
+            return 0
+        row = conn.execute(
+            "SELECT enabled, rate_pct, interval_h, last_run FROM tax_config WHERE id=1"
+        ).fetchone()
+    if not row:
+        return 0
+    count = 0
+    for guild_id in target_guild_ids:
+        if _feature_configured(guild_id, "economy"):
+            continue
+        set_feature_payload(
+            guild_id,
+            "economy",
+            {
+                "tax_enabled": bool(row[0]),
+                "tax_rate_pct": max(1, min(50, int(row[1] or 10))),
+                "tax_interval_h": max(1, min(720, int(row[2] or 168))),
+            },
+        )
+        if row[3]:
+            set_feature_runtime_state(guild_id, "economy", {"tax_last_run": str(row[3])})
+        count += 1
+    return count
+
+
+def seed_admin_settings_from_legacy(log=None, guild_ids: list[int] | tuple[int, ...] | None = None) -> dict[str, int]:
     results = {
         "daily_summary": _migrate_daily_summary(),
         "birthday": _migrate_birthday(),
@@ -232,6 +265,7 @@ def seed_admin_settings_from_legacy(log=None) -> dict[str, int]:
         "voice_roles": _migrate_voice_roles(),
         "steam": _migrate_steam(),
         "wwm_guild": _migrate_wwm_guild(),
+        "economy": _migrate_economy_tax(guild_ids),
     }
     migrated = sum(results.values())
     if log:

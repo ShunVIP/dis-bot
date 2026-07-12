@@ -24,6 +24,7 @@ import discord
 from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from discord.ext import commands
+from core.settings_store import get_feature_policy
 
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
 UTC = timezone.utc
@@ -901,12 +902,8 @@ class ActivityTracker(commands.Cog):
         if isinstance(channel, discord.TextChannel):
             return channel
 
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT channel_id FROM daily_summary_config WHERE guild_id=? AND enabled=1 AND channel_id IS NOT NULL",
-                (guild.id,),
-            ).fetchone()
-        channel = self.bot.get_channel(row[0]) if row else None
+        summary_policy = get_feature_policy(guild.id, "daily_summary")
+        channel = self.bot.get_channel(summary_policy.output_channel_id) if summary_policy.output_channel_id else None
         if isinstance(channel, discord.TextChannel):
             return channel
         return guild.system_channel

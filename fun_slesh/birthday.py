@@ -12,7 +12,7 @@ from core.birthday_store import (
     validate_birthday,
 )
 from core.paths import BIRTHDAYS_DB
-from core.settings_store import get_feature_policy, has_feature_setting, set_feature_channel
+from core.settings_store import get_feature_policy, set_feature_channel
 
 DB_PATH = BIRTHDAYS_DB
 FEATURE_BIRTHDAY = "birthday"
@@ -24,13 +24,7 @@ def _ensure_table():
 
 def _birthday_channel_id(guild_id: int) -> int | None:
     policy = get_feature_policy(guild_id, FEATURE_BIRTHDAY)
-    if policy.output_channel_id:
-        return int(policy.output_channel_id)
-    if has_feature_setting(guild_id, FEATURE_BIRTHDAY):
-        return None
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute("SELECT channel_id FROM birthday_config WHERE guild_id=?", (guild_id,)).fetchone()
-    return int(row[0]) if row and row[0] else None
+    return int(policy.output_channel_id) if policy.output_channel_id else None
 
 class Birthday(commands.Cog):
     def __init__(self, bot):
@@ -74,16 +68,6 @@ class Birthday(commands.Cog):
     @app_commands.describe(канал="Канал, куда бот будет отправлять ежедневные поздравления")
     @app_commands.checks.has_permissions(administrator=True)
     async def др_канал(self, interaction: discord.Interaction, канал: discord.TextChannel):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO birthday_config(guild_id, channel_id)
-                VALUES(?,?)
-                ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id
-                """,
-                (interaction.guild.id, канал.id),
-            )
-            conn.commit()
         set_feature_channel(interaction.guild.id, FEATURE_BIRTHDAY, канал.id, "output", "Discord command")
         await interaction.response.send_message(f"✅ Поздравления с ДР будут отправляться в {канал.mention}.", ephemeral=True)
 

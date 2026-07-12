@@ -24,7 +24,7 @@ from discord.ext import commands
 from core.economy import get_balance
 from core.economy_profile import can_receive_currency, currency_amount, economy_profile_required_text
 from core.runtime_policy import WEB_ADMIN_CHANNEL_ID, WEB_ADMIN_CHANNEL_NAME, get_web_admin_url
-from core.settings_store import get_feature_payload, set_feature_payload
+from core.settings_store import get_feature_payload, get_feature_runtime_state, set_feature_payload
 from utils.logger import log as base_log
 
 
@@ -1060,20 +1060,16 @@ async def _send_summary_hub(bot: commands.Bot, interaction: discord.Interaction)
 
 
 async def _send_wallet_status(bot: commands.Bot, interaction: discord.Interaction):
-    db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
-    tax_text = "не настроен"
-    try:
-        with sqlite3.connect(db_path) as conn:
-            row = conn.execute(
-                "SELECT enabled, rate_pct, interval_h, last_run FROM tax_config WHERE id=1"
-            ).fetchone()
-        if row:
-            enabled, rate_pct, interval_h, last_run = row
-            tax_text = f"{'включен' if enabled else 'выключен'} · {rate_pct}% · каждые {interval_h}ч"
-            if last_run:
-                tax_text += f"\nПоследний запуск: `{last_run}`"
-    except Exception:
-        tax_text = "пока нет данных"
+    guild_id = int(interaction.guild.id) if interaction.guild else 0
+    payload = get_feature_payload(guild_id, "economy")
+    state = get_feature_runtime_state(guild_id, "economy")
+    enabled = bool(payload.get("tax_enabled", False))
+    rate_pct = max(1, min(50, int(payload.get("tax_rate_pct", 10))))
+    interval_h = max(1, min(720, int(payload.get("tax_interval_h", 168))))
+    last_run = str(state.get("tax_last_run") or "")
+    tax_text = f"{'включен' if enabled else 'выключен'} · {rate_pct}% · каждые {interval_h}ч"
+    if last_run:
+        tax_text += f"\nПоследний запуск: `{last_run}`"
 
     profile_note = "Профиль заполнен." if can_receive_currency(interaction.user.id) else economy_profile_required_text()
     embed = discord.Embed(
