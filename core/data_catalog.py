@@ -105,7 +105,7 @@ def ml_data_manifest(audit: dict[str, Any]) -> dict[str, Any]:
             },
             "community_activity": {
                 "database": "social",
-                "tables": ["daily_message_stats", "voice_daily", "activity_daily"],
+                "tables": ["msg_stats_daily", "voice_totals_daily", "activity_sessions"],
                 "training_location": "local_pc",
                 "inference_location": "vps",
             },
@@ -127,3 +127,38 @@ def write_audit(path: str, databases: dict[str, str] | None = None) -> dict[str,
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
 
+
+def repair_wwm_orphan_features(path: str) -> dict[str, int]:
+    """Archive and remove only feature rows whose parent entity is missing."""
+    from core.db import connection as db_connection
+
+    with db_connection(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS orphan_entity_features_backup (
+                entity_id INTEGER PRIMARY KEY,
+                predicted_type TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                snippet_en TEXT,
+                keywords_json TEXT,
+                updated_at TEXT NOT NULL,
+                archived_at TEXT NOT NULL
+            )
+            """
+        )
+        orphan_where = "entity_id NOT IN (SELECT entity_id FROM entities)"
+        before = int(conn.execute(f"SELECT COUNT(*) FROM entity_features WHERE {orphan_where}").fetchone()[0])
+        archived_at = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO orphan_entity_features_backup(
+                entity_id, predicted_type, confidence, snippet_en, keywords_json, updated_at, archived_at
+            )
+            SELECT entity_id, predicted_type, confidence, snippet_en, keywords_json, updated_at, ?
+            FROM entity_features WHERE {orphan_where}
+            """,
+            (archived_at,),
+        )
+        deleted = conn.execute(f"DELETE FROM entity_features WHERE {orphan_where}").rowcount
+        remaining = int(conn.execute(f"SELECT COUNT(*) FROM entity_features WHERE {orphan_where}").fetchone()[0])
+    return {"found": before, "archived": before, "deleted": int(deleted), "remaining": remaining}

@@ -231,7 +231,13 @@ def main(limit: int = 0):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA foreign_keys = ON")
         ensure_features_schema(conn)
+
+        # Old entity ids can disappear after a knowledge-base rebuild. Keep the
+        # derived feature layer aligned with the canonical entity table.
+        conn.execute("DELETE FROM entity_features WHERE entity_id NOT IN (SELECT entity_id FROM entities)")
+        conn.commit()
 
         cur = conn.cursor()
         cur.execute("""

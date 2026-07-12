@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from core import community_store, economy, economy_profile, settings_store
 from core.db import connection as db_connection
-from core.data_catalog import audit_all, ml_data_manifest
+from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
 from core.summary_service import (
     DEFAULT_SUMMARY_TEXTS,
@@ -135,6 +135,31 @@ class DataCatalogTests(IsolatedDatabaseTest):
         manifest = ml_data_manifest(audit)
         self.assertEqual(manifest["datasets"]["community_activity"]["training_location"], "local_pc")
         self.assertEqual(manifest["datasets"]["community_activity"]["inference_location"], "vps")
+
+    def test_wwm_repair_archives_orphan_features_before_deleting(self):
+        wwm_path = str(Path(self.temp_dir.name) / "wwm.db")
+        with db_connection(wwm_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE entities(entity_id INTEGER PRIMARY KEY);
+                CREATE TABLE entity_features(
+                    entity_id INTEGER PRIMARY KEY,
+                    predicted_type TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    snippet_en TEXT,
+                    keywords_json TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO entities VALUES(1);
+                INSERT INTO entity_features VALUES(1, 'npc', 0.9, '', '[]', 'now');
+                INSERT INTO entity_features VALUES(2, 'quest', 0.8, '', '[]', 'now');
+                """
+            )
+        result = repair_wwm_orphan_features(wwm_path)
+        self.assertEqual(result, {"found": 1, "archived": 1, "deleted": 1, "remaining": 0})
+        with db_connection(wwm_path) as conn:
+            self.assertEqual(conn.execute("SELECT entity_id FROM entity_features").fetchall(), [(1,)])
+            self.assertEqual(conn.execute("SELECT entity_id FROM orphan_entity_features_backup").fetchall(), [(2,)])
 
 
 if __name__ == "__main__":
