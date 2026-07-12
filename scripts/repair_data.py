@@ -25,3 +25,7 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["integrity"] == "ok" and result["after_fk_violations"] == 0 else 1
     return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
