@@ -84,6 +84,10 @@ def audit_all(databases: dict[str, str] | None = None) -> dict[str, Any]:
 
 def ml_data_manifest(audit: dict[str, Any]) -> dict[str, Any]:
     """Describe local/VPS placement without copying private user data."""
+    from core.ml_artifacts import MANIFEST_PATH, load_artifact_manifest
+
+    artifact_manifest = load_artifact_manifest(verify_files=True)
+    artifacts = artifact_manifest.get("artifacts", [])
     table_index = {
         (db["name"], table["name"]): table["rows"]
         for db in audit.get("databases", [])
@@ -95,6 +99,14 @@ def ml_data_manifest(audit: dict[str, Any]) -> dict[str, Any]:
             "vps": ["collection", "aggregation", "Markov refresh", "lightweight inference"],
             "local_pc": ["GPT training", "embedding/index builds", "batch feature engineering"],
             "transfer": "Only versioned derived artifacts and explicitly synchronized source databases.",
+        },
+        "artifact_registry": {
+            "path": str(MANIFEST_PATH),
+            "schema_version": artifact_manifest.get("schema_version", 0),
+            "updated_at": artifact_manifest.get("updated_at", ""),
+            "artifacts": len(artifacts),
+            "available": sum(1 for item in artifacts if item.get("available")),
+            "missing": sum(1 for item in artifacts if not item.get("available")),
         },
         "datasets": {
             "parody_messages": {

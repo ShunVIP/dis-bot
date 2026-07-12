@@ -56,6 +56,7 @@ from core.community_store import (
 )
 from core.profile_service import get_unified_profile, update_unified_profile
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
+from core.ml_artifacts import load_artifact_manifest
 from core.platform_store import (
     add_platform_message,
     can_access_platform_target,
@@ -657,6 +658,24 @@ async def api_settings(request: web.Request):
     return _json({"guild_id": guild_id, "features": result})
 
 
+async def api_ml_status(request: web.Request):
+    _require_admin(request)
+    manifest = load_artifact_manifest(verify_files=True)
+    artifacts = manifest.get("artifacts", [])
+    return _json(
+        {
+            "schema_version": manifest.get("schema_version", 0),
+            "updated_at": manifest.get("updated_at", ""),
+            "summary": {
+                "artifacts": len(artifacts),
+                "available": sum(1 for item in artifacts if item.get("available")),
+                "missing": sum(1 for item in artifacts if not item.get("available")),
+            },
+            "artifacts": artifacts,
+        }
+    )
+
+
 async def api_patch_feature(request: web.Request):
     _require_admin(request)
     guild_id = int(request.match_info["guild_id"])
@@ -980,6 +999,7 @@ def create_app() -> web.Application:
     app.router.add_delete("/api/platform/messages/{message_id}", api_platform_message_delete)
     app.router.add_post("/api/platform/messages/{message_id}/reactions", api_platform_message_reaction)
     app.router.add_get("/api/settings", api_settings)
+    app.router.add_get("/api/ml/status", api_ml_status)
     app.router.add_patch("/api/guilds/{guild_id}/features/{feature}", api_patch_feature)
     app.router.add_put("/api/guilds/{guild_id}/features/{feature}/channels/{mode}/{channel_id}", api_put_channel)
     app.router.add_delete("/api/guilds/{guild_id}/features/{feature}/channels/{mode}/{channel_id}", api_delete_channel)

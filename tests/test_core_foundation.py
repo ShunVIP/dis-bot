@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, platform_store, profile_service, settings_migration, settings_store, web_app_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, platform_store, profile_service, settings_migration, settings_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -21,6 +21,7 @@ from core.summary_service import (
     render_summary_template,
 )
 from web_app.server import security_middleware
+from scripts.build_ml_manifest import build_manifest
 
 
 class IsolatedDatabaseTest(unittest.TestCase):
@@ -275,6 +276,65 @@ class PlatformDmTests(IsolatedDatabaseTest):
         self.assertEqual(archived_target, (message[0], second_id))
 
 
+class MlArtifactTests(unittest.TestCase):
+    def test_empty_manifest_is_materialized_for_observability(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "models"
+            with patch.object(ml_artifacts, "MODELS_DIR", root), patch.object(
+                ml_artifacts, "MANIFEST_PATH", root / "manifest.json"
+            ):
+                manifest = ml_artifacts.ensure_artifact_manifest()
+            self.assertEqual(manifest["artifacts"], [])
+            self.assertTrue((root / "manifest.json").is_file())
+
+    def test_manifest_is_atomic_versioned_and_rejects_external_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "models"
+            artifact = root / "42_mem.json"
+            root.mkdir()
+            artifact.write_text('{"chain": true}', encoding="utf-8")
+            with patch.object(ml_artifacts, "MODELS_DIR", root), patch.object(
+                ml_artifacts, "MANIFEST_PATH", root / "manifest.json"
+            ):
+                record = ml_artifacts.register_artifact(
+                    pipeline="parody_markov",
+                    user_id=42,
+                    kind="mem",
+                    path=artifact,
+                    source_rows=120,
+                    execution_location="local_pc",
+                )
+                manifest = ml_artifacts.load_artifact_manifest(verify_files=True)
+                self.assertEqual(manifest["schema_version"], 1)
+                self.assertEqual(manifest["artifacts"][0]["version"], record["sha256"][:16])
+                self.assertTrue(manifest["artifacts"][0]["available"])
+                self.assertTrue(manifest["artifacts"][0]["hash_matches"])
+                with self.assertRaises(ValueError):
+                    ml_artifacts.register_artifact(
+                        pipeline="bad",
+                        user_id=None,
+                        kind="outside",
+                        path=Path(temp_dir) / "outside.bin",
+                        source_rows=0,
+                        execution_location="local_pc",
+                    )
+
+    def test_bootstrap_discovers_existing_markov_artifact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "models"
+            root.mkdir()
+            (root / "77_mem.json").write_text('{"chain": true}', encoding="utf-8")
+            with patch("scripts.build_ml_manifest.MODELS_DIR", root), patch.object(
+                ml_artifacts, "MODELS_DIR", root
+            ), patch.object(ml_artifacts, "MANIFEST_PATH", root / "manifest.json"), patch(
+                "scripts.build_ml_manifest._message_counts", return_value={77: 321}
+            ):
+                result = build_manifest()
+                manifest = ml_artifacts.load_artifact_manifest()
+            self.assertEqual(result, {"registered": 1, "artifacts": 1, "available": 1})
+            self.assertEqual(manifest["artifacts"][0]["source_rows"], 321)
+
+
 class PermissionTests(IsolatedDatabaseTest):
     def test_first_user_bootstraps_as_owner_and_admin(self):
         community_store.ensure_first_owner(100)
@@ -322,6 +382,7 @@ class DataCatalogTests(IsolatedDatabaseTest):
         manifest = ml_data_manifest(audit)
         self.assertEqual(manifest["datasets"]["community_activity"]["training_location"], "local_pc")
         self.assertEqual(manifest["datasets"]["community_activity"]["inference_location"], "vps")
+        self.assertIn("artifact_registry", manifest)
 
     def test_wwm_repair_archives_orphan_features_before_deleting(self):
         wwm_path = str(Path(self.temp_dir.name) / "wwm.db")

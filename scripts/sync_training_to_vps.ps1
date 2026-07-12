@@ -11,9 +11,17 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $bundlePath = Join-Path $projectRoot "training_bundle.tar.gz"
 $modelsDir = Join-Path $projectRoot "models"
+$venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
 
 if (-not (Test-Path $modelsDir)) {
     throw "models directory not found: $modelsDir"
+}
+
+$pythonExe = if (Test-Path $venvPython) { $venvPython } else { "python" }
+Write-Host "[sync] refreshing versioned ML manifest..."
+& $pythonExe (Join-Path $PSScriptRoot "build_ml_manifest.py") --require-artifacts
+if ($LASTEXITCODE -ne 0) {
+    throw "ML manifest build failed with exit code $LASTEXITCODE"
 }
 
 Write-Host "[sync] creating training bundle..."

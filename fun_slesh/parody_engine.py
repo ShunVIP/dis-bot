@@ -62,6 +62,8 @@ from core.runtime_policy import (
     is_full_maintenance_allowed,
     is_gpt_training_allowed,
 )
+from core.ml_artifacts import register_artifact
+from core.paths import MODELS_DIR as CANONICAL_MODELS_DIR
 
 try:
     from fun_slesh.parody_engine_wakelock import prevent_sleep, allow_sleep
@@ -135,7 +137,7 @@ async def fine_tune_user(user_id: int, messages: list[str], epochs: int = 3) -> 
 
 MSK = ZoneInfo("Europe/Moscow")
 UTC = timezone.utc
-MODELS_DIR  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models"))
+MODELS_DIR = str(CANONICAL_MODELS_DIR)
 RATINGS_DB  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "parody_ratings.db"))
 
 _MK_EXECUTOR = ThreadPoolExecutor(max_workers=1)
@@ -204,9 +206,19 @@ def _model_path(user_id: int, quality: str = DEFAULT_MODEL) -> str:
     os.makedirs(MODELS_DIR, exist_ok=True)
     return os.path.join(MODELS_DIR, f"{user_id}_{quality}.json")
 
-def _save_model(user_id: int, quality: str, model):
-    with open(_model_path(user_id, quality), "w", encoding="utf-8") as f:
+def _save_model(user_id: int, quality: str, model, source_rows: int = 0):
+    path = _model_path(user_id, quality)
+    with open(path, "w", encoding="utf-8") as f:
         f.write(model.to_json())
+    register_artifact(
+        pipeline="parody_markov",
+        user_id=user_id,
+        kind=quality,
+        path=path,
+        source_rows=source_rows,
+        execution_location="vps" if IS_SERVER_RUNTIME else "local_pc",
+        metadata={"state_size": QUALITY_LEVELS[quality]["state_size"]},
+    )
 
 def _load_model(user_id: int, quality: str = DEFAULT_MODEL):
     path = _model_path(user_id, quality)
@@ -296,11 +308,11 @@ def train_user(user_id: int, messages: list, quality: str = DEFAULT_MODEL):
     if old_model:
         try:
             combined = markovify.combine([new_model, old_model], [0.7, 0.3])
-            _save_model(user_id, quality, combined)
+            _save_model(user_id, quality, combined, len(messages))
             return combined
         except Exception:
             pass
-    _save_model(user_id, quality, new_model)
+    _save_model(user_id, quality, new_model, len(messages))
     return new_model
 
 def train_user_all_qualities(user_id: int, messages: list) -> dict:
