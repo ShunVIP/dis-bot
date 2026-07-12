@@ -64,6 +64,10 @@
           </section>
           <section class="panel">
             <h2>Резервный вход</h2>
+            <form id="discordCodeForm" class="login-form">
+              <input id="discordLoginCode" autocomplete="one-time-code" placeholder="Код из команды /приложение">
+              <button class="button primary" type="submit">Войти по коду Discord</button>
+            </form>
             <form id="localLoginForm" class="login-form">
               <input id="localEmail" type="email" placeholder="email">
               <input id="localPassword" type="password" placeholder="пароль">
@@ -382,10 +386,5 @@
   </main>
 
   <script src="/static/app.js"></script>
-  <script>
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/static/service-worker.js").catch(console.error);
-    }
-  </script>
 </body>
 </html>

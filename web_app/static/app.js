@@ -32,6 +32,10 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/static/service-worker.js").catch(console.error);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -138,6 +142,7 @@ function renderMe(data) {
   $("loginLink").classList.toggle("hidden", signed);
   $("logoutLink").classList.toggle("hidden", !signed);
   $("localLoginForm").classList.toggle("hidden", signed);
+  $("discordCodeForm").classList.toggle("hidden", signed);
   $("loginProfileForm").classList.toggle("hidden", !signed);
   $("discordStatus").textContent = signed ? "online" : "guest";
   document.querySelectorAll("[data-admin-only]").forEach((item) => {
@@ -376,6 +381,14 @@ async function localLogin() {
   });
   renderMe({ authenticated: true, user: data.user, riot_connections: [] });
   await Promise.allSettled([loadChat(), loadVoiceRooms(), loadLol()]);
+}
+
+async function discordCodeLogin() {
+  await api("/auth/code", {
+    method: "POST",
+    body: JSON.stringify({ code: $("discordLoginCode").value.trim() }),
+  });
+  location.reload();
 }
 
 async function saveLoginProfile() {
@@ -1155,6 +1168,14 @@ $("localLoginForm").addEventListener("submit", async (event) => {
   await localLogin().catch((error) => {
     console.error(error);
     $("loginProfileStatus").textContent = "Не удалось войти по email и паролю.";
+  });
+});
+
+$("discordCodeForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await discordCodeLogin().catch((error) => {
+    console.error(error);
+    $("loginProfileStatus").textContent = "Код неверный, просрочен или уже использован.";
   });
 });
 

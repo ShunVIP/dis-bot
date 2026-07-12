@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.paths import SOCIAL_DB
+from core.db import connection as db_connection
 
 
 def _now() -> str:
@@ -17,7 +18,7 @@ def _now() -> str:
 
 
 def ensure_web_tables():
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS web_users (
@@ -48,6 +49,14 @@ def ensure_web_tables():
                 session_id      TEXT PRIMARY KEY,
                 discord_user_id INTEGER NOT NULL,
                 expires_at      TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS web_login_codes (
+                code_hash       TEXT PRIMARY KEY,
+                discord_user_id INTEGER NOT NULL,
+                expires_at      TEXT NOT NULL,
+                used_at         TEXT NOT NULL DEFAULT '',
                 created_at      TEXT NOT NULL
             );
 
@@ -91,6 +100,10 @@ def ensure_web_tables():
         _ensure_column(conn, "web_chat_messages", "attachment_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "web_chat_messages", "edited_at", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "web_chat_messages", "deleted_at", "TEXT NOT NULL DEFAULT ''")
+        # OAuth tokens are not needed after the identity snapshot is saved.
+        # Clear values written by older builds instead of keeping reusable
+        # Discord credentials in SQLite.
+        conn.execute("UPDATE web_users SET access_token='', refresh_token='' WHERE access_token!='' OR refresh_token!=''")
         conn.commit()
 
 
@@ -122,7 +135,7 @@ def upsert_web_user(
     connections: list[dict[str, Any]] | None = None,
 ):
     ensure_web_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
             INSERT INTO web_users(
@@ -146,8 +159,8 @@ def upsert_web_user(
                 username,
                 global_name,
                 avatar,
-                access_token,
-                refresh_token,
+                "",
+                "",
                 token_expires_at,
                 json.dumps(connections or [], ensure_ascii=False),
                 _now(),
@@ -169,7 +182,7 @@ def upsert_login_profile(
     password_salt = ""
     if password:
         password_hash, password_salt = _hash_password(password)
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         existing = conn.execute(
             "SELECT email, login_name, password_hash, password_salt FROM web_login_profiles WHERE discord_user_id=?",
             (int(discord_user_id),),
@@ -197,7 +210,7 @@ def upsert_login_profile(
 
 def get_login_profile(discord_user_id: int) -> dict[str, Any] | None:
     ensure_web_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             """
             SELECT discord_user_id, email, login_name, password_hash, updated_at
@@ -222,7 +235,7 @@ def authenticate_local_user(email: str, password: str) -> dict[str, Any] | None:
     clean_email = email.strip().lower()
     if not clean_email or not password:
         return None
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             """
             SELECT discord_user_id, password_hash, password_salt
@@ -241,7 +254,7 @@ def authenticate_local_user(email: str, password: str) -> dict[str, Any] | None:
 
 def get_web_user(discord_user_id: int) -> dict[str, Any] | None:
     ensure_web_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             """
             SELECT discord_user_id, username, global_name, avatar,
@@ -272,10 +285,11 @@ def create_session(discord_user_id: int, ttl_days: int = 14) -> str:
     ensure_web_tables()
     session_id = secrets.token_urlsafe(32)
     expires_at = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             "INSERT INTO web_sessions(session_id, discord_user_id, expires_at, created_at) VALUES(?, ?, ?, ?)",
-            (session_id, int(discord_user_id), expires_at, _now()),
+            (session_hash, int(discord_user_id), expires_at, _now()),
         )
         conn.commit()
     return session_id
@@ -285,10 +299,11 @@ def get_session_user(session_id: str) -> dict[str, Any] | None:
     ensure_web_tables()
     if not session_id:
         return None
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             "SELECT discord_user_id, expires_at FROM web_sessions WHERE session_id=?",
-            (session_id,),
+            (session_hash,),
         ).fetchone()
     if not row:
         return None
@@ -302,9 +317,57 @@ def get_session_user(session_id: str) -> dict[str, Any] | None:
 
 def delete_session(session_id: str):
     ensure_web_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
-        conn.execute("DELETE FROM web_sessions WHERE session_id=?", (session_id,))
+    session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest() if session_id else ""
+    with db_connection(SOCIAL_DB) as conn:
+        conn.execute("DELETE FROM web_sessions WHERE session_id=?", (session_hash,))
         conn.commit()
+
+
+def issue_login_code(discord_user_id: int, ttl_minutes: int = 10) -> str:
+    ensure_web_tables()
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    code = "".join(secrets.choice(alphabet) for _ in range(10))
+    code_hash = hashlib.sha256(code.encode("ascii")).hexdigest()
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)).isoformat()
+    with db_connection(SOCIAL_DB) as conn:
+        conn.execute(
+            "DELETE FROM web_login_codes WHERE discord_user_id=? OR expires_at<? OR used_at!=''",
+            (int(discord_user_id), _now()),
+        )
+        conn.execute(
+            "INSERT INTO web_login_codes(code_hash, discord_user_id, expires_at, created_at) VALUES(?, ?, ?, ?)",
+            (code_hash, int(discord_user_id), expires_at, _now()),
+        )
+    return f"{code[:5]}-{code[5:]}"
+
+
+def consume_login_code(code: str) -> dict[str, Any] | None:
+    ensure_web_tables()
+    normalized = "".join(ch for ch in str(code).upper() if ch.isalnum())
+    if len(normalized) != 10:
+        return None
+    code_hash = hashlib.sha256(normalized.encode("ascii")).hexdigest()
+    now = datetime.now(timezone.utc)
+    with db_connection(SOCIAL_DB) as conn:
+        row = conn.execute(
+            "SELECT discord_user_id, expires_at, used_at FROM web_login_codes WHERE code_hash=?",
+            (code_hash,),
+        ).fetchone()
+        if not row or row[2]:
+            return None
+        try:
+            if datetime.fromisoformat(row[1]) < now:
+                return None
+        except (TypeError, ValueError):
+            return None
+        updated = conn.execute(
+            "UPDATE web_login_codes SET used_at=? WHERE code_hash=? AND used_at=''",
+            (now.isoformat(), code_hash),
+        ).rowcount
+        if updated != 1:
+            return None
+        user_id = int(row[0])
+    return get_web_user(user_id)
 
 
 def add_chat_message(
@@ -321,7 +384,7 @@ def add_chat_message(
     clean_attachments = _clean_attachments(attachments or [])
     if not text and not clean_attachments:
         raise ValueError("empty message")
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         cur = conn.execute(
             """
             INSERT INTO web_chat_messages(
@@ -376,7 +439,7 @@ def _clean_attachments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def list_chat_messages(limit: int = 50) -> list[dict[str, Any]]:
     ensure_web_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
             SELECT id, guild_id, channel_id, discord_user_id, author_name,
@@ -441,7 +504,7 @@ def edit_chat_message(message_id: int, discord_user_id: int, content: str, can_a
     text = content.strip()[:1800]
     if not text:
         raise ValueError("empty message")
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             "SELECT discord_user_id, deleted_at FROM web_chat_messages WHERE id=?",
             (int(message_id),),
@@ -460,7 +523,7 @@ def edit_chat_message(message_id: int, discord_user_id: int, content: str, can_a
 
 def delete_chat_message(message_id: int, discord_user_id: int, can_admin: bool = False) -> bool:
     ensure_web_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             "SELECT discord_user_id, deleted_at FROM web_chat_messages WHERE id=?",
             (int(message_id),),
@@ -480,7 +543,7 @@ def delete_chat_message(message_id: int, discord_user_id: int, can_admin: bool =
 def toggle_chat_reaction(message_id: int, discord_user_id: int, emoji: str) -> bool:
     ensure_web_tables()
     clean = emoji.strip()[:24] or "+"
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         exists = conn.execute(
             """
             SELECT 1 FROM web_chat_reactions
@@ -512,7 +575,7 @@ def toggle_chat_reaction(message_id: int, discord_user_id: int, emoji: str) -> b
 
 def claim_pending_outbox(limit: int = 20) -> list[dict[str, Any]]:
     ensure_web_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
             SELECT id, guild_id, channel_id, discord_user_id, author_name, content
@@ -544,7 +607,7 @@ def claim_pending_outbox(limit: int = 20) -> list[dict[str, Any]]:
 
 def mark_outbox_sent(item_id: int):
     ensure_web_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             "UPDATE web_bot_outbox SET status='sent', sent_at=?, error='' WHERE id=?",
             (_now(), int(item_id)),
@@ -554,7 +617,7 @@ def mark_outbox_sent(item_id: int):
 
 def mark_outbox_failed(item_id: int, error: str):
     ensure_web_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             "UPDATE web_bot_outbox SET status='pending', error=? WHERE id=?",
             (error[:300], int(item_id)),

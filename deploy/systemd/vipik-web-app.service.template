@@ -1,0 +1,29 @@
+[Unit]
+Description=ViPik private web application
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=-__APP_DIR__/KGTD.env
+Environment=PYTHONUNBUFFERED=1
+Environment=APP_API_HOST=__APP_HOST__
+Environment=APP_API_PORT=__APP_PORT__
+Environment=APP_BASE_URL=http://__APP_HOST__:__APP_PORT__
+ExecStart=__APP_DIR__/.venv/bin/python run_web_app.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__APP_DIR__/datebase
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,9 +1,18 @@
 # -*- coding: utf-8 -*-
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
+from config import APP_BASE_URL
 
 from core.settings_store import get_feature_policy, is_channel_allowed
-from core.web_app_store import add_chat_message, claim_pending_outbox, mark_outbox_failed, mark_outbox_sent
+from core.web_app_store import (
+    add_chat_message,
+    claim_pending_outbox,
+    issue_login_code,
+    mark_outbox_failed,
+    mark_outbox_sent,
+    upsert_web_user,
+)
 
 
 class WebBridge(commands.Cog):
@@ -38,6 +47,22 @@ class WebBridge(commands.Cog):
     @flush_web_outbox.before_loop
     async def before_flush_web_outbox(self):
         await self.bot.wait_until_ready()
+
+    @app_commands.command(name="приложение", description="Получить одноразовый код входа в ViPik app")
+    async def приложение(self, interaction: discord.Interaction):
+        user = interaction.user
+        upsert_web_user(
+            user.id,
+            username=user.name,
+            global_name=getattr(user, "global_name", None) or user.display_name,
+            avatar=str(user.display_avatar.url) if user.display_avatar else "",
+        )
+        code = issue_login_code(user.id)
+        url = APP_BASE_URL or "http://100.90.24.117:3000"
+        await interaction.response.send_message(
+            f"🔐 Код входа: `{code}`\nОткрой {url} и введи код. Он действует 10 минут и используется один раз.",
+            ephemeral=True,
+        )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

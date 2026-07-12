@@ -9,9 +9,10 @@ import hashlib
 import hmac
 import asyncio
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import aiohttp
 from aiohttp import web
@@ -83,6 +84,7 @@ from core.settings_store import (
 from core.web_app_store import (
     add_chat_message,
     authenticate_local_user,
+    consume_login_code,
     create_session,
     delete_session,
     delete_chat_message,
@@ -103,6 +105,10 @@ try:
 except ValueError:
     MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
+ALLOWED_UPLOAD_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".txt", ".pdf", ".zip"}
+LOGIN_WINDOW_SECONDS = 5 * 60
+LOGIN_ATTEMPT_LIMIT = 10
+
 
 def _json(data, status: int = 200):
     return web.Response(
@@ -118,6 +124,36 @@ def _session_id(request: web.Request) -> str:
 
 def _current_user(request: web.Request):
     return get_session_user(_session_id(request))
+
+
+def _secure_cookie(request: web.Request) -> bool:
+    return request.secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+
+
+def _client_ip(request: web.Request) -> str:
+    return request.remote or "unknown"
+
+
+@web.middleware
+async def security_middleware(request: web.Request, handler):
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and request.path != "/api/bot/chat":
+        origin = request.headers.get("Origin", "")
+        if not origin or urlparse(origin).netloc != request.host:
+            return _json({"error": "bad_origin"}, 403)
+    try:
+        response = await handler(request)
+    except web.HTTPException as exc:
+        response = exc
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = "camera=(), geolocation=(), payment=(), usb=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; "
+        "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+        "connect-src 'self' https: wss:; media-src 'self' blob:; form-action 'self'"
+    )
+    return response
 
 
 def _require_user(request: web.Request):
@@ -201,7 +237,10 @@ async def auth_login(request: web.Request):
             }
         )
     )
-    response.set_cookie("vipik_oauth_state", state, httponly=True, samesite="Lax", max_age=900)
+    response.set_cookie(
+        "vipik_oauth_state", state, httponly=True, samesite="Lax",
+        secure=_secure_cookie(request), max_age=900, path="/",
+    )
     raise response
 
 
@@ -265,7 +304,10 @@ async def auth_callback(request: web.Request):
     ensure_first_owner(discord_user_id)
     session_id = create_session(discord_user_id)
     response = web.HTTPFound("/")
-    response.set_cookie("vipik_session", session_id, httponly=True, samesite="Lax", max_age=14 * 86400)
+    response.set_cookie(
+        "vipik_session", session_id, httponly=True, samesite="Lax",
+        secure=_secure_cookie(request), max_age=14 * 86400, path="/",
+    )
     response.del_cookie("vipik_oauth_state")
     raise response
 
@@ -278,6 +320,12 @@ async def auth_logout(request: web.Request):
 
 
 async def auth_local_login(request: web.Request):
+    now = time.monotonic()
+    attempts = request.app.setdefault("login_attempts", {}).setdefault(_client_ip(request), [])
+    attempts[:] = [stamp for stamp in attempts if now - stamp < LOGIN_WINDOW_SECONDS]
+    if len(attempts) >= LOGIN_ATTEMPT_LIMIT:
+        return _json({"error": "rate_limited"}, 429)
+    attempts.append(now)
     data = await request.json()
     user = authenticate_local_user(str(data.get("email") or ""), str(data.get("password") or ""))
     if not user:
@@ -285,7 +333,33 @@ async def auth_local_login(request: web.Request):
     ensure_first_owner(user["id"])
     session_id = create_session(user["id"])
     response = _json({"ok": True, "user": user})
-    response.set_cookie("vipik_session", session_id, httponly=True, samesite="Lax", max_age=14 * 86400)
+    request.app["login_attempts"].pop(_client_ip(request), None)
+    response.set_cookie(
+        "vipik_session", session_id, httponly=True, samesite="Lax",
+        secure=_secure_cookie(request), max_age=14 * 86400, path="/",
+    )
+    return response
+
+
+async def auth_code_login(request: web.Request):
+    now = time.monotonic()
+    attempts = request.app.setdefault("login_attempts", {}).setdefault(_client_ip(request), [])
+    attempts[:] = [stamp for stamp in attempts if now - stamp < LOGIN_WINDOW_SECONDS]
+    if len(attempts) >= LOGIN_ATTEMPT_LIMIT:
+        return _json({"error": "rate_limited"}, 429)
+    attempts.append(now)
+    data = await request.json()
+    user = consume_login_code(str(data.get("code") or ""))
+    if not user:
+        return _json({"error": "bad_or_expired_code"}, 401)
+    ensure_first_owner(user["id"])
+    session_id = create_session(user["id"])
+    request.app["login_attempts"].pop(_client_ip(request), None)
+    response = _json({"ok": True, "user": user})
+    response.set_cookie(
+        "vipik_session", session_id, httponly=True, samesite="Lax",
+        secure=_secure_cookie(request), max_age=14 * 86400, path="/",
+    )
     return response
 
 
@@ -310,7 +384,7 @@ async def api_login_profile_update(request: web.Request):
     user = _require_user(request)
     data = await request.json()
     password = str(data.get("password") or "")
-    if password and len(password) < 6:
+    if password and len(password) < 10:
         return _json({"error": "password_too_short"}, 400)
     upsert_login_profile(
         user["id"],
@@ -622,7 +696,11 @@ async def api_upload(request: web.Request):
         if part.name != "file" or not part.filename:
             continue
         original_name = _safe_filename(part.filename)
-        suffix = Path(original_name).suffix[:16]
+        suffix = Path(original_name).suffix.lower()[:16]
+        if suffix not in ALLOWED_UPLOAD_SUFFIXES:
+            return _json({"error": "file_type_not_allowed", "allowed": sorted(ALLOWED_UPLOAD_SUFFIXES)}, 415)
+        if len(uploaded) >= 10:
+            return _json({"error": "too_many_files", "limit": 10}, 413)
         stored_name = f"{datetime.now(timezone.utc).strftime('%Y%m%d')}_{secrets.token_hex(12)}{suffix}"
         target = UPLOADS_DIR / stored_name
         size = 0
@@ -637,6 +715,9 @@ async def api_upload(request: web.Request):
                     target.unlink(missing_ok=True)
                     return _json({"error": "file_too_large", "limit": MAX_UPLOAD_BYTES}, 413)
                 handle.write(chunk)
+        if size == 0:
+            target.unlink(missing_ok=True)
+            return _json({"error": "empty_file"}, 400)
         uploaded.append({
             "url": f"/uploads/{stored_name}",
             "name": original_name,
@@ -837,13 +918,17 @@ async def bot_chat_ingest(request: web.Request):
 
 def create_app() -> web.Application:
     ensure_web_tables()
-    app = web.Application(client_max_size=MAX_UPLOAD_BYTES + 1024 * 1024)
+    app = web.Application(
+        client_max_size=MAX_UPLOAD_BYTES + 1024 * 1024,
+        middlewares=[security_middleware],
+    )
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
     app.router.add_get("/auth/discord", auth_login)
     app.router.add_get("/auth/discord/callback", auth_callback)
     app.router.add_get("/auth/logout", auth_logout)
     app.router.add_post("/auth/local", auth_local_login)
+    app.router.add_post("/auth/code", auth_code_login)
     app.router.add_get("/api/me", api_me)
     app.router.add_patch("/api/me/login-profile", api_login_profile_update)
     app.router.add_get("/api/community/me", api_community_me)

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import sqlite3
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, profile_service, settings_migration, settings_store
+from aiohttp import ClientSession, web
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, profile_service, settings_migration, settings_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -18,6 +20,7 @@ from core.summary_service import (
     merge_summary_settings,
     render_summary_template,
 )
+from web_app.server import security_middleware
 
 
 class IsolatedDatabaseTest(unittest.TestCase):
@@ -34,6 +37,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(birthday_store, "BIRTHDAYS_DB", self.db_path),
             patch.object(game_profiles, "SOCIAL_DB", self.db_path),
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
+            patch.object(web_app_store, "SOCIAL_DB", self.db_path),
         ]
         for item in self.patches:
             item.start()
@@ -158,6 +162,54 @@ class UnifiedProfileTests(IsolatedDatabaseTest):
         self.assertTrue(profile["economy"]["profile"]["age_confirmed"])
         self.assertEqual(profile["games"]["steam"]["cached_games"], 1)
         self.assertEqual(profile["games"]["wwm"]["game_nick"], "WindFox")
+
+
+class WebSecurityTests(IsolatedDatabaseTest):
+    def test_oauth_tokens_are_scrubbed_and_sessions_are_hashed(self):
+        web_app_store.ensure_web_tables()
+        web_app_store.upsert_web_user(5, "user", access_token="secret-a", refresh_token="secret-r")
+        session = web_app_store.create_session(5)
+        with db_connection(self.db_path) as conn:
+            token_row = conn.execute("SELECT access_token, refresh_token FROM web_users WHERE discord_user_id=5").fetchone()
+            stored_session = conn.execute("SELECT session_id FROM web_sessions WHERE discord_user_id=5").fetchone()[0]
+        self.assertEqual(token_row, ("", ""))
+        self.assertNotEqual(stored_session, session)
+        self.assertEqual(len(stored_session), 64)
+        self.assertEqual(web_app_store.get_session_user(session)["id"], 5)
+
+    def test_discord_login_code_is_hashed_single_use_and_expires(self):
+        web_app_store.upsert_web_user(6, "discord-user")
+        code = web_app_store.issue_login_code(6)
+        normalized = code.replace("-", "")
+        with db_connection(self.db_path) as conn:
+            stored = conn.execute("SELECT code_hash FROM web_login_codes WHERE discord_user_id=6").fetchone()[0]
+        self.assertNotEqual(stored, normalized)
+        self.assertEqual(len(stored), 64)
+        self.assertEqual(web_app_store.consume_login_code(code)["id"], 6)
+        self.assertIsNone(web_app_store.consume_login_code(code))
+
+    def test_security_middleware_blocks_cross_origin_writes_and_sets_headers(self):
+        async def scenario():
+            app = web.Application(middlewares=[security_middleware])
+            async def write(_request):
+                return web.json_response({"ok": True})
+            app.router.add_post("/write", write)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            base = f"http://127.0.0.1:{port}"
+            async with ClientSession() as session:
+                async with session.post(base + "/write") as response:
+                    self.assertEqual(response.status, 403)
+                async with session.post(base + "/write", headers={"Origin": base}) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+                    self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+            await runner.cleanup()
+
+        asyncio.run(scenario())
 
 
 class PermissionTests(IsolatedDatabaseTest):
