@@ -6,6 +6,7 @@ import secrets
 import time
 from datetime import datetime
 import json
+import sqlite3
 from html import escape
 import ipaddress
 from urllib.parse import urlencode
@@ -47,6 +48,7 @@ from core.settings_store import (
     set_feature_enabled,
     set_feature_payload,
 )
+from core.paths import BIRTHDAYS_DB, SOCIAL_DB
 
 
 DISCORD_API = "https://discord.com/api/v10"
@@ -94,7 +96,7 @@ def _ip_matches_allowed(client_ip: str) -> bool:
 def _assert_ip_allowed(request: web.Request) -> None:
     client_ip = _client_ip(request)
     if not _ip_matches_allowed(client_ip):
-        raise web.HTTPForbidden(text="Your IP is not allowed for this admin panel")
+        raise web.HTTPForbidden(text="Этот IP не разрешен для админ-панели")
 
 
 def _is_authorized(request: web.Request) -> bool:
@@ -130,6 +132,19 @@ def _admin_display_name(session: dict | None) -> str:
         return "Discord admin"
     username = session.get("global_name") or session.get("username") or session.get("discord_user_id") or "Discord admin"
     return str(username)
+
+
+def _admin_avatar_url(session: dict | None) -> str:
+    if not session:
+        return ""
+    user_id = str(session.get("discord_user_id") or "")
+    avatar_hash = str(session.get("avatar") or "")
+    if user_id and avatar_hash:
+        ext = "gif" if avatar_hash.startswith("a_") else "png"
+        return f"https://cdn.discordapp.com/avatars/{user_id}/{avatar_hash}.{ext}?size=96"
+    username = str(session.get("username") or "")
+    fallback = sum(ord(ch) for ch in username) % 5 if username else 0
+    return f"https://cdn.discordapp.com/embed/avatars/{fallback}.png"
 
 
 def _active_guild(bot) -> discord.Guild | None:
@@ -174,6 +189,7 @@ def _create_admin_session_response(request: web.Request, user_data: dict, member
         "discord_user_id": int(user_data["id"]),
         "username": user_data.get("username", ""),
         "global_name": user_data.get("global_name") or "",
+        "avatar": user_data.get("avatar") or "",
         "guild_id": int(member.guild.id),
         "expires_at": time.time() + ADMIN_SESSION_TTL_SECONDS,
         "created_at": datetime.utcnow().isoformat(timespec="seconds"),
@@ -237,34 +253,6 @@ async def _delayed_process_restart(delay_seconds: float = 1.5):
     os._exit(0)
 
 
-ADMIN_AREAS = (
-    (
-        "Настройки сервера",
-        "Каналы, автопосты, WWM, Steam releases, voice roles, болтовня и токсичность.",
-        "Move from Discord admin commands",
-    ),
-    (
-        "Экономика и роли",
-        "Налоги, магазин ролей, награды активности, Размер-роли и временные роли.",
-        "Move from Discord admin commands",
-    ),
-    (
-        "Модели и пародии",
-        "Markov, Persona, GPT, фильтры, список пользователей, статус моделей.",
-        "Admin/owner only",
-    ),
-    (
-        "Maintenance",
-        "Сбор сообщений, сброс чекпоинтов, индексация, профилактика и ручные проверки.",
-        "Requires confirmation",
-    ),
-    (
-        "Fallback platform",
-        "Пользователи, комнаты, чат, voice rooms, screen share и модерация сайта/app.",
-        "User app integration",
-    ),
-)
-
 FEATURE_REGISTRY = (
     {
         "id": "daily_summary",
@@ -272,7 +260,7 @@ FEATURE_REGISTRY = (
         "group": "Настройки сервера",
         "description": "Автопостинг итогов дня, недели и месяца.",
         "channel_modes": ("output",),
-        "payload_hint": '{"schedule": "23:59 MSK"}',
+        "settings_help": "Канал, куда бот отправляет итоги. Расписание пока хранится в коде планировщика.",
     },
     {
         "id": "birthday",
@@ -280,7 +268,7 @@ FEATURE_REGISTRY = (
         "group": "Настройки сервера",
         "description": "Поздравления, канал поздравлений и пользовательские даты.",
         "channel_modes": ("output",),
-        "payload_hint": '{"timezone": "Europe/Moscow"}',
+        "settings_help": "Канал поздравлений и общий список дат рождения ниже на этой странице.",
     },
     {
         "id": "wwm_guild",
@@ -288,15 +276,15 @@ FEATURE_REGISTRY = (
         "group": "Настройки сервера",
         "description": "Ники WWM, карточки, приветствие и приемная.",
         "channel_modes": ("output", "allow", "exclude"),
-        "payload_hint": '{"reception_channel_id": 123, "auto_nickname": true, "nickname_template": "{game_nick}"}',
+        "settings_help": "Канал приветствия, приемная и ограничения по каналам для WWM-сценариев.",
     },
     {
         "id": "steam",
-        "title": "Steam",
+        "title": "Steam-релизы",
         "group": "Настройки сервера",
         "description": "Steam-профили, вишлисты, релизы и уведомления.",
         "channel_modes": ("output",),
-        "payload_hint": '{"discount_min_pct": 50}',
+        "settings_help": "Канал уведомлений и минимальная скидка для подборок.",
     },
     {
         "id": "toxicity",
@@ -304,7 +292,7 @@ FEATURE_REGISTRY = (
         "group": "Модерация",
         "description": "Детектор токсичности, пороги и исключения каналов.",
         "channel_modes": ("allow", "exclude"),
-        "payload_hint": '{"threshold": 2}',
+        "settings_help": "Где проверять сообщения и где проверку отключить. Порог можно поправить в дополнительных настройках.",
     },
     {
         "id": "social_chat",
@@ -312,15 +300,15 @@ FEATURE_REGISTRY = (
         "group": "Модерация",
         "description": "Случайные ответы бота, шанс ответа и режимы.",
         "channel_modes": ("allow", "exclude"),
-        "payload_hint": '{"chance_percent": 12, "mention_only": false}',
+        "settings_help": "Каналы, где бот может отвечать сам, и каналы-исключения.",
     },
     {
         "id": "voice_roles",
-        "title": "Voice roles",
+        "title": "Голосовые роли",
         "group": "Экономика и роли",
         "description": "Авто-роли по голосовым каналам и исключения.",
         "channel_modes": ("allow", "exclude"),
-        "payload_hint": '{"enabled_roles": []}',
+        "settings_help": "Ограничения для автоматических ролей, связанных с голосовыми каналами.",
     },
     {
         "id": "economy",
@@ -328,7 +316,7 @@ FEATURE_REGISTRY = (
         "group": "Экономика и роли",
         "description": "Налоги, магазин, награды и персональная валюта.",
         "channel_modes": (),
-        "payload_hint": '{"tax_enabled": false, "tax_rate_pct": 10, "tax_interval_h": 168}',
+        "settings_help": "Налоги, магазин ролей, награды активности и персональная валюта.",
     },
     {
         "id": "parody_training",
@@ -336,43 +324,148 @@ FEATURE_REGISTRY = (
         "group": "Модели и пародии",
         "description": "Markov, Persona, GPT, фильтры и безопасное обучение.",
         "channel_modes": ("allow", "exclude"),
-        "payload_hint": '{"allow_gpt_training": false}',
         "restart_on_change": True,
+        "settings_help": "Каналы для сбора/использования пародийных ответов и безопасные флаги моделей.",
     },
     {
         "id": "maintenance",
-        "title": "Maintenance",
-        "group": "Maintenance",
+        "title": "Обслуживание",
+        "group": "Обслуживание",
         "description": "Сбор сообщений, индексация, профилактика и ручные проверки.",
         "channel_modes": (),
-        "payload_hint": '{"requires_confirmation": true}',
         "restart_on_change": True,
+        "settings_help": "Тяжелые сервисные действия. Опасные операции оставлены за подтверждением и перезапуском.",
     },
     {
         "id": "fallback_platform",
-        "title": "Fallback platform",
-        "group": "Fallback platform",
-        "description": "Сайт/app, чат, комнаты, voice rooms и screen share.",
+        "title": "Сайт и запасной чат",
+        "group": "Сайт и app",
+        "description": "Сайт/app, чат, комнаты, голосовые комнаты и демонстрации экрана.",
         "channel_modes": (),
-        "payload_hint": '{"fallback_mode": false}',
         "restart_on_change": True,
+        "settings_help": "Настройки запасной площадки, когда Discord недоступен или нужен веб-чат.",
     },
 )
 
 FEATURES_BY_ID = {item["id"]: item for item in FEATURE_REGISTRY}
 
+SUMMARY_TEXT_FIELDS = (
+    (
+        "daily_title_template",
+        "Заголовок итога дня",
+        "🌙 Итог дня — {date}",
+        "Можно вставить: {date} - дата итога, {guild} - сервер, {haiku} - автоматическое хокку.",
+    ),
+    (
+        "daily_description_template",
+        "Текст под заголовком дня",
+        "*{haiku}*",
+        "Можно вставить: {haiku} - автоматическое хокку, {date} - дата, {guild} - сервер.",
+    ),
+    (
+        "daily_footer_template",
+        "Подпись итога дня",
+        "Увидимся завтра 👋",
+        "Можно вставить: {date} - дата, {guild} - сервер, {haiku} - хокку.",
+    ),
+    (
+        "weekly_title_template",
+        "Заголовок недели",
+        "🏆 Итоги недели — {start}–{end}",
+        "Можно вставить: {start} - начало периода, {end} - конец периода, {guild} - сервер, {period} - тип периода.",
+    ),
+    (
+        "monthly_title_template",
+        "Заголовок месяца",
+        "📅 Итоги месяца — {start}–{end}",
+        "Можно вставить: {start} - начало периода, {end} - конец периода, {guild} - сервер, {period} - тип периода.",
+    ),
+    (
+        "period_footer_template",
+        "Подпись недели и месяца",
+        "Итоги за {period}. Канал и автопостинг настраиваются в админ-панели.",
+        "Можно вставить: {period} - неделя или месяц, {start} - начало, {end} - конец, {guild} - сервер.",
+    ),
+    (
+        "weekly_champion_message_template",
+        "Сообщение с упоминанием чемпионов недели",
+        "🏆 Поздравляем чемпионов недели: {mentions}",
+        "Можно вставить: {mentions} - упоминания чемпионов, {guild} - сервер, {period} - период.",
+    ),
+    (
+        "game_spotlight_title_template",
+        "Заголовок выбранной игры",
+        "{label}: {game}",
+        "Можно вставить: {label} - твоё название, {game} - выбранная игра, {period}, {start}, {end}, {guild}.",
+    ),
+    (
+        "game_spotlight_empty_template",
+        "Если никто не играл в выбранную игру",
+        "За этот период никто не отметился в {game}.",
+        "Можно вставить: {game} - выбранная игра, {label} - твоё название, {period}, {start}, {end}, {guild}.",
+    ),
+)
 
-def _render_admin_area_registry() -> str:
-    items = []
-    for title, description, status in ADMIN_AREAS:
-        items.append(
-            "<div class=\"area\">"
-            f"<div class=\"area-title\">{escape(title)}</div>"
-            f"<div class=\"area-desc\">{escape(description)}</div>"
-            f"<div class=\"area-status\">{escape(status)}</div>"
-            "</div>"
-        )
-    return "\n".join(items)
+SUMMARY_DAILY_BLOCKS = (
+    ("daily_block_stats", "За день", "Общая сумма сообщений, войса и времени в играх."),
+    ("daily_block_tracked", "Что трекалось", "Пояснение, какие данные бот учитывал."),
+    ("daily_block_voice_games", "Играли", "Голосовые игровые каналы, где была активность."),
+    ("daily_block_top_chatters", "Самые активные", "Топ участников по сообщениям."),
+    ("daily_block_top_voice", "Топ войса", "Топ участников по времени в голосе."),
+    ("daily_block_top_words", "Слова дня", "Топ слов за день."),
+    ("daily_block_top_emojis", "Эмодзи дня", "Топ эмодзи за день."),
+    ("daily_block_top_games", "Игры дня", "Топ игр по времени."),
+    ("daily_block_user_games", "Кто во что играл", "Участники и игры, в которых они отметились."),
+    ("daily_block_game_users", "Топ игроков дня", "Топ участников по игровому времени."),
+    ("daily_block_game_winner", "Игровой победитель дня", "Первое место среди игроков дня."),
+    ("daily_block_winners", "Победители дня", "Сводка победителей по чату, войсу и играм."),
+    ("daily_block_misc", "Прочее", "Токсичность и дополнительные события дня."),
+)
+
+SUMMARY_PERIOD_BLOCKS = (
+    ("period_block_main_people", "Главные люди", "Топ участников по сообщениям за неделю или месяц."),
+    ("period_block_voice", "Войс", "Топ участников по времени в голосе."),
+    ("period_block_rep", "Размер", "Топ по репутации/Размеру."),
+    ("period_block_words", "О чём шумели", "Слова и эмодзи периода."),
+    ("period_block_game_overview", "Игровой блок", "Heroes, топ игр и топ игроков."),
+    ("period_block_game_spotlight", "Выбранная игра", "Отдельный блок по игре из списка, например Where Winds Meet."),
+    ("period_block_user_games", "Кто во что играл", "Участники и игры периода."),
+    ("period_block_other_activities", "Другие активности", "Стримы, слушает, смотрит и другие Discord-активности."),
+    ("period_block_balance", "Баланс", "Топ по валюте."),
+    ("period_block_streaks", "Серии", "Топ серий активности."),
+    ("period_block_toxic", "Токсичность", "Топ токсичности и цитата."),
+    ("period_block_champion_congrats", "Поздравления чемпионам", "Текстовый блок поздравлений победителей."),
+)
+
+SUMMARY_THEME_OPTIONS = (
+    ("neon", "Неон", "Контрастный игровой стиль: фиолетовый, синий, яркие акценты."),
+    ("royal", "Премиум", "Золотой акцент для недельных и месячных итогов."),
+    ("forest", "Спокойный", "Зеленый и бирюзовый, меньше визуального шума."),
+    ("fire", "Жаркий", "Красный/оранжевый акцент для соревновательных итогов."),
+)
+
+SUMMARY_FILTER_OPTIONS = (
+    ("all", "Показывать все игры"),
+    ("spotlight", "Все игры + отдельный блок выбранной игры"),
+    ("only_selected", "Только выбранная игра в игровых блоках"),
+)
+
+SUMMARY_RENDER_OPTIONS = (
+    ("embed", "Embed + кнопки"),
+    ("components_v2", "Components v2 beta"),
+)
+
+SUMMARY_TEMPLATE_HELP = (
+    ("{date}", "Дата итога дня"),
+    ("{haiku}", "Автоматическое хокку дня"),
+    ("{guild}", "Название сервера"),
+    ("{start}", "Начало периода недели или месяца"),
+    ("{end}", "Конец периода недели или месяца"),
+    ("{period}", "Тип периода: неделю или месяц"),
+    ("{mentions}", "Упоминания чемпионов недели"),
+    ("{label}", "Твоё название группы, например “Задроты недели”"),
+    ("{game}", "Выбранная игра из активности сервера"),
+)
 
 
 def _admin_guild_id(bot) -> int:
@@ -380,49 +473,335 @@ def _admin_guild_id(bot) -> int:
     return int(guilds[0].id) if guilds else 0
 
 
-def _channel_list(values: tuple[int, ...] | list[int]) -> str:
-    return ", ".join(str(item) for item in values) if values else "-"
+def _channel_label(bot, channel_id: int | None) -> str:
+    if not channel_id:
+        return "Не выбран"
+    guild = _active_guild(bot)
+    channel = guild.get_channel(int(channel_id)) if guild else None
+    name = getattr(channel, "name", None)
+    if name:
+        return f"#{name}"
+    return f"ID {channel_id}"
 
 
-def _render_mode_form(feature_id: str, mode: str, current: str) -> str:
+def _channel_badges(bot, values: tuple[int, ...] | list[int]) -> str:
+    if not values:
+        return '<span class="empty-pill">Не задано</span>'
+    return "".join(
+        f'<span class="channel-pill">{escape(_channel_label(bot, int(channel_id)))}'
+        f'<small>{int(channel_id)}</small></span>'
+        for channel_id in values
+    )
+
+
+def _channel_options(bot) -> str:
+    guild = _active_guild(bot)
+    if not guild:
+        return ""
+    options = []
+    text_channels = sorted(getattr(guild, "text_channels", []) or [], key=lambda ch: (ch.category.name if ch.category else "", ch.position))
+    for channel in text_channels:
+        category = f"{channel.category.name} / " if channel.category else ""
+        label = f"#{category}{channel.name}"
+        options.append(f'<option value="{int(channel.id)}">{escape(label)}</option>')
+    return "\n".join(options)
+
+
+def _member_options(bot) -> tuple[str, int]:
+    guild = _active_guild(bot)
+    if not guild:
+        return "", 0
+    members = [
+        member
+        for member in (getattr(guild, "members", []) or [])
+        if not getattr(member, "bot", False)
+    ]
+    members.sort(key=lambda member: (str(getattr(member, "display_name", "") or "").lower(), int(member.id)))
+    options = []
+    for member in members:
+        name = getattr(member, "display_name", None) or getattr(member, "name", None) or str(member.id)
+        username = getattr(member, "name", "")
+        suffix = f" @{username}" if username and username != name else ""
+        options.append(f'<option value="{int(member.id)}">{escape(name + suffix)}</option>')
+    return "\n".join(options), len(members)
+
+
+def _render_mode_form(bot, feature_id: str, mode: str, current_ids: tuple[int, ...] | list[int]) -> str:
     labels = {
-        "output": "Output channel",
-        "allow": "Allow channel",
-        "exclude": "Exclude channel",
+        "output": "Канал публикаций",
+        "allow": "Разрешить в канале",
+        "exclude": "Запретить в канале",
     }
+    helper = {
+        "output": "Куда бот пишет сам.",
+        "allow": "Если список заполнен, функция работает только там.",
+        "exclude": "Там функция всегда выключена.",
+    }
+    options = _channel_options(bot)
+    selector = (
+        f"""
+          <select name="channel_id" required>
+            <option value="">{escape(labels.get(mode, mode))}</option>
+            {options}
+          </select>
+        """
+        if options
+        else f'<input name="channel_id" inputmode="numeric" placeholder="{escape(labels.get(mode, mode))}">'
+    )
     return f"""
-        <form method="post" action="/features/{escape(feature_id)}/channel" class="inline-form">
-          <input type="hidden" name="mode" value="{escape(mode)}">
-          <input name="channel_id" inputmode="numeric" placeholder="{escape(labels.get(mode, mode))}">
-          <input name="reason" placeholder="Комментарий">
-          <button type="submit">Добавить</button>
-          <button type="submit" formaction="/features/{escape(feature_id)}/channel/delete" class="button-secondary">Удалить</button>
-          <span class="muted">{escape(current)}</span>
-        </form>
+        <div class="setting-row">
+          <div>
+            <b>{escape(labels.get(mode, mode))}</b>
+            <span class="setting-help">{escape(helper.get(mode, ""))}</span>
+            <div class="channel-pills">{_channel_badges(bot, current_ids)}</div>
+          </div>
+          <form method="post" action="/features/{escape(feature_id)}/channel" class="channel-form">
+            <input type="hidden" name="mode" value="{escape(mode)}">
+            {selector}
+            <input name="reason" placeholder="Комментарий">
+            <button type="submit">Добавить</button>
+            <button type="submit" formaction="/features/{escape(feature_id)}/channel/delete" class="button-secondary">Убрать</button>
+          </form>
+        </div>
     """
 
 
-def _render_feature_registry(guild_id: int = 0) -> str:
+def _render_template_help() -> str:
+    rows = "".join(
+        f"<tr><td><code>{escape(token)}</code></td><td>{escape(description)}</td></tr>"
+        for token, description in SUMMARY_TEMPLATE_HELP
+    )
+    return f"""
+      <details class="template-help">
+        <summary>Что можно вставлять в текст</summary>
+        <table class="mini-table">
+          <tbody>{rows}</tbody>
+        </table>
+      </details>
+    """
+
+
+def _block_enabled(payload: dict, key: str) -> bool:
+    value = payload.get(key)
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "да", "вкл"}
+
+
+def _render_summary_block_controls(payload: dict) -> str:
+    def render_group(title: str, blocks: tuple[tuple[str, str, str], ...]) -> str:
+        items = []
+        for key, label, description in blocks:
+            title_key = f"{key}_title"
+            limit_key = f"{key}_limit"
+            custom_title = str(payload.get(title_key) or label)
+            custom_limit = str(payload.get(limit_key) or "")
+            limit_input = (
+                f"""
+                  <label class="block-mini-field">
+                    <span>Лимит топа</span>
+                    <input name="{escape(limit_key)}" value="{escape(custom_limit)}" inputmode="numeric" placeholder="По умолчанию">
+                  </label>
+                """
+                if "top" in key or "users" in key or "people" in key or "voice" in key or "games" in key
+                else ""
+            )
+            items.append(
+                f"""
+                <div class="block-toggle">
+                  <label class="check-setting compact">
+                    <input type="checkbox" name="{escape(key)}" value="1" {'checked' if _block_enabled(payload, key) else ''}>
+                    <span>
+                      <b>{escape(label)}</b>
+                      <small>{escape(description)}</small>
+                    </span>
+                  </label>
+                  <label class="block-mini-field">
+                    <span>Название в Discord</span>
+                    <input name="{escape(title_key)}" value="{escape(custom_title)}" placeholder="{escape(label)}">
+                  </label>
+                  {limit_input}
+                </div>
+                """
+            )
+        return f"""
+          <div class="block-group">
+            <h3>{escape(title)}</h3>
+            <div class="block-grid">{''.join(items)}</div>
+          </div>
+        """
+
+    return f"""
+      <details class="block-settings" open>
+        <summary>Состав сообщения</summary>
+        <p class="setting-help">Выключи блоки, которые не должны попадать в итог. Данные всё равно собираются, меняется только то, что бот показывает в сообщении.</p>
+        {render_group("Итог дня", SUMMARY_DAILY_BLOCKS)}
+        {render_group("Итог недели и месяца", SUMMARY_PERIOD_BLOCKS)}
+      </details>
+    """
+
+
+def _render_summary_style_controls(payload: dict) -> str:
+    theme = str(payload.get("summary_theme") or "neon")
+    filter_mode = str(payload.get("game_filter_mode") or "all")
+    render_mode = str(payload.get("summary_render_mode") or "embed")
+    theme_options = "".join(
+        f'<option value="{escape(value)}" {"selected" if value == theme else ""}>{escape(label)} — {escape(description)}</option>'
+        for value, label, description in SUMMARY_THEME_OPTIONS
+    )
+    filter_options = "".join(
+        f'<option value="{escape(value)}" {"selected" if value == filter_mode else ""}>{escape(label)}</option>'
+        for value, label in SUMMARY_FILTER_OPTIONS
+    )
+    render_options = "".join(
+        f'<option value="{escape(value)}" {"selected" if value == render_mode else ""}>{escape(label)}</option>'
+        for value, label in SUMMARY_RENDER_OPTIONS
+    )
+    buttons_enabled = str(payload.get("summary_buttons_enabled") if "summary_buttons_enabled" in payload else "1").strip().lower() not in {"0", "false", "no", "off", "нет", "выкл"}
+    compact_enabled = str(payload.get("summary_compact_mode") or "").strip().lower() in {"1", "true", "yes", "on", "да", "вкл"}
+    return f"""
+      <details class="style-settings" open>
+        <summary>Оформление и поведение</summary>
+        <div class="style-grid">
+          <label class="text-setting">
+            <span>Тема итогов</span>
+            <select name="summary_theme">{theme_options}</select>
+            <small>Меняет основной цвет embed и общий вайб сообщения.</small>
+          </label>
+          <label class="text-setting">
+            <span>Формат Discord</span>
+            <select name="summary_render_mode">{render_options}</select>
+            <small>Components v2 дает контейнеры нового Discord UI. Если Discord не примет формат, бот откатится на embed.</small>
+          </label>
+          <label class="text-setting">
+            <span>Свой цвет</span>
+            <input name="summary_accent_color" value="{escape(str(payload.get("summary_accent_color") or ""))}" placeholder="#8b5cf6">
+            <small>Если заполнено, перекроет цвет темы. Формат: #RRGGBB.</small>
+          </label>
+          <label class="text-setting">
+            <span>Картинка/обложка</span>
+            <input name="summary_thumbnail_url" value="{escape(str(payload.get("summary_thumbnail_url") or ""))}" placeholder="https://...">
+            <small>URL картинки для правого верхнего угла embed.</small>
+          </label>
+          <label class="text-setting">
+            <span>Режим игровых блоков</span>
+            <select name="game_filter_mode">{filter_options}</select>
+            <small>Можно оставить все игры или показывать только выбранную игру.</small>
+          </label>
+          <label class="text-setting">
+            <span>Лимит дневных топов</span>
+            <input name="daily_top_limit" value="{escape(str(payload.get("daily_top_limit") or "3"))}" inputmode="numeric">
+            <small>Сколько людей показывать в дневных коротких топах.</small>
+          </label>
+          <label class="text-setting">
+            <span>Лимит больших списков</span>
+            <input name="period_top_limit" value="{escape(str(payload.get("period_top_limit") or "5"))}" inputmode="numeric">
+            <small>Сколько строк показывать в недельных/месячных топах.</small>
+          </label>
+        </div>
+        <label class="check-setting">
+          <input type="checkbox" name="summary_buttons_enabled" value="1" {'checked' if buttons_enabled else ''}>
+          <span>Добавлять интерактивные кнопки под итогом</span>
+        </label>
+        <label class="check-setting">
+          <input type="checkbox" name="summary_compact_mode" value="1" {'checked' if compact_enabled else ''}>
+          <span>Компактный режим: меньше второстепенных строк</span>
+        </label>
+      </details>
+    """
+
+
+def _render_daily_summary_text_form(payload: dict) -> str:
+    fields = []
+    for key, label, default, hint in SUMMARY_TEXT_FIELDS:
+        value = str(payload.get(key) or default)
+        rows = 3 if "description" in key or "message" in key else 2
+        fields.append(
+            f"""
+            <label class="text-setting">
+              <span>{escape(label)}</span>
+              <textarea name="{escape(key)}" rows="{rows}">{escape(value)}</textarea>
+              <small>{escape(hint)}</small>
+            </label>
+            """
+        )
+    selected_game = str(payload.get("game_spotlight_game") or "")
+    game_options, game_count = _recent_game_options(selected_game)
+    spotlight_enabled = str(payload.get("game_spotlight_enabled") or "").strip().lower() in {"1", "true", "yes", "on", "да", "вкл"}
+    game_selector = (
+        f"""
+          <select name="game_spotlight_game">
+            <option value="">Не добавлять отдельный игровой блок</option>
+            {game_options}
+          </select>
+        """
+        if game_options
+        else '<input name="game_spotlight_game" placeholder="Название игры, если список пока пуст">'
+    )
+    game_hint = (
+        f"Игры подтянуты из активности сервера: {game_count}."
+        if game_options
+        else "Список игр пока пуст: можно ввести название вручную, а позже выбрать из накопленной активности."
+    )
+    return f"""
+      <details class="friendly-settings" open>
+        <summary>Текст итогов</summary>
+        <form method="post" action="/features/daily_summary/text" class="text-settings-form">
+          <div class="spotlight-settings">
+            <label class="check-setting">
+              <input type="checkbox" name="game_spotlight_enabled" value="1" {'checked' if spotlight_enabled else ''}>
+              <span>Добавить отдельный блок по выбранной игре</span>
+            </label>
+            <label class="text-setting">
+              <span>Как назвать участников</span>
+              <input name="game_spotlight_label" value="{escape(str(payload.get("game_spotlight_label") or "Задроты"))}" placeholder="Например: Задроты недели">
+              <small>Это слово попадёт в заголовок блока. Например: “Задроты недели: Where Winds Meet”.</small>
+            </label>
+            <label class="text-setting">
+              <span>Игра из активности сервера</span>
+              {game_selector}
+              <small>{escape(game_hint)}</small>
+            </label>
+          </div>
+          {_render_summary_style_controls(payload)}
+          {_render_summary_block_controls(payload)}
+          {_render_template_help()}
+          {''.join(fields)}
+          <button type="submit">Сохранить текст итогов</button>
+        </form>
+      </details>
+    """
+
+
+def _render_feature_registry(bot, guild_id: int = 0) -> str:
     cards = []
     for feature in FEATURE_REGISTRY:
         feature_id = feature["id"]
         policy = get_feature_policy(guild_id, feature_id)
-        output = str(policy.output_channel_id) if policy.output_channel_id else "-"
-        allow = _channel_list(policy.allowed_channel_ids)
-        exclude = _channel_list(policy.excluded_channel_ids)
+        output_ids = (policy.output_channel_id,) if policy.output_channel_id else ()
         modes = []
         for mode in feature["channel_modes"]:
-            current = {"output": output, "allow": allow, "exclude": exclude}.get(mode, "-")
-            modes.append(_render_mode_form(feature_id, mode, current))
-        payload = escape(json.dumps(policy.extra or {}, ensure_ascii=False, indent=2))
+            current = {
+                "output": output_ids,
+                "allow": policy.allowed_channel_ids,
+                "exclude": policy.excluded_channel_ids,
+            }.get(mode, ())
+            modes.append(_render_mode_form(bot, feature_id, mode, current))
         restart_badge = (
-            '<span class="area-status restart-badge">нужен рестарт</span>'
+            '<span class="meta-pill warn">применится после перезапуска</span>'
             if _feature_requires_restart(feature)
+            else ""
+        )
+        friendly_settings = (
+            _render_daily_summary_text_form(policy.extra or {})
+            if feature_id == "daily_summary"
             else ""
         )
         cards.append(
             f"""
-            <div class="feature-card">
+            <article class="feature-card" id="feature-{escape(feature_id)}">
               <div class="feature-head">
                 <div>
                   <div class="area-title">{escape(feature["title"])}</div>
@@ -434,30 +813,36 @@ def _render_feature_registry(guild_id: int = 0) -> str:
                 </form>
               </div>
               <div class="feature-meta">
-                <span>{_status_chip(policy.enabled, "Enabled", "Disabled")}</span>
-                <span class="area-status">{escape(feature["group"])}</span>
+                <span>{_status_chip(policy.enabled, "Включено", "Выключено")}</span>
+                <span class="meta-pill">{escape(feature["group"])}</span>
                 {restart_badge}
               </div>
-              <div class="channel-grid">
-                <div><b>Output</b><br><code>{escape(output)}</code></div>
-                <div><b>Allow</b><br><code>{escape(allow)}</code></div>
-                <div><b>Exclude</b><br><code>{escape(exclude)}</code></div>
-              </div>
-              {''.join(modes) if modes else '<p class="muted">У этой зоны пока нет channel policy.</p>'}
-              <details>
-                <summary>Payload</summary>
-                <form method="post" action="/features/{escape(feature_id)}/payload" class="payload-form">
-                  <textarea name="payload" placeholder="{escape(feature["payload_hint"])}">{payload}</textarea>
-                  <button type="submit">Сохранить JSON</button>
-                </form>
-              </details>
-            </div>
+              <p class="setting-help">{escape(feature.get("settings_help") or "")}</p>
+              {''.join(modes) if modes else '<p class="muted">У этой функции пока нет отдельных настроек в панели.</p>'}
+              {friendly_settings}
+            </article>
             """
         )
     return "\n".join(cards)
 
 
 def _render_birthdays_panel(bot) -> str:
+    member_options, member_count = _member_options(bot)
+    user_selector = (
+        f"""
+        <select name="user_id" required>
+          <option value="">Выбери участника сервера</option>
+          {member_options}
+        </select>
+        """
+        if member_options
+        else '<input name="user_id" inputmode="numeric" placeholder="ID участника в Discord">'
+    )
+    member_hint = (
+        f"Список участников подтянут с сервера: {member_count}."
+        if member_options
+        else "Список участников сейчас недоступен, поэтому можно ввести Discord ID вручную."
+    )
     rows = list_birthdays()
     if rows:
         items = []
@@ -470,9 +855,9 @@ def _render_birthdays_panel(bot) -> str:
             updated_by = int(row.get("updated_by") or user_id)
             items.append(
                 "<tr>"
-                f"<td>{escape(name)}<br><code>{user_id}</code></td>"
+                f"<td>{escape(name)}<br><span class=\"tech-id\">Discord ID: {user_id}</span></td>"
                 f"<td><b>{escape(str(row['birthday']))}</b></td>"
-                f"<td>{escape(source)}<br><code>{updated_by}</code></td>"
+                f"<td>{escape(source)}<br><span class=\"tech-id\">Обновил: {updated_by}</span></td>"
                 f"<td>"
                 f"<form method=\"post\" action=\"/user-data/birthdays/delete\" onsubmit=\"return confirm('Удалить ДР пользователя?');\">"
                 f"<input type=\"hidden\" name=\"user_id\" value=\"{user_id}\">"
@@ -486,11 +871,11 @@ def _render_birthdays_panel(bot) -> str:
         rows_html = "<tr><td colspan=\"4\" class=\"muted\">Дни рождения пока не заполнены.</td></tr>"
 
     return f"""
-    <div class="card">
+    <section class="card" id="birthdays">
       <h2>Пользовательские ДР</h2>
-      <p class="help">Админка и Discord-команда <code>/др</code> пишут в одну базу. Админ может заполнить дату за участника, но сам участник всегда может исправить свою дату через бота.</p>
+      <p class="help">Админка и команда <code>/др</code> пишут в одну базу. Админ может заполнить дату за участника, но сам участник всегда может исправить её через бота. {escape(member_hint)}</p>
       <form method="post" action="/user-data/birthdays" class="inline-form">
-        <input name="user_id" inputmode="numeric" placeholder="Discord user id">
+        {user_selector}
         <input name="birthday" placeholder="ДД.ММ">
         <input name="reason" placeholder="Комментарий">
         <button type="submit">Сохранить ДР</button>
@@ -499,9 +884,121 @@ def _render_birthdays_panel(bot) -> str:
         <thead><tr><th>Участник</th><th>Дата</th><th>Источник</th><th></th></tr></thead>
         <tbody>{rows_html}</tbody>
       </table>
-    </div>
+    </section>
     """
 
+
+def _safe_count(db_path: str, table: str) -> int | None:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error:
+        return None
+
+
+def _table_exists(db_path: str, table: str) -> bool:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+        return bool(row)
+    except sqlite3.Error:
+        return False
+
+
+def _recent_game_options(selected: str = "") -> tuple[str, int]:
+    if not _table_exists(SOCIAL_DB, "activity_sessions"):
+        return "", 0
+    try:
+        with sqlite3.connect(SOCIAL_DB) as conn:
+            rows = conn.execute(
+                """
+                SELECT activity_name, COALESCE(SUM(seconds), 0) AS total_seconds
+                FROM activity_sessions
+                WHERE activity_type='game' AND COALESCE(activity_name, '') <> ''
+                GROUP BY activity_name
+                HAVING total_seconds > 0
+                ORDER BY total_seconds DESC, activity_name COLLATE NOCASE
+                LIMIT 80
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return "", 0
+    options = []
+    selected_clean = selected.strip().casefold()
+    selected_seen = False
+    for name, seconds in rows:
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            continue
+        is_selected = clean_name.casefold() == selected_clean
+        selected_seen = selected_seen or is_selected
+        selected_attr = " selected" if is_selected else ""
+        hours = int(seconds or 0) // 3600
+        label = f"{clean_name} ({hours} ч)" if hours else clean_name
+        options.append(f'<option value="{escape(clean_name)}"{selected_attr}>{escape(label)}</option>')
+    if selected and not selected_seen:
+        options.insert(0, f'<option value="{escape(selected)}" selected>{escape(selected)} (сохранено)</option>')
+    return "\n".join(options), len(rows)
+
+
+def _render_database_panel(bot, guild_id: int) -> str:
+    settings_count = _safe_count(SOCIAL_DB, "feature_settings")
+    channels_count = _safe_count(SOCIAL_DB, "feature_channels")
+    birthdays_count = _safe_count(BIRTHDAYS_DB, "birthdays")
+    db_cards = (
+        ("Настройки функций", "feature_settings", settings_count, "Включение функций и дополнительные параметры."),
+        ("Каналы функций", "feature_channels", channels_count, "Куда бот пишет, где работает и где выключен."),
+        ("Дни рождения", "birthdays", birthdays_count, "Даты участников для поздравлений."),
+    )
+    cards = "".join(
+        f"""
+        <div class="db-card">
+          <div class="area-title">{escape(title)}</div>
+          <div class="area-desc">{escape(desc)}</div>
+          <div class="db-count">{'нет данных' if count is None else count}</div>
+          <span class="tech-id">{escape(table)}</span>
+        </div>
+        """
+        for title, table, count, desc in db_cards
+    )
+
+    rows = []
+    for feature in FEATURE_REGISTRY:
+        policy = get_feature_policy(guild_id, feature["id"])
+        channel_bits = []
+        if policy.output_channel_id:
+            channel_bits.append(f"публикации: {_channel_label(bot, policy.output_channel_id)}")
+        if policy.allowed_channel_ids:
+            channel_bits.append("разрешено: " + ", ".join(_channel_label(bot, item) for item in policy.allowed_channel_ids))
+        if policy.excluded_channel_ids:
+            channel_bits.append("запрещено: " + ", ".join(_channel_label(bot, item) for item in policy.excluded_channel_ids))
+        rows.append(
+            "<tr>"
+            f"<td><a href=\"#feature-{escape(feature['id'])}\">{escape(feature['title'])}</a><br><span class=\"tech-id\">{escape(feature['id'])}</span></td>"
+            f"<td>{'Включено' if policy.enabled else 'Выключено'}</td>"
+            f"<td>{escape('; '.join(channel_bits) if channel_bits else 'Каналы не заданы')}</td>"
+            f"<td>{escape(', '.join(sorted((policy.extra or {}).keys())) if policy.extra else 'Нет')}</td>"
+            "</tr>"
+        )
+
+    return f"""
+    <section class="card" id="databases">
+      <h2>Базы и списки</h2>
+      <p class="help">Здесь видно, что именно сейчас лежит в известных таблицах админки. Для изменения функции открой её карточку в разделе настроек.</p>
+      <div class="db-grid">{cards}</div>
+      <details class="db-details" open>
+        <summary>Текущие настройки функций</summary>
+        <table class="data-table">
+          <thead><tr><th>Функция</th><th>Состояние</th><th>Каналы</th><th>Доп. параметры</th></tr></thead>
+          <tbody>{''.join(rows)}</tbody>
+        </table>
+      </details>
+    </section>
+    """
 
 def _render_page(bot, request: web.Request | None = None, message: str = "") -> str:
     summary = policy_summary()
@@ -511,19 +1008,21 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     remote_configured = bool(REMOTE_MODEL_API_URL and REMOTE_MODEL_API_TOKEN)
     bot_name = escape(str(bot.user) if bot.user else "bot not ready")
     admin_name = escape(_admin_display_name(admin_session))
+    avatar_url = escape(_admin_avatar_url(admin_session))
     client_ip = escape(str(summary.get("client_ip", "")))
-    allowed_ips = escape(str(summary.get("web_admin_allowed_ips", "") or "not set"))
+    allowed_ips = escape(str(summary.get("web_admin_allowed_ips", "") or "не ограничены"))
     notice = (
-        f"<div style=\"padding:12px 16px;background:#eef6ff;border:1px solid #c7def8;"
-        f"border-radius:12px;margin-bottom:16px;\">{escape(message)}</div>"
+        f"<div class=\"notice\">{escape(message)}</div>"
         if message
         else ""
     )
     action = "disable" if is_remote_model_inference_enabled() else "enable"
     action_label = "Отключить удалённую тяжёлую модель" if action == "disable" else "Включить удалённую тяжёлую модель"
-    admin_area_registry = _render_admin_area_registry()
     active_guild_id = _admin_guild_id(bot)
-    feature_registry = _render_feature_registry(active_guild_id)
+    guild = _active_guild(bot)
+    guild_name = escape(guild.name if guild else "Сервер не найден")
+    feature_registry = _render_feature_registry(bot, active_guild_id)
+    database_panel = _render_database_panel(bot, active_guild_id)
     birthdays_panel = _render_birthdays_panel(bot)
     restart_card = _render_restart_card(request)
     return f"""<!doctype html>
@@ -533,139 +1032,199 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(WEB_ADMIN_TITLE)}</title>
   <style>
-    body {{ font-family: Segoe UI, Arial, sans-serif; background:#f4f7fb; color:#1a202c; margin:0; }}
-    .wrap {{ max-width:920px; margin:32px auto; padding:0 16px; }}
-    .card {{ background:#fff; border-radius:18px; padding:22px; box-shadow:0 12px 32px rgba(15,23,42,.08); margin-bottom:18px; }}
+    :root {{
+      color-scheme: dark;
+      --bg:#0d1117;
+      --panel:#161b22;
+      --panel-2:#1f2630;
+      --line:#303844;
+      --text:#edf2f7;
+      --muted:#9aa7b5;
+      --blue:#3b82f6;
+      --green:#19a25b;
+      --red:#c24141;
+      --amber:#d9a441;
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{ font-family: Segoe UI, Arial, sans-serif; background:var(--bg); color:var(--text); margin:0; }}
+    a {{ color:#93c5fd; }}
+    .layout {{ display:grid; grid-template-columns:minmax(0,1fr) 280px; min-height:100vh; }}
+    #navToggle {{ position:absolute; opacity:0; pointer-events:none; }}
+    .sidebar {{ grid-column:2; grid-row:1; position:sticky; top:0; height:100vh; padding:18px 12px; background:#0f141b; border-left:1px solid var(--line); overflow:auto; }}
+    .toggle-label {{ display:flex; width:42px; height:42px; align-items:center; justify-content:center; border:1px solid var(--line); border-radius:10px; cursor:pointer; background:var(--panel); font-size:22px; margin-bottom:14px; }}
+    .profile {{ display:flex; gap:12px; align-items:center; padding:10px; border-radius:12px; background:var(--panel); border:1px solid var(--line); margin-bottom:14px; }}
+    .avatar {{ width:46px; height:46px; border-radius:50%; background:#334155; flex:0 0 auto; object-fit:cover; }}
+    .profile-name {{ font-weight:800; line-height:1.2; }}
+    .profile-sub {{ color:var(--muted); font-size:13px; margin-top:3px; }}
+    .nav {{ display:grid; gap:6px; }}
+    .nav a, .nav button {{ display:flex; align-items:center; gap:10px; width:100%; text-decoration:none; color:var(--text); background:transparent; border:0; border-radius:10px; padding:11px 10px; font:inherit; font-weight:700; cursor:pointer; text-align:left; }}
+    .nav a:hover, .nav button:hover {{ background:var(--panel); }}
+    .nav-icon {{ width:24px; text-align:center; color:#cbd5e1; }}
+    .main {{ grid-column:1; grid-row:1; justify-self:center; width:min(1280px, calc(100% - 48px)); padding:24px 0; }}
+    .topbar {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:18px; }}
     h1, h2 {{ margin:0 0 12px; }}
-    .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }}
-    .item {{ background:#f8fafc; border:1px solid #e2e8f0; border-radius:14px; padding:14px; }}
-    .label {{ font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:#64748b; margin-bottom:8px; }}
-    .value {{ font-size:16px; font-weight:700; }}
-    .help {{ color:#475569; line-height:1.5; }}
-    button {{ border:0; border-radius:12px; padding:12px 16px; font-size:15px; font-weight:700; cursor:pointer; background:#1d4ed8; color:#fff; }}
-    input, textarea {{ border:1px solid #cbd5e1; border-radius:10px; padding:10px 12px; font:inherit; }}
-    textarea {{ min-height:88px; width:100%; box-sizing:border-box; font-family:Consolas, monospace; }}
-    .button-secondary {{ background:#475569; }}
-    .button-danger {{ background:#b91c1c; }}
-    .actions {{ display:flex; gap:12px; flex-wrap:wrap; }}
+    h1 {{ font-size:28px; }}
+    .card {{ background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px; margin-bottom:16px; box-shadow:0 12px 30px rgba(0,0,0,.22); }}
+    .notice {{ padding:12px 14px; background:#10223b; border:1px solid #2b5d9a; border-radius:8px; margin-bottom:14px; }}
+    .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; }}
+    .item, .db-card {{ background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:14px; min-width:0; }}
+    .label {{ font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:8px; }}
+    .value {{ font-size:16px; font-weight:800; overflow-wrap:anywhere; }}
+    .help, .area-desc, .setting-help {{ color:var(--muted); line-height:1.5; }}
+    button {{ border:0; border-radius:8px; padding:11px 14px; font-size:14px; font-weight:800; cursor:pointer; background:var(--blue); color:#fff; }}
+    input, textarea, select {{ width:100%; border:1px solid var(--line); border-radius:8px; padding:10px 12px; font:inherit; background:#111821; color:var(--text); }}
+    textarea {{ min-height:96px; font-family:Consolas, monospace; }}
+    .button-secondary {{ background:#465568; }}
+    .button-danger {{ background:var(--red); }}
+    .actions {{ display:flex; gap:10px; flex-wrap:wrap; }}
     .actions form {{ margin:0; }}
-    .actions a {{ display:inline-block; text-decoration:none; border-radius:12px; padding:12px 16px; font-size:15px; font-weight:700; background:#475569; color:#fff; }}
-    .muted {{ color:#64748b; }}
-    code {{ background:#eef2ff; padding:2px 6px; border-radius:8px; }}
-    ul {{ margin:0; padding-left:20px; color:#475569; line-height:1.7; }}
-    .area {{ border:1px solid #e2e8f0; border-radius:14px; padding:14px; background:#f8fafc; }}
-    .area-title {{ font-weight:800; margin-bottom:6px; }}
-    .area-desc {{ color:#475569; line-height:1.45; }}
-    .area-status {{ display:inline-block; margin-top:10px; padding:4px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:12px; font-weight:700; }}
+    .actions a {{ display:inline-block; text-decoration:none; border-radius:8px; padding:11px 14px; font-size:14px; font-weight:800; background:#465568; color:#fff; }}
+    .muted {{ color:var(--muted); }}
+    code, .tech-id {{ background:#111821; color:#cbd5e1; padding:2px 6px; border-radius:6px; font-size:12px; overflow-wrap:anywhere; }}
+    .area-title {{ font-weight:900; margin-bottom:6px; }}
     .feature-stack {{ display:grid; gap:14px; }}
-    .feature-card {{ border:1px solid #e2e8f0; border-radius:14px; padding:16px; background:#fff; }}
+    .feature-card {{ border:1px solid var(--line); border-radius:8px; padding:16px; background:#141a22; }}
     .feature-head {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }}
-    .feature-meta {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }}
-    .channel-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin:14px 0; }}
-    .inline-form {{ display:grid; grid-template-columns:minmax(120px,1fr) minmax(120px,1fr) auto auto auto; gap:8px; align-items:center; margin:8px 0; }}
-    .payload-form {{ display:grid; gap:10px; margin-top:10px; }}
+    .feature-meta, .channel-pills {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }}
+    .meta-pill, .empty-pill, .channel-pill {{ display:inline-flex; align-items:center; gap:8px; padding:6px 9px; border-radius:999px; background:#202a36; color:#dbeafe; font-size:13px; font-weight:700; }}
+    .warn {{ color:#ffe7a3; background:#3a2d12; }}
+    .channel-pill small {{ color:var(--muted); font-weight:600; }}
+    .setting-row {{ display:grid; grid-template-columns:minmax(210px,.8fr) minmax(320px,1.2fr); gap:14px; padding:14px 0; border-top:1px solid var(--line); }}
+    .setting-help {{ display:block; margin-top:4px; font-size:14px; }}
+    .channel-form {{ display:grid; grid-template-columns:minmax(180px,1fr) minmax(160px,1fr) auto auto; gap:8px; align-items:center; }}
+    .inline-form {{ display:grid; grid-template-columns:minmax(160px,1fr) minmax(110px,.5fr) minmax(160px,1fr) auto; gap:8px; align-items:center; margin:8px 0; }}
+    .friendly-settings {{ border-top:1px solid var(--line); padding-top:12px; }}
+    .text-settings-form {{ display:grid; gap:12px; margin-top:12px; }}
+    .spotlight-settings {{ display:grid; gap:12px; padding:12px; border:1px solid var(--line); border-radius:8px; background:#111821; }}
+    .block-settings {{ padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#111821; }}
+    .style-settings {{ padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#111821; }}
+    .style-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; margin:10px 0; }}
+    .block-group {{ margin-top:12px; }}
+    .block-group h3 {{ margin:0 0 8px; font-size:16px; }}
+    .block-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:8px; }}
+    .block-toggle {{ display:grid; gap:8px; padding:10px; border:1px solid var(--line); border-radius:8px; background:#141a22; }}
+    .block-toggle input {{ width:auto; margin-top:3px; }}
+    .block-toggle span {{ display:grid; gap:3px; }}
+    .block-toggle small {{ color:var(--muted); line-height:1.35; }}
+    .check-setting.compact {{ align-items:flex-start; margin:0; }}
+    .block-mini-field {{ display:grid; gap:4px; font-size:12px; color:var(--muted); }}
+    .block-mini-field input {{ width:100%; min-height:34px; padding:7px 9px; }}
+    .text-setting {{ display:grid; gap:6px; }}
+    .text-setting span {{ font-weight:800; }}
+    .text-setting small {{ color:var(--muted); }}
+    .check-setting {{ display:flex; gap:10px; align-items:center; font-weight:800; }}
+    .check-setting input {{ width:auto; }}
+    .template-help {{ padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#111821; }}
+    .mini-table {{ width:100%; border-collapse:collapse; margin-top:10px; }}
+    .mini-table td {{ border-top:1px solid var(--line); padding:8px; vertical-align:top; }}
+    .mini-table td:first-child {{ width:130px; }}
+    .db-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; margin:12px 0; }}
+    .db-count {{ font-size:30px; font-weight:900; margin:12px 0 6px; }}
     .data-table {{ width:100%; border-collapse:collapse; margin-top:14px; }}
-    .data-table th, .data-table td {{ border-top:1px solid #e2e8f0; padding:10px; text-align:left; vertical-align:top; }}
-    .data-table th {{ color:#475569; font-size:13px; }}
-    @media (max-width:720px) {{ .feature-head, .inline-form {{ display:grid; grid-template-columns:1fr; }} }}
+    .data-table th, .data-table td {{ border-top:1px solid var(--line); padding:10px; text-align:left; vertical-align:top; }}
+    .data-table th {{ color:var(--muted); font-size:13px; }}
+    details {{ margin-top:12px; }}
+    summary {{ cursor:pointer; font-weight:800; color:#dbeafe; }}
+    .system-card {{ display:grid; grid-template-columns:1fr auto; gap:14px; align-items:center; }}
+    #navToggle:checked ~ .layout {{ grid-template-columns:minmax(0,1fr) 72px; }}
+    #navToggle:checked ~ .layout .sidebar {{ padding-left:10px; padding-right:10px; }}
+    #navToggle:checked ~ .layout .profile {{ justify-content:center; padding:8px; }}
+    #navToggle:checked ~ .layout .profile-text, #navToggle:checked ~ .layout .nav-label {{ display:none; }}
+    #navToggle:checked ~ .layout .nav a, #navToggle:checked ~ .layout .nav button {{ justify-content:center; padding:11px 0; }}
+    @media (max-width:820px) {{
+      .layout {{ grid-template-columns:1fr; }}
+      .sidebar {{ grid-column:1; grid-row:1; position:relative; height:auto; border-left:0; border-bottom:1px solid var(--line); }}
+      .main {{ grid-column:1; grid-row:2; width:calc(100% - 28px); padding:14px 0; }}
+      #navToggle:checked ~ .layout {{ grid-template-columns:1fr; }}
+      #navToggle:checked ~ .layout .profile-text, #navToggle:checked ~ .layout .nav-label {{ display:inline; }}
+      .topbar, .feature-head, .setting-row, .system-card {{ display:grid; grid-template-columns:1fr; }}
+      .channel-form, .inline-form {{ grid-template-columns:1fr; }}
+    }}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <h1>{escape(WEB_ADMIN_TITLE)}</h1>
-      <p class="help">Панель открывается через Discord OAuth и пускает только участников сервера с правами Administrator или Manage Server.</p>
+  <input id="navToggle" type="checkbox">
+  <div class="layout">
+    <aside class="sidebar">
+      <label class="toggle-label" for="navToggle" title="Свернуть меню">☰</label>
+      <div class="profile">
+        <img class="avatar" src="{avatar_url}" alt="">
+        <div class="profile-text">
+          <div class="profile-name">{admin_name}</div>
+          <div class="profile-sub">{guild_name}</div>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="#overview"><span class="nav-icon">⌂</span><span class="nav-label">Обзор</span></a>
+        <a href="#features"><span class="nav-icon">⚙</span><span class="nav-label">Функции бота</span></a>
+        <a href="#databases"><span class="nav-icon">▦</span><span class="nav-label">Базы и списки</span></a>
+        <a href="#birthdays"><span class="nav-icon">★</span><span class="nav-label">Дни рождения</span></a>
+        <a href="#system"><span class="nav-icon">●</span><span class="nav-label">Система</span></a>
+        <form method="post" action="/logout"><button type="submit"><span class="nav-icon">↩</span><span class="nav-label">Выйти</span></button></form>
+      </nav>
+    </aside>
+    <main class="main">
+      <div class="topbar" id="overview">
+        <div>
+          <h1>{escape(WEB_ADMIN_TITLE)}</h1>
+          <p class="help">Рабочая панель управления ботом для сервера <b>{guild_name}</b>.</p>
+        </div>
+        <div class="actions">
+          <a href="/">Обновить</a>
+        </div>
+      </div>
       {notice}
-      <div class="grid">
-        <div class="item"><div class="label">Бот</div><div class="value">{bot_name}</div></div>
-        <div class="item"><div class="label">Вход</div><div class="value">{admin_name}</div></div>
-        <div class="item"><div class="label">Хост</div><div class="value">{escape(summary["hostname"])}</div></div>
-        <div class="item"><div class="label">Режим сервера</div><div class="value">{_status_chip(summary["is_server_runtime"], "VPS", "Local")}</div></div>
-        <div class="item"><div class="label">Удалённый bridge</div><div class="value">{_status_chip(remote_configured, "Configured", "Not set")}</div></div>
-        <div class="item"><div class="label">Guild settings</div><div class="value"><code>{active_guild_id or "-"}</code></div></div>
-        <div class="item"><div class="label">Твой IP</div><div class="value"><code>{client_ip or "-"}</code></div></div>
-        <div class="item"><div class="label">Разрешённые IP</div><div class="value"><code>{allowed_ips}</code></div></div>
-      </div>
-    </div>
 
-    <div class="card">
-      <h2>Защитная политика</h2>
-      <div class="grid">
-        <div class="item"><div class="label">GPT-обучение на сервере</div><div class="value">{_status_chip(is_gpt_training_allowed(), "Allowed", "Blocked")}</div></div>
-        <div class="item"><div class="label">Полная профилактика на сервере</div><div class="value">{_status_chip(is_full_maintenance_allowed(), "Allowed", "Blocked")}</div></div>
-        <div class="item"><div class="label">Удалённая тяжёлая модель</div><div class="value">{_status_chip(is_remote_model_inference_enabled(), "Enabled", "Disabled")}</div></div>
-        <div class="item"><div class="label">Ежедневный Markov</div><div class="value">{_status_chip(is_daily_markov_retrain_enabled(), "Enabled", "Disabled")}</div></div>
-        <div class="item"><div class="label">Ежедневный сбор</div><div class="value">{_status_chip(is_daily_markov_collection_enabled(), "Enabled", "Disabled")}</div></div>
-      </div>
-      <p class="help">По умолчанию серверу запрещено GPT-дообучение и полная профилактика. Это защищает VPS от перегруза и случайного запуска тяжёлых задач из Discord. Безопасный цикл Markov можно включить отдельно на время {DAILY_MARKOV_RETRAIN_HOUR:02d}:{DAILY_MARKOV_RETRAIN_MINUTE:02d} МСК.</p>
-    </div>
+      <section class="card">
+        <h2>Обзор</h2>
+        <div class="grid">
+          <div class="item"><div class="label">Бот</div><div class="value">{bot_name}</div></div>
+          <div class="item"><div class="label">Аккаунт</div><div class="value">{admin_name}</div></div>
+          <div class="item"><div class="label">Сервер</div><div class="value">{guild_name}<br><span class="tech-id">ID {active_guild_id or "-"}</span></div></div>
+          <div class="item"><div class="label">Где запущено</div><div class="value">{_status_chip(summary["is_server_runtime"], "VPS", "Локально")}</div></div>
+          <div class="item"><div class="label">Удалённая модель</div><div class="value">{_status_chip(is_remote_model_inference_enabled(), "Включена", "Выключена")}</div></div>
+          <div class="item"><div class="label">Bridge</div><div class="value">{_status_chip(remote_configured, "Настроен", "Не настроен")}</div></div>
+        </div>
+      </section>
 
-    <div class="card">
-      <h2>Куда переезжают админские функции</h2>
-      <p class="help">Пользовательский Discord-бот должен оставаться чистым. Эти зоны постепенно становятся полноценными разделами админ-панели/app, а не пунктами обычного меню.</p>
-      <div class="grid">
-        {admin_area_registry}
-      </div>
-    </div>
+      <section class="card" id="features">
+        <h2>Функции бота</h2>
+        <p class="help">Здесь можно включать функции, выбирать каналы по названию и видеть текущие параметры без охоты за длинными Discord ID.</p>
+        <div class="feature-stack">
+          {feature_registry}
+        </div>
+      </section>
 
-    <div class="card">
-      <h2>Feature settings</h2>
-      <p class="help">Первый рабочий слой будущей админки: здесь хранятся включение фич, каналы вывода, allow/exclude-каналы и JSON payload в общей таблице <code>core.settings_store</code>. Сейчас применяется к guild <code>{active_guild_id or "-"}</code>.</p>
-      <div class="feature-stack">
-        {feature_registry}
-      </div>
-    </div>
+      {database_panel}
+      {birthdays_panel}
 
-    {birthdays_panel}
+      <section class="card" id="system">
+        <h2>Система</h2>
+        <div class="grid">
+          <div class="item"><div class="label">Хост</div><div class="value">{escape(summary["hostname"])}</div></div>
+          <div class="item"><div class="label">Твой IP</div><div class="value">{client_ip or "-"}</div></div>
+          <div class="item"><div class="label">Разрешённые IP</div><div class="value">{allowed_ips}</div></div>
+          <div class="item"><div class="label">GPT-обучение на VPS</div><div class="value">{_status_chip(is_gpt_training_allowed(), "Разрешено", "Заблокировано")}</div></div>
+          <div class="item"><div class="label">Профилактика на VPS</div><div class="value">{_status_chip(is_full_maintenance_allowed(), "Разрешена", "Заблокирована")}</div></div>
+          <div class="item"><div class="label">Ежедневный сбор</div><div class="value">{_status_chip(is_daily_markov_collection_enabled(), "Включён", "Выключен")}</div></div>
+        </div>
+      </section>
 
-    <div class="card">
-      <h2>Быстрый переключатель</h2>
-      <div class="actions">
-        <form method="post" action="/remote-models">
-          <input type="hidden" name="action" value="{action}">
-          <button type="submit">{escape(action_label)}</button>
-        </form>
-        <a href="/">Обновить страницу</a>
-        <form method="post" action="/logout">
-          <button type="submit" class="button-secondary">Выйти</button>
-        </form>
-      </div>
-      <p class="help" style="margin-top:12px;">Этот переключатель управляет только использованием уже подключённой удалённой модели. Он не запускает обучение и не меняет файлы на диске.</p>
-    </div>
+      <section class="card">
+        <div class="system-card">
+          <div>
+            <h2>Удалённая тяжёлая модель</h2>
+            <p class="help">Переключатель управляет только использованием уже подключённой модели в текущем процессе бота.</p>
+          </div>
+          <form method="post" action="/remote-models">
+            <input type="hidden" name="action" value="{action}">
+            <button type="submit">{escape(action_label)}</button>
+          </form>
+        </div>
+      </section>
 
-    {restart_card}
-
-    <div class="card">
-      <h2>Что можно делать здесь</h2>
-      <ul>
-        <li>Смотреть статус защиты, bridge и режима сервера.</li>
-        <li>Включать и выключать использование удалённой тяжёлой модели для текущего процесса бота.</li>
-        <li>Открывать панель через Discord OAuth с проверкой прав администратора сервера.</li>
-      </ul>
-    </div>
-
-    <div class="card">
-      <h2>Что остаётся в локальном GUI на ПК</h2>
-      <ul>
-        <li>Локальное обучение моделей на ПК.</li>
-        <li>Синхронизация <code>messages.db</code> с VPS.</li>
-        <li>Отправка лёгких моделей и баз на VPS.</li>
-        <li>Git: <code>status</code>, <code>pull</code>, <code>commit</code>, <code>push</code>.</li>
-        <li>Установка нового VPS с нуля и локальная диагностика bridge.</li>
-      </ul>
-      <p class="help" style="margin-top:12px;">
-        Полный функционал центра нельзя безопасно перенести в эту веб-панель, потому что часть действий должна запускаться именно на твоём ПК, а не на VPS.
-      </p>
-    </div>
-
-    <div class="card">
-      <h2>Быстрые подсказки</h2>
-      <ul>
-        <li>Если нужен локальный training: запусти <code>scripts/bot_control_gui.py</code> и кнопку обучения.</li>
-        <li>Если нужен Git update на ПК: используй локальный GUI и кнопку <code>Git pull</code>.</li>
-        <li>Если нужно включить тяжёлую GPT с ПК для VPS: сначала включи bridge в локальном GUI, потом используй переключатель на этой панели.</li>
-      </ul>
-    </div>
+      {restart_card}
+    </main>
   </div>
 </body>
 </html>"""
@@ -675,13 +1234,13 @@ async def _index(request: web.Request) -> web.Response:
     _assert_ip_allowed(request)
     if not _is_authorized(request):
         return web.Response(
-            text=f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Admin Login</title></head>
-<body style="font-family:Segoe UI,Arial,sans-serif;background:#f4f7fb;padding:32px;">
-<div style="max-width:420px;margin:40px auto;background:#fff;padding:24px;border-radius:16px;box-shadow:0 12px 32px rgba(15,23,42,.08);">
+            text=f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Вход в админ-панель</title></head>
+<body style="font-family:Segoe UI,Arial,sans-serif;background:#0d1117;color:#edf2f7;padding:32px;">
+<div style="max-width:420px;margin:40px auto;background:#161b22;border:1px solid #303844;padding:24px;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,.28);">
 <h2 style="margin-top:0;">Вход в админ-панель</h2>
-<p style="line-height:1.5;color:#475569;">Войди через Discord. Панель откроется только если у тебя на сервере есть права администратора или управления сервером.</p>
-<a href="/login" style="display:inline-block;text-decoration:none;border-radius:10px;padding:12px 16px;background:#5865f2;color:#fff;font-weight:700;">Войти через Discord</a>
-<p style="margin-top:14px;color:#64748b;font-size:13px;">Redirect URI: <code>{escape(get_web_admin_discord_redirect_uri())}</code></p>
+<p style="line-height:1.5;color:#9aa7b5;">Войди через Discord. Панель откроется только если у тебя на сервере есть права администратора или управления сервером.</p>
+<a href="/login" style="display:inline-block;text-decoration:none;border-radius:8px;padding:12px 16px;background:#5865f2;color:#fff;font-weight:700;">Войти через Discord</a>
+<p style="margin-top:14px;color:#9aa7b5;font-size:13px;">Адрес возврата: <code style="background:#111821;color:#cbd5e1;padding:2px 6px;border-radius:6px;">{escape(get_web_admin_discord_redirect_uri())}</code></p>
 </div></body></html>""",
             status=401,
             content_type="text/html",
@@ -694,7 +1253,7 @@ async def _login(request: web.Request) -> web.StreamResponse:
     _assert_ip_allowed(request)
     client_id = _discord_client_id(request.app["bot"])
     if not client_id:
-        raise web.HTTPServiceUnavailable(text="Discord OAuth client_id is not configured")
+        raise web.HTTPServiceUnavailable(text="Не настроен Discord OAuth client_id")
 
     state = secrets.token_urlsafe(24)
     redirect_uri = get_web_admin_discord_redirect_uri()
@@ -720,11 +1279,11 @@ async def _discord_callback(request: web.Request) -> web.StreamResponse:
     _assert_ip_allowed(request)
     if "access_token" not in request.query and "code" not in request.query:
         return web.Response(
-            text="""<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Discord Login</title></head>
-<body style="font-family:Segoe UI,Arial,sans-serif;background:#f4f7fb;padding:32px;">
-<div style="max-width:520px;margin:40px auto;background:#fff;padding:24px;border-radius:16px;box-shadow:0 12px 32px rgba(15,23,42,.08);">
+            text="""<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Вход через Discord</title></head>
+<body style="font-family:Segoe UI,Arial,sans-serif;background:#0d1117;color:#edf2f7;padding:32px;">
+<div style="max-width:520px;margin:40px auto;background:#161b22;border:1px solid #303844;padding:24px;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,.28);">
 <h2 style="margin-top:0;">Завершаю вход через Discord</h2>
-<p id="status" style="line-height:1.5;color:#475569;">Проверяю Discord-сессию...</p>
+<p id="status" style="line-height:1.5;color:#9aa7b5;">Проверяю Discord-сессию...</p>
 </div>
 <script>
 const params = new URLSearchParams(window.location.hash.slice(1));
@@ -849,8 +1408,16 @@ async def _maintenance_restart(request: web.Request) -> web.Response:
 def _feature_or_404(feature_id: str) -> dict:
     feature = FEATURES_BY_ID.get(feature_id)
     if not feature:
-        raise web.HTTPNotFound(text="Unknown feature")
+        raise web.HTTPNotFound(text="Неизвестная функция")
     return feature
+
+
+def _mode_title(mode: str) -> str:
+    return {
+        "output": "канал публикаций",
+        "allow": "разрешенный канал",
+        "exclude": "запрещенный канал",
+    }.get(mode, mode)
 
 
 async def _feature_enabled(request: web.Request) -> web.Response:
@@ -864,7 +1431,7 @@ async def _feature_enabled(request: web.Request) -> web.Response:
     guild_id = _admin_guild_id(request.app["bot"])
     set_feature_enabled(guild_id, feature_id, enabled)
     _mark_restart_required(request, feature, "enabled")
-    message = f"Фича {feature_id} {'включена' if enabled else 'выключена'}."
+    message = f"{feature['title']} {'включена' if enabled else 'выключена'}."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
@@ -877,15 +1444,15 @@ async def _feature_channel(request: web.Request) -> web.Response:
     data = await request.post()
     mode = str(data.get("mode") or "").strip()
     if mode not in feature["channel_modes"]:
-        raise web.HTTPBadRequest(text="Unsupported channel mode for this feature")
+        raise web.HTTPBadRequest(text="Этот тип канала не поддерживается для выбранной функции")
     channel_raw = str(data.get("channel_id") or "").strip()
     if not channel_raw.isdigit():
-        raise web.HTTPBadRequest(text="channel_id must be numeric")
+        raise web.HTTPBadRequest(text="ID канала должен быть числом")
     reason = str(data.get("reason") or "")
     guild_id = _admin_guild_id(request.app["bot"])
     set_feature_channel(guild_id, feature_id, int(channel_raw), mode, reason)
     _mark_restart_required(request, feature, f"{mode} channel")
-    message = f"Канал {channel_raw} добавлен в {feature_id}:{mode}."
+    message = f"{feature['title']}: добавлен {_mode_title(mode)} {_channel_label(request.app['bot'], int(channel_raw))}."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
@@ -898,14 +1465,14 @@ async def _feature_channel_delete(request: web.Request) -> web.Response:
     data = await request.post()
     mode = str(data.get("mode") or "").strip()
     if mode not in feature["channel_modes"]:
-        raise web.HTTPBadRequest(text="Unsupported channel mode for this feature")
+        raise web.HTTPBadRequest(text="Этот тип канала не поддерживается для выбранной функции")
     channel_raw = str(data.get("channel_id") or "").strip()
     if not channel_raw.isdigit():
-        raise web.HTTPBadRequest(text="channel_id must be numeric")
+        raise web.HTTPBadRequest(text="ID канала должен быть числом")
     guild_id = _admin_guild_id(request.app["bot"])
     deleted = clear_feature_channel(guild_id, feature_id, int(channel_raw), mode)
     _mark_restart_required(request, feature, f"{mode} channel delete")
-    message = f"Удалено записей {feature_id}:{mode}: {deleted}."
+    message = f"{feature['title']}: удалено записей для канала {_channel_label(request.app['bot'], int(channel_raw))}: {deleted}."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
@@ -914,22 +1481,53 @@ async def _feature_payload(request: web.Request) -> web.Response:
     if not _is_authorized(request):
         raise web.HTTPUnauthorized(text="Admin token required")
     feature_id = request.match_info["feature"]
-    _feature_or_404(feature_id)
+    feature = _feature_or_404(feature_id)
     data = await request.post()
     raw = str(data.get("payload") or "").strip()
     if raw:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise web.HTTPBadRequest(text=f"Invalid JSON: {exc}") from exc
+            raise web.HTTPBadRequest(text=f"Ошибка в JSON: {exc}") from exc
         if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be a JSON object")
+            raise web.HTTPBadRequest(text="Дополнительные параметры должны быть JSON-объектом")
     else:
         payload = {}
     guild_id = _admin_guild_id(request.app["bot"])
     set_feature_payload(guild_id, feature_id, payload)
-    _mark_restart_required(request, _feature_or_404(feature_id), "payload")
-    message = f"Payload для {feature_id} сохранен."
+    _mark_restart_required(request, feature, "payload")
+    message = f"Дополнительные параметры для {feature['title']} сохранены."
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
+async def _daily_summary_text(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    data = await request.post()
+    payload = {}
+    for key, _, default, _ in SUMMARY_TEXT_FIELDS:
+        value = str(data.get(key) or "").strip()
+        payload[key] = value or default
+    payload["game_spotlight_enabled"] = str(data.get("game_spotlight_enabled") or "").strip() in {"1", "true", "on", "yes"}
+    payload["game_spotlight_label"] = str(data.get("game_spotlight_label") or "").strip() or "Задроты"
+    payload["game_spotlight_game"] = str(data.get("game_spotlight_game") or "").strip()
+    payload["summary_theme"] = str(data.get("summary_theme") or "neon").strip() or "neon"
+    payload["summary_render_mode"] = str(data.get("summary_render_mode") or "embed").strip() or "embed"
+    payload["summary_accent_color"] = str(data.get("summary_accent_color") or "").strip()
+    payload["summary_thumbnail_url"] = str(data.get("summary_thumbnail_url") or "").strip()
+    payload["summary_buttons_enabled"] = str(data.get("summary_buttons_enabled") or "").strip() in {"1", "true", "on", "yes"}
+    payload["summary_compact_mode"] = str(data.get("summary_compact_mode") or "").strip() in {"1", "true", "on", "yes"}
+    payload["game_filter_mode"] = str(data.get("game_filter_mode") or "all").strip() or "all"
+    payload["daily_top_limit"] = str(data.get("daily_top_limit") or "3").strip() or "3"
+    payload["period_top_limit"] = str(data.get("period_top_limit") or "5").strip() or "5"
+    for key, _, _ in (*SUMMARY_DAILY_BLOCKS, *SUMMARY_PERIOD_BLOCKS):
+        payload[key] = str(data.get(key) or "").strip() in {"1", "true", "on", "yes"}
+        payload[f"{key}_title"] = str(data.get(f"{key}_title") or "").strip()
+        payload[f"{key}_limit"] = str(data.get(f"{key}_limit") or "").strip()
+    guild_id = _admin_guild_id(request.app["bot"])
+    set_feature_payload(guild_id, "daily_summary", payload)
+    message = "Текст итогов сервера сохранен."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
@@ -941,7 +1539,7 @@ async def _birthday_save(request: web.Request) -> web.Response:
     user_raw = str(data.get("user_id") or "").strip()
     birthday_raw = str(data.get("birthday") or "").strip()
     if not user_raw.isdigit():
-        raise web.HTTPBadRequest(text="user_id must be numeric")
+        raise web.HTTPBadRequest(text="ID участника должен быть числом")
     try:
         birthday = validate_birthday(birthday_raw)
     except ValueError as exc:
@@ -961,7 +1559,7 @@ async def _birthday_delete(request: web.Request) -> web.Response:
     data = await request.post()
     user_raw = str(data.get("user_id") or "").strip()
     if not user_raw.isdigit():
-        raise web.HTTPBadRequest(text="user_id must be numeric")
+        raise web.HTTPBadRequest(text="ID участника должен быть числом")
     remove_birthday(int(user_raw))
     message = f"ДР пользователя {user_raw} удален."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
@@ -1005,6 +1603,7 @@ async def start_admin_panel(bot, log) -> None:
     app.router.add_post("/features/{feature}/channel", _feature_channel)
     app.router.add_post("/features/{feature}/channel/delete", _feature_channel_delete)
     app.router.add_post("/features/{feature}/payload", _feature_payload)
+    app.router.add_post("/features/daily_summary/text", _daily_summary_text)
     app.router.add_post("/user-data/birthdays", _birthday_save)
     app.router.add_post("/user-data/birthdays/delete", _birthday_delete)
     app.router.add_post("/logout", _logout)

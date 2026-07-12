@@ -22,6 +22,8 @@ import sqlite3
 import asyncio
 import random
 import ctypes
+import importlib
+import importlib.util
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -91,18 +93,45 @@ except Exception as e:
     PERSONA_OK = False
     print(f"[parody] ⚠️  Persona: {e}")
 
-# GPT — требует torch
-try:
-    from fun_slesh.parody_gpt import (
-        fine_tune_user, gpt_model_exists, GPT_MODELS_DIR,
-        TRANSFORMERS_OK, DEVICE,
-        generate_author_phrase, generate_neuro_phrase,
-    )
-    GPT_OK = TRANSFORMERS_OK
-except Exception as e:
-    GPT_OK = False
-    TRANSFORMERS_OK = False
-    print(f"[parody] ⚠️  GPT: {e}")
+# GPT backend is intentionally lazy: importing torch/transformers added ~25s to
+# every local bot start even when nobody used a neural parody command.
+GPT_OK = all(importlib.util.find_spec(name) is not None for name in ("torch", "transformers", "datasets"))
+TRANSFORMERS_OK = GPT_OK
+_GPT_BACKEND = None
+
+
+def _gpt_backend():
+    global _GPT_BACKEND, GPT_OK, TRANSFORMERS_OK
+    if _GPT_BACKEND is None and GPT_OK:
+        try:
+            _GPT_BACKEND = importlib.import_module("fun_slesh.parody_gpt")
+            GPT_OK = bool(getattr(_GPT_BACKEND, "TRANSFORMERS_OK", False))
+            TRANSFORMERS_OK = GPT_OK
+        except Exception as exc:
+            GPT_OK = False
+            TRANSFORMERS_OK = False
+            print(f"[parody] ⚠️  GPT: {exc}")
+    return _GPT_BACKEND
+
+
+def gpt_model_exists(user_id: int) -> bool:
+    backend = _gpt_backend()
+    return bool(backend and backend.gpt_model_exists(user_id))
+
+
+def generate_author_phrase(user_id: int):
+    backend = _gpt_backend()
+    return backend.generate_author_phrase(user_id) if backend else None
+
+
+def generate_neuro_phrase(user_id: int):
+    backend = _gpt_backend()
+    return backend.generate_neuro_phrase(user_id) if backend else None
+
+
+async def fine_tune_user(user_id: int, messages: list[str], epochs: int = 3) -> bool:
+    backend = _gpt_backend()
+    return bool(backend and await backend.fine_tune_user(user_id, messages, epochs=epochs))
 
 MSK = ZoneInfo("Europe/Moscow")
 UTC = timezone.utc
@@ -587,8 +616,6 @@ class ParodyEngine(commands.Cog):
         if not MARKOV_OK:
             print("[parody] ⚠️  markovify не установлен!")
         apply_known_duplicates()
-        _prevent_sleep()  # бот запущен — ПК не спит
-        print("[parody] 💡 Режим 'не спать' активирован")
         self._scheduler = AsyncIOScheduler(timezone=MSK)
         self._scheduler.add_job(self._weekly_retrain, "cron", day_of_week="sun", hour=3, minute=0)
         if is_daily_markov_retrain_enabled():

@@ -1,12 +1,14 @@
 # core/economy.py
-import os, sqlite3, json
+import sqlite3, json
 from datetime import datetime, timezone
 from core.economy_profile import can_receive_currency
+from core.paths import SOCIAL_DB
+from core.db import connection as db_connection
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+DB_PATH = SOCIAL_DB
 
 def _ensure_tables():
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connection(DB_PATH) as conn:
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS coins_wallet (
@@ -29,21 +31,21 @@ def _ensure_tables():
 
 def get_balance(user_id: int) -> int:
     _ensure_tables()
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connection(DB_PATH) as conn:
         cur = conn.cursor()
         cur.execute("SELECT balance FROM coins_wallet WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
         return int(row[0]) if row else 0
 
 def add_coins(user_id: int, delta: int, reason: str, meta: dict | None = None) -> int:
-    """¬сегда пишет в ledger, возвращает новый баланс."""
+    """Всегда пишет операцию в ledger и возвращает новый баланс."""
     _ensure_tables()
     if int(delta) > 0 and not can_receive_currency(user_id):
         return get_balance(user_id)
     now_utc = datetime.now(timezone.utc).isoformat()
     meta_text = json.dumps(meta or {}, ensure_ascii=False)
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connection(DB_PATH) as conn:
         cur = conn.cursor()
         # ledger
         cur.execute(

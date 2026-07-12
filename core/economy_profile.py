@@ -1,17 +1,17 @@
 # core/economy_profile.py
-import os
 import sqlite3
 from datetime import datetime, timezone
+from core.paths import SOCIAL_DB
+from core.db import connection as db_connection
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+DB_PATH = SOCIAL_DB
 
 GENDER_MALE = "male"
 GENDER_FEMALE = "female"
 
 
 def _ensure_tables():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connection(DB_PATH) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS economy_profiles (
@@ -29,7 +29,7 @@ def set_economy_profile(user_id: int, gender: str, age_confirmed: bool):
     _ensure_tables()
     if gender not in {GENDER_MALE, GENDER_FEMALE}:
         raise ValueError("gender must be male or female")
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connection(DB_PATH) as conn:
         conn.execute(
             """
             INSERT INTO economy_profiles(user_id, gender, age_confirmed, updated_at)
@@ -46,7 +46,7 @@ def set_economy_profile(user_id: int, gender: str, age_confirmed: bool):
 
 def get_economy_profile(user_id: int) -> dict:
     _ensure_tables()
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connection(DB_PATH) as conn:
         row = conn.execute(
             "SELECT gender, age_confirmed, updated_at FROM economy_profiles WHERE user_id=?",
             (user_id,),

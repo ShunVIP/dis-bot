@@ -27,7 +27,12 @@ intents.presences       = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 PUBLIC_MENU_COMMANDS = {"команды", "админ"}
-SKIP_EXTENSION_FILES = {"parody_channel_settings.py"}
+SKIP_EXTENSION_FILES = {
+    "parody_channel_settings.py",
+    "parody_engine_wakelock.py",
+    "parody_gpt.py",
+    "parody_persona.py",
+}
 
 
 def enable_menu_catalog_command_tree():
@@ -164,9 +169,13 @@ async def setup_hook():
         log.bind(src="scheduler").error(f"❌  birthday_checker: {e}")
 
     try:
-        from scheduled.daily_kb_task import setup_daily_kb_refresh
-        setup_daily_kb_refresh()
-        log.bind(src="scheduler").info("✅  daily_kb_refresh    (00:00 Europe/Berlin)")
+        from core.runtime_policy import is_wwm_kb_refresh_allowed
+        if is_wwm_kb_refresh_allowed():
+            from scheduled.daily_kb_task import setup_daily_kb_refresh
+            setup_daily_kb_refresh()
+            log.bind(src="scheduler").info("✅  WWM KB refresh      (local/heavy runtime)")
+        else:
+            log.bind(src="scheduler").info("⏭️  WWM KB refresh      disabled on VPS; build locally")
     except Exception as e:
         log.bind(src="scheduler").error(f"❌  daily_kb_refresh: {e}")
 

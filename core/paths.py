@@ -27,3 +27,14 @@ PERSONA_DB = db_path("persona.db")
 PARODY_FILTERS_DB = db_path("parody_filters.db")
 PARODY_RATINGS_DB = db_path("parody_ratings.db")
 WWM_DB = db_path("wwm.db")
+
+DATABASES = {
+    "social": SOCIAL_DB,
+    "messages": MESSAGES_DB,
+    "birthdays": BIRTHDAYS_DB,
+    "reminders": REMINDERS_DB,
+    "persona": PERSONA_DB,
+    "parody_filters": PARODY_FILTERS_DB,
+    "parody_ratings": PARODY_RATINGS_DB,
+    "wwm": WWM_DB,
+}

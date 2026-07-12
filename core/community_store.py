@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.paths import SOCIAL_DB
+from core.db import connection as db_connection
 
 
 DEFAULT_ROLES = (
@@ -22,7 +23,7 @@ def _now() -> str:
 
 
 def ensure_community_tables():
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS community_profiles (
@@ -71,7 +72,7 @@ def ensure_community_tables():
 
 def get_profile(discord_user_id: int) -> dict[str, Any]:
     ensure_community_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             """
             SELECT display_name, status_text, bio, accent_color,
@@ -134,7 +135,7 @@ def upsert_profile(
         "avatar_decoration": avatar_decoration.strip()[:40],
         "badges": badges if badges is not None else existing["badges"],
     }
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
             INSERT INTO community_profiles(
@@ -169,7 +170,7 @@ def upsert_profile(
 
 def list_roles() -> list[dict[str, Any]]:
     ensure_community_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
             SELECT slug, name, color, position, source, updated_at
@@ -206,7 +207,7 @@ def upsert_role(
     if not clean_color.startswith("#"):
         clean_color = "#9aa7b0"
     now = _now()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
             INSERT INTO community_roles(slug, name, color, position, source, created_at, updated_at)
@@ -228,7 +229,7 @@ def set_user_roles(discord_user_id: int, role_slugs: list[str], source: str = "l
     ensure_community_tables()
     clean = [slug.strip()[:60] for slug in role_slugs if slug.strip()]
     now = _now()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute("DELETE FROM community_user_roles WHERE discord_user_id=?", (int(discord_user_id),))
         conn.executemany(
             """
@@ -242,7 +243,7 @@ def set_user_roles(discord_user_id: int, role_slugs: list[str], source: str = "l
 
 def get_user_roles(discord_user_id: int) -> list[dict[str, Any]]:
     ensure_community_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
             SELECT r.slug, r.name, r.color, r.position, ur.source
@@ -262,7 +263,7 @@ def get_user_roles(discord_user_id: int) -> list[dict[str, Any]]:
 def ensure_first_owner(discord_user_id: int):
     ensure_community_tables()
     now = _now()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute("SELECT COUNT(*) FROM community_user_roles").fetchone()
         if int(row[0] or 0) == 0:
             conn.execute(
@@ -282,7 +283,7 @@ def has_admin_access(discord_user_id: int) -> bool:
 
 def list_members() -> list[dict[str, Any]]:
     ensure_community_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
             SELECT discord_user_id, username, global_name, avatar, updated_at

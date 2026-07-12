@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.paths import SOCIAL_DB
+from core.db import connection as db_connection
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,7 @@ class FeatureChannelPolicy:
 
 
 def ensure_settings_tables():
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS feature_settings (
@@ -66,7 +67,7 @@ def _loads(raw: str | None) -> dict[str, Any]:
 
 def get_feature_payload(guild_id: int, feature: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
     ensure_settings_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             "SELECT payload FROM feature_settings WHERE guild_id=? AND feature=?",
             (guild_id, feature),
@@ -83,7 +84,7 @@ def set_feature_payload(guild_id: int, feature: str, payload: dict[str, Any], en
     existing = get_feature_payload(guild_id, feature)
     existing.update(payload)
     enabled_value = 1 if enabled is None else int(enabled)
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         if enabled is None:
             row = conn.execute(
                 "SELECT enabled FROM feature_settings WHERE guild_id=? AND feature=?",
@@ -110,7 +111,7 @@ def set_feature_enabled(guild_id: int, feature: str, enabled: bool):
 
 def is_feature_enabled(guild_id: int, feature: str, default: bool = True) -> bool:
     ensure_settings_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             "SELECT enabled FROM feature_settings WHERE guild_id=? AND feature=?",
             (guild_id, feature),
@@ -120,7 +121,7 @@ def is_feature_enabled(guild_id: int, feature: str, default: bool = True) -> boo
 
 def has_feature_setting(guild_id: int, feature: str) -> bool:
     ensure_settings_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         row = conn.execute(
             "SELECT 1 FROM feature_settings WHERE guild_id=? AND feature=?",
             (guild_id, feature),
@@ -138,7 +139,7 @@ def set_feature_channel(
     if mode not in {"output", "allow", "exclude"}:
         raise ValueError("mode must be output, allow or exclude")
     ensure_settings_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO feature_settings(guild_id, feature, enabled, payload, updated_at)
@@ -166,7 +167,7 @@ def set_feature_channel(
 
 def clear_feature_channel(guild_id: int, feature: str, channel_id: int, mode: str) -> int:
     ensure_settings_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         cur = conn.execute(
             "DELETE FROM feature_channels WHERE guild_id=? AND feature=? AND channel_id=? AND mode=?",
             (guild_id, feature, channel_id, mode),
@@ -177,7 +178,7 @@ def clear_feature_channel(guild_id: int, feature: str, channel_id: int, mode: st
 
 def clear_feature_channels(guild_id: int, feature: str, mode: str) -> int:
     ensure_settings_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         cur = conn.execute(
             "DELETE FROM feature_channels WHERE guild_id=? AND feature=? AND mode=?",
             (guild_id, feature, mode),
@@ -188,7 +189,7 @@ def clear_feature_channels(guild_id: int, feature: str, mode: str) -> int:
 
 def get_feature_channel_ids(guild_id: int, feature: str, mode: str) -> set[int]:
     ensure_settings_tables()
-    with sqlite3.connect(SOCIAL_DB) as conn:
+    with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             "SELECT channel_id FROM feature_channels WHERE guild_id=? AND feature=? AND mode=?",
             (guild_id, feature, mode),

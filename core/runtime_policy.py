@@ -18,6 +18,7 @@ ALLOW_FULL_MAINTENANCE_ON_SERVER = _env_flag("ALLOW_FULL_MAINTENANCE_ON_SERVER",
 ALLOW_REMOTE_MODEL_INFERENCE = _env_flag("ALLOW_REMOTE_MODEL_INFERENCE", default=True)
 ENABLE_DAILY_MARKOV_RETRAIN_ON_SERVER = _env_flag("ENABLE_DAILY_MARKOV_RETRAIN_ON_SERVER", default=False)
 ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER = _env_flag("ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER", default=True)
+ENABLE_WWM_KB_REFRESH_ON_SERVER = _env_flag("ENABLE_WWM_KB_REFRESH_ON_SERVER", default=False)
 DAILY_MARKOV_RETRAIN_HOUR = int(os.getenv("DAILY_MARKOV_RETRAIN_HOUR", "3"))
 DAILY_MARKOV_RETRAIN_MINUTE = int(os.getenv("DAILY_MARKOV_RETRAIN_MINUTE", "15"))
 
@@ -73,6 +74,10 @@ def is_daily_markov_collection_enabled() -> bool:
     return IS_SERVER_RUNTIME and ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER
 
 
+def is_wwm_kb_refresh_allowed() -> bool:
+    return (not IS_SERVER_RUNTIME) or ENABLE_WWM_KB_REFRESH_ON_SERVER
+
+
 def policy_summary() -> dict:
     return {
         "hostname": HOSTNAME,
@@ -84,6 +89,7 @@ def policy_summary() -> dict:
         "daily_markov_collection_enabled": is_daily_markov_collection_enabled(),
         "daily_markov_retrain_hour": DAILY_MARKOV_RETRAIN_HOUR,
         "daily_markov_retrain_minute": DAILY_MARKOV_RETRAIN_MINUTE,
+        "wwm_kb_refresh_allowed": is_wwm_kb_refresh_allowed(),
         "web_admin_enabled": WEB_ADMIN_ENABLED,
         "web_admin_host": WEB_ADMIN_HOST,
         "web_admin_port": WEB_ADMIN_PORT,
