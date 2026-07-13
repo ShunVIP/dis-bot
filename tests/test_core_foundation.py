@@ -27,6 +27,7 @@ from core.summary_service import (
 from web_app import server as web_server
 from web_app.server import security_middleware
 from scripts.build_ml_manifest import build_manifest
+from scripts import audit_settings, finalize_settings_migration
 from scripts.train_toxicity_model import train_model
 
 
@@ -47,6 +48,10 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
             patch.object(platform_store, "SOCIAL_DB", self.db_path),
             patch.object(voice_store, "SOCIAL_DB", self.db_path),
+            patch.object(audit_settings, "SOCIAL_DB", self.db_path),
+            patch.object(audit_settings, "BIRTHDAYS_DB", self.db_path),
+            patch.object(finalize_settings_migration, "SOCIAL_DB", self.db_path),
+            patch.object(finalize_settings_migration, "BIRTHDAYS_DB", self.db_path),
             patch.object(parody_message_store, "DB_PATH", self.db_path),
             patch.object(parody_feedback_store, "PARODY_RATINGS_DB", self.db_path),
         ]
@@ -111,6 +116,30 @@ class SettingsStoreTests(IsolatedDatabaseTest):
             "2026-07-01T00:00:00+00:00",
         )
         self.assertEqual(settings_migration.seed_admin_settings_from_legacy(guild_ids=[123])["economy"], 0)
+
+    def test_verified_legacy_settings_are_archived_out_of_runtime_path(self):
+        settings_store.set_feature_enabled(77, "daily_summary", True)
+        settings_store.set_feature_channel(77, "daily_summary", 88, "output", "migration")
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                "CREATE TABLE daily_summary_config(guild_id INTEGER PRIMARY KEY, channel_id INTEGER, enabled INTEGER)"
+            )
+            conn.execute("INSERT INTO daily_summary_config VALUES(77, 88, 1)")
+
+        preview = finalize_settings_migration.finalize(apply=False)
+        self.assertTrue(preview["coverage"]["safe_to_finalize"])
+        self.assertEqual(preview["actions"]["social"][0]["rows"], 1)
+        result = finalize_settings_migration.finalize(apply=True)
+        self.assertTrue(result["applied"])
+
+        with db_connection(self.db_path) as conn:
+            names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertNotIn("daily_summary_config", names)
+            self.assertIn("daily_summary_config_legacy_backup", names)
+            self.assertEqual(
+                conn.execute("SELECT source_rows FROM settings_migration_archive WHERE table_name='daily_summary_config'").fetchone(),
+                (1,),
+            )
 
 
 class EconomyTests(IsolatedDatabaseTest):
