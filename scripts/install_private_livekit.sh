@@ -68,6 +68,8 @@ upsert_env LIVEKIT_URL "wss://${TAILSCALE_DNS}:8443"
 upsert_env APP_BASE_URL "https://${TAILSCALE_DNS}"
 
 install -m 0644 "$APP_DIR/deploy/systemd/vipik-livekit.service.template" "/etc/systemd/system/${SERVICE_NAME}.service"
+chmod 0755 "$APP_DIR/scripts/secure_livekit_firewall.sh"
+"$APP_DIR/scripts/secure_livekit_firewall.sh"
 docker pull livekit/livekit-server:v1.13.1
 systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}.service"

@@ -6,6 +6,7 @@ Requires=docker.service
 
 [Service]
 Type=simple
+ExecStartPre=/opt/dis-bot/scripts/secure_livekit_firewall.sh
 ExecStartPre=-/usr/bin/docker rm vipik-livekit
 ExecStart=/usr/bin/docker run --rm --name vipik-livekit --network host --volume /etc/vipik-livekit.yaml:/etc/livekit.yaml:ro livekit/livekit-server:v1.13.1 --config /etc/livekit.yaml
 ExecStop=/usr/bin/docker stop -t 15 vipik-livekit
