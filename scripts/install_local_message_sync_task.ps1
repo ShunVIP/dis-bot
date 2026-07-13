@@ -24,7 +24,7 @@ Register-ScheduledTask `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
-    -Description "Daily sync of messages.db from VPS for local GPT training" `
+    -Description "Daily sync of messages.db from VPS for local Markov and ML training" `
     -Force | Out-Null
 
 Write-Host "[task] installed: $TaskName at $DailyAt"

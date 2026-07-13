@@ -1,6 +1,6 @@
 # ViPik Platform Review
 
-Дата: 2026-06-30.
+Дата первоначального ревью: 2026-06-30. Актуальное решение от 2026-07-13: пародии Markov-only, GPT/Persona/model bridge удалены; README является текущей картой проекта.
 
 Этот документ заменяет старые handoff/audit-файлы и является текущей картой ревью проекта. Цель ревью: убрать сумбур, оставить Discord-бота понятным для пользователей, вынести админские и опасные действия в отдельную панель/app и постепенно развивать сайт/app как fallback-платформу для друзей.
 
@@ -10,10 +10,9 @@
 |---|---|---|---|
 | Discord bot | `main_file.py`, `fun_slesh/` | Пользовательские действия, меню, фоновые listeners | Оставить, сделать компактным пользовательским UX |
 | Меню бота | `fun_slesh/menu.py` | Главный вход `/команды` и `/админ` | Продолжать переводить команды в кнопки, select menus и modals |
-| VPS admin panel | `core/admin_panel.py` | Статус, runtime policy, remote model switch | Расширять в сторону полноценной админки |
+| VPS admin panel | `core/admin_panel.py` | Статус, runtime policy, настройки и ML feedback | Расширять в сторону полноценной админки |
 | User website/app | `web_app/`, `core/web_app_store.py`, `core/platform_store.py`, `core/voice_store.py` | Профили, чат, каналы, DM, voice rooms, fallback | Развивать как запасной Discord-like интерфейс |
-| Local GUI | `scripts/bot_control_gui.py` | Локальное обучение, bridge, sync, deploy helpers | Оставить как local-only инструмент владельца |
-| Model bridge | `scripts/model_bridge_server.py`, `scripts/*remote_models.ps1` | Тяжёлая GPT-модель на ПК для VPS | Оставить, не переносить тяжёлую GPT на VPS |
+| Local GUI | `scripts/bot_control_gui.py` | Локальное Markov/ML-обучение, sync, deploy helpers | Оставить как local-only инструмент владельца |
 | Deploy/VPS | `scripts/bootstrap_vps.sh`, `scripts/deploy.sh`, `deploy/systemd/` | Продовый запуск и обновление | Оставить, менять отдельными deploy-шагами |
 
 ## Блоки ревью
@@ -27,7 +26,7 @@
 | Итоги дня/недели/месяца | scheduler, autopost | Discord | background + admin settings | Оставить, настройки в admin app |
 | Дни рождения | user commands, scheduler | Discord | Discord + user app | Оставить, админские правки в admin app |
 | Напоминания/temp roles | user/admin commands, scheduler | Discord | user app + admin app | Напоминания оставить пользователям, temp roles в admin app |
-| Пародия Markov/Persona/GPT | commands, models, maintenance | Discord + local GUI | user feature + local/admin tools | Пользовательские генерации оставить, обучение/профилактику убрать из user UX |
+| Пародия Markov | commands, models, maintenance | Discord + local GUI | user feature + local/admin tools | Только Markov; обучение/профилактику убрать из user UX |
 | Сбор сообщений | listener/collector, DB | Discord/admin commands | background/admin app | Опасное, только admin/maintenance |
 | Toxicity | listener, counters, admin settings | Discord | admin app + moderation views | Оставить после ревью пользы, настройки в admin app |
 | Social chat | listener, settings | Discord | admin app + bot behavior | Оставить как включаемую фичу, настройки в admin app |
@@ -43,14 +42,14 @@
 
 Эти действия нельзя держать в обычном пользовательском меню:
 
-- GPT fine-tune и массовое обучение.
+- Массовое Markov/ML-обучение.
 - Полная профилактика.
 - Сбор сообщений и сброс чекпоинтов.
 - Индексация истории каналов.
 - Массовое изменение ролей.
 - Настройки каналов, фильтров, токсичности, болтовни, автопостов.
 - Отправка моделей/баз на VPS.
-- Любые операции с bridge, env, systemd и deploy.
+- Любые операции с env, systemd и deploy.
 
 ## Stage 5 UX decisions 2026-06-30
 
@@ -65,7 +64,7 @@
 - Магазин должен открываться как единый интерактивный магазин: просмотр ролей, покупка, действия с валютой внутри одного окна, а не отдельные разрозненные команды.
 - Все топы должны вызываться через одно окно/раздел топов.
 - Игры должны быть одним аккуратным игровым разделом, чтобы мини-игры, Steam, LoL, WWM и игровые интеграции не занимали много места в меню.
-- Пародии оставляем, но текущий пользовательский слой держим вокруг Markov. Большую GPT-модель обсуждаем отдельно как общую модель для более сильных сценариев.
+- Пародии оставляем строго Markov-only; ML развиваем в других подсистемах.
 - Настройки токсичности полностью уходят в админку.
 - Настройки болтовни полностью уходят в админку.
 - Команды с одинаковым смыслом надо объединять в хабы и внутренние select/modals, чтобы они не мешали друг другу.

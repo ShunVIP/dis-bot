@@ -97,7 +97,7 @@ def ml_data_manifest(audit: dict[str, Any]) -> dict[str, Any]:
         "generated_at": audit.get("generated_at", ""),
         "policy": {
             "vps": ["collection", "aggregation", "Markov refresh", "lightweight inference"],
-            "local_pc": ["GPT training", "embedding/index builds", "batch feature engineering"],
+            "local_pc": ["ML training", "embedding/index builds", "batch feature engineering"],
             "transfer": "Only versioned derived artifacts and explicitly synchronized source databases.",
         },
         "artifact_registry": {
@@ -126,6 +126,13 @@ def ml_data_manifest(audit: dict[str, Any]) -> dict[str, Any]:
                 "table": "phrase_ratings",
                 "rows": table_index.get(("parody_ratings", "phrase_ratings"), 0),
                 "training_location": "local_pc",
+            },
+            "toxicity_shadow": {
+                "database": "social",
+                "tables": ["toxicity_log", "toxicity_ml_shadow", "toxicity_ml_feedback"],
+                "training_location": "local_pc_or_private_vps",
+                "inference_location": "vps",
+                "enforcement": "rules_only",
             },
         },
     }

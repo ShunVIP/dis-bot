@@ -579,22 +579,6 @@ async def _fetch_game_profile(game_name: str) -> dict:
     return profile
 
 
-def _call_gpt_haiku(prompt: str) -> str | None:
-    try:
-        import fun_slesh.parody_gpt as pgpt
-
-        model, tokenizer = pgpt._load_model()
-        if model is None:
-            return None
-        result = pgpt._generate(model, tokenizer, prompt, max_new_tokens=90)
-        lines = [line.strip() for line in result.strip().splitlines() if line.strip()][:3]
-        if len(lines) == 3:
-            return "\n".join(lines)
-    except Exception:
-        return None
-    return None
-
-
 def _recent_haikus(guild_id: int, game_name: str, limit: int = 20) -> set[str]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
@@ -744,27 +728,6 @@ def _habit_joke(user_id: int, activity_name: str) -> str:
 
 
 async def _generate_game_haiku(guild_id: int, game_name: str, display_name: str, profile: dict | None) -> str:
-    context = ""
-    if profile and profile.get("source_text"):
-        keywords = ", ".join(profile.get("keywords") or [])
-        context = (
-            f" Русскоязычный контекст/сниппеты: {profile.get('title') or game_name}; "
-            f"жанр/тип: {profile.get('genre') or 'неизвестно'}; "
-            f"ключевые слова: {keywords or 'нет'}; "
-            f"описание: {profile['source_text'][:700]}"
-        )
-    prompt = (
-        "Напиши короткое русское хокку в три строки о том, что участник Discord "
-        f"{display_name} запустил игру {game_name}.{context} "
-        "Адаптируй образы под конкретную игру, её жанр, сеттинг и лексику. "
-        "Не используй шаблонные строки про пиксели, курсор и монитор, если контекст позволяет точнее. "
-        "Без тегов, без пояснений, только три строки."
-    )
-    result = await asyncio.get_event_loop().run_in_executor(None, _call_gpt_haiku, prompt)
-    if result:
-        _remember_haiku(guild_id, game_name, result)
-        return result
-
     recent = _recent_haikus(guild_id, game_name)
     haiku = ""
     for _ in range(16):

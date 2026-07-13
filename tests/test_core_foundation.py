@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, web_app_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, toxicity_model_service, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -22,6 +22,7 @@ from core.summary_service import (
 )
 from web_app.server import security_middleware
 from scripts.build_ml_manifest import build_manifest
+from scripts.train_toxicity_model import train_model
 
 
 class IsolatedDatabaseTest(unittest.TestCase):
@@ -456,6 +457,20 @@ class DataCatalogTests(IsolatedDatabaseTest):
         with db_connection(wwm_path) as conn:
             self.assertEqual(conn.execute("SELECT entity_id FROM entity_features").fetchall(), [(1,)])
             self.assertEqual(conn.execute("SELECT entity_id FROM orphan_entity_features_backup").fetchall(), [(2,)])
+
+
+class ToxicityMlTests(unittest.TestCase):
+    def test_shadow_model_predicts_without_overriding_rules(self):
+        examples = [(f"спокойное обсуждение игры номер {index}", 0) for index in range(40)]
+        examples += [(f"ты идиот и дебил номер {index}", 1) for index in range(30)]
+        model = train_model(examples, buckets=256)
+
+        level, confidence, version = toxicity_model_service.predict_ml_level("ты идиот и дебил", model)
+        self.assertEqual(level, 1)
+        self.assertGreater(confidence, 0.5)
+        self.assertTrue(version.startswith("tox-nb-"))
+        prediction = toxicity_model_service.detect_toxicity("обычная спокойная беседа")
+        self.assertEqual(prediction["effective_level"], prediction["rule_level"])
 
 
 if __name__ == "__main__":

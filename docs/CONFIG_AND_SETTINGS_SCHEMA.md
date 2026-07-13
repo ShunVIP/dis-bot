@@ -22,12 +22,6 @@ Required for the future site/app:
 - `JWT_SECRET`
 - `BOT_API_TOKEN`
 
-Optional heavy model bridge:
-- `REMOTE_MODEL_API_URL`
-- `REMOTE_MODEL_API_TOKEN`
-- `REMOTE_MODEL_API_HOST`
-- `REMOTE_MODEL_API_PORT`
-
 Optional built-in admin panel:
 - `WEB_ADMIN_ENABLED`
 - `WEB_ADMIN_HOST`
@@ -55,7 +49,6 @@ Current database files:
 - `messages.db`: collected Discord messages for parody training.
 - `birthdays.db`: birthday dates and birthday output channel config.
 - `reminders.db`: reminders and temporary role/reminder-style state.
-- `persona.db`: generated persona/profile data.
 - `parody_filters.db`: parody stop-lists.
 - `parody_ratings.db`: parody phrase ratings.
 - `wwm.db`: WWM knowledge base/search data.

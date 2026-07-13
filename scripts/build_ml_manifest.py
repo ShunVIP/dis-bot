@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.ml_artifacts import ensure_artifact_manifest, load_artifact_manifest, register_artifact
+from core.ml_artifacts import ensure_artifact_manifest, load_artifact_manifest, register_artifact, remove_pipeline_artifacts
 from core.paths import MESSAGES_DB, MODELS_DIR
 
 
@@ -34,6 +34,7 @@ def _message_counts() -> dict[int, int]:
 
 def build_manifest() -> dict[str, int]:
     ensure_artifact_manifest()
+    remove_pipeline_artifacts("parody_gpt")
     counts = _message_counts()
     registered = 0
     for path in sorted(MODELS_DIR.glob("*.json")):
@@ -51,22 +52,6 @@ def build_manifest() -> dict[str, int]:
             source_rows=counts.get(user_id, 0),
             execution_location="local_pc",
             metadata={"discovered": True},
-        )
-        registered += 1
-
-    for path in sorted((MODELS_DIR / "gpt").glob("*/config.json")):
-        try:
-            user_id = int(path.parent.name)
-        except ValueError:
-            continue
-        register_artifact(
-            pipeline="parody_gpt",
-            user_id=user_id,
-            kind="config",
-            path=path,
-            source_rows=counts.get(user_id, 0),
-            execution_location="local_pc",
-            metadata={"model_directory": path.parent.relative_to(MODELS_DIR).as_posix()},
         )
         registered += 1
 

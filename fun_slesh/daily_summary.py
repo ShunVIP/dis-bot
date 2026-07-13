@@ -2,7 +2,7 @@
 # fun_slesh/daily_summary.py
 """
 Итог дня в полночь МСК:
-  - Хокку о событиях дня (через GPT на основе статистики)
+  - Хокку о событиях дня на основе проверяемой статистики
   - Авто-теги: о чём говорили (топ слов), кто играл (голосовые каналы)
   - Топ активных, топ войса
 
@@ -130,7 +130,7 @@ def _apply_summary_branding(emb: discord.Embed, guild: discord.Guild, payload: d
     else:
         emb.set_author(name=f"ViPik • {guild.name}")
 
-# ── Фолбэк хокку (если GPT недоступен) ───────────────────────────────────────
+# ── Шаблоны хокку ─────────────────────────────────────────────────────────────
 FALLBACK_HAIKU = [
     ("Слова летели —\n"
      "смех и споры в темноте.\n"
@@ -920,69 +920,14 @@ def _build_winner_congrats(guild: discord.Guild, stats: dict) -> str:
 
 # ── Генерация хокку ───────────────────────────────────────────────────────────
 async def _generate_haiku(stats: dict, guild: discord.Guild) -> str:
-    """Генерирует хокку через GPT или возвращает фолбэк."""
-    try:
-        from fun_slesh.parody_gpt import _load_model, _generate  # noqa
-        # Формируем контекст для GPT
-        context_parts = []
-        if stats["total_msgs"]:
-            context_parts.append(f"написано {stats['total_msgs']} сообщений")
-        if stats["total_voice_s"]:
-            context_parts.append(f"проведено в войсе {_fmt_seconds(stats['total_voice_s'])}")
-        if stats.get("total_game_s"):
-            context_parts.append(f"Discord-активности игр заняли {_fmt_seconds(stats['total_game_s'])}")
-        if stats.get("top_games"):
-            games = ", ".join(name for name, _seconds in stats["top_games"][:3])
-            context_parts.append(f"главные игры дня: {games}")
-
-        # Голосовые каналы → авто-теги
-        game_tags = []
-        for ch_id in stats["voice_channels"]:
-            ch = guild.get_channel(ch_id)
-            if ch:
-                game_tags.append(ch.name)
-        if game_tags:
-            context_parts.append(f"играли в: {', '.join(set(game_tags))}")
-
-        if stats["toxic_count"]:
-            context_parts.append(f"было {stats['toxic_count']} токсичных сообщений")
-        if stats["rep_events"]:
-            context_parts.append(f"раздали {stats['rep_events']} Размера")
-
-        if not context_parts:
-            return REIMI_HAIKU_REQUEST
-
-        context = "; ".join(context_parts)
-        prompt  = (
-            f"Напиши японское хокку (три строки: 5-7-5 слогов) на русском языке "
-            f"об этом игровом дне: {context}. "
-            f"Хокку должно быть поэтичным, немного грустным или задумчивым, "
-            f"с образами из геймерской жизни. Только три строки хокку, без пояснений."
-        )
-
-        import fun_slesh.parody_gpt as pgpt
-        # Используем существующую инфраструктуру GPT
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, _call_gpt_haiku, prompt
-        )
-        return result or REIMI_HAIKU_REQUEST
-    except Exception:
+    """Собирает короткое хокку из проверяемой статистики дня."""
+    if not any((stats.get("total_msgs"), stats.get("total_voice_s"), stats.get("total_game_s"))):
         return REIMI_HAIKU_REQUEST
-
-
-def _call_gpt_haiku(prompt: str) -> str | None:
-    """Синхронный вызов GPT для хокку."""
-    try:
-        import fun_slesh.parody_gpt as pgpt
-        model, tokenizer = pgpt._load_model()
-        if model is None:
-            return None
-        result = pgpt._generate(model, tokenizer, prompt, max_new_tokens=80)
-        # Берём первые три строки
-        lines = [l.strip() for l in result.strip().split("\n") if l.strip()][:3]
-        return "\n".join(lines) if lines else None
-    except Exception:
-        return None
+    games = stats.get("top_games") or []
+    game = games[0][0] if games else "ночной сервер"
+    middle = "голоса держат связь" if stats.get("total_voice_s") else "сообщения не спят"
+    endings = ["статистика помнит", "утро сохранит след", "сервер встретит рассвет"]
+    return f"{game} зовёт\n{middle}\n{random.choice(endings)}"
 
 
 # ── Формируем embed итога дня ─────────────────────────────────────────────────

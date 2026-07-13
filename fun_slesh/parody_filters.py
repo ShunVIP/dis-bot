@@ -60,7 +60,7 @@ def _ensure_db():
         conn.commit()
 
 
-# ─── Public API — используется в collector и persona ──────────────────────────
+# ─── Public API — используется в collector и статистическом профиле ───────────
 
 def get_ignored_channels() -> set[str]:
     """Возвращает set имён каналов (lowercase) которые не надо собирать."""
@@ -201,7 +201,7 @@ class ParodyFilters(commands.Cog):
 
         await interaction.response.send_message(
             f"🚫 Слово `{word}` заблокировано — не будет появляться в характерных словах и биграммах.\n"
-            f"Запусти `/дообучить модели:Только Persona` чтобы пересчитать профили.",
+            "Изменение уже применяется к `/профиль_стиля`.",
             ephemeral=True
         )
 
@@ -248,7 +248,7 @@ class ParodyFilters(commands.Cog):
         remain = 100 - убрать_процентов
         await interaction.response.send_message(
             f"📉 Слово `{word}`: убрано **{убрать_процентов}%** веса, осталось **{remain}%**\n"
-            f"Запусти `/дообучить модели:Только Persona` чтобы пересчитать профили.",
+            "Изменение уже применяется к `/профиль_стиля`.",
             ephemeral=True
         )
 
@@ -276,7 +276,7 @@ class ParodyFilters(commands.Cog):
             if d2: where.append("понижение")
             await interaction.response.send_message(
                 f"✅ Слово `{word}` удалено из: {', '.join(where)}.\n"
-                f"Запусти `/дообучить модели:Только Persona` чтобы пересчитать профили.",
+                "Изменение уже применяется к `/профиль_стиля`.",
                 ephemeral=True
             )
         else:

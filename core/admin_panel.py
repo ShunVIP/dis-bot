@@ -15,7 +15,7 @@ import aiohttp
 import discord
 from aiohttp import web
 
-from config import DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, REMOTE_MODEL_API_URL, REMOTE_MODEL_API_TOKEN
+from config import DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET
 from core.birthday_store import (
     get_birthday,
     list_birthdays,
@@ -36,10 +36,7 @@ from core.runtime_policy import (
     is_daily_markov_collection_enabled,
     is_daily_markov_retrain_enabled,
     is_full_maintenance_allowed,
-    is_gpt_training_allowed,
-    is_remote_model_inference_enabled,
     policy_summary,
-    set_remote_model_inference_enabled,
 )
 from core.settings_store import (
     clear_feature_channel,
@@ -322,7 +319,7 @@ FEATURE_REGISTRY = (
         "id": "parody_training",
         "title": "Пародии и модели",
         "group": "Модели и пародии",
-        "description": "Markov, Persona, GPT, фильтры и безопасное обучение.",
+        "description": "Markov-модели, фильтры корпуса и безопасное обучение.",
         "channel_modes": ("allow", "exclude"),
         "restart_on_change": True,
         "settings_help": "Каналы для сбора/использования пародийных ответов и безопасные флаги моделей.",
@@ -1000,12 +997,52 @@ def _render_database_panel(bot, guild_id: int) -> str:
     </section>
     """
 
+
+def _render_toxicity_ml_panel() -> str:
+    try:
+        with sqlite3.connect(SOCIAL_DB) as conn:
+            rows = conn.execute(
+                """
+                SELECT s.message_id,s.rule_level,s.ml_level,s.ml_confidence,s.model_version,s.msg_snippet
+                FROM toxicity_ml_shadow s
+                LEFT JOIN toxicity_ml_feedback f ON f.message_id=s.message_id
+                WHERE f.message_id IS NULL
+                ORDER BY s.logged_at DESC LIMIT 20
+                """
+            ).fetchall()
+            reviewed = conn.execute("SELECT COUNT(*) FROM toxicity_ml_feedback").fetchone()[0]
+    except sqlite3.Error:
+        rows, reviewed = [], 0
+    body = []
+    for message_id, rule_level, ml_level, confidence, version, snippet in rows:
+        options = "".join(
+            f'<option value="{level}"{" selected" if level == rule_level else ""}>{level}</option>'
+            for level in range(4)
+        )
+        body.append(
+            "<tr>"
+            f"<td>{escape(str(snippet))}<br><span class=\"tech-id\">{escape(str(message_id))}</span></td>"
+            f"<td>{rule_level}</td><td>{ml_level} ({float(confidence):.0%})<br><span class=\"tech-id\">{escape(str(version))}</span></td>"
+            "<td><form method=\"post\" action=\"/toxicity-ml/feedback\">"
+            f"<input type=\"hidden\" name=\"message_id\" value=\"{message_id}\">"
+            f"<select name=\"level\">{options}</select> <button type=\"submit\">Разметить</button>"
+            "</form></td></tr>"
+        )
+    rows_html = "".join(body) or '<tr><td colspan="4">Новых shadow-примеров пока нет.</td></tr>'
+    return f"""
+    <section class="card" id="toxicity-ml">
+      <h2>ML токсичности — shadow</h2>
+      <p class="help">Модель только сравнивается с правилами и не применяет санкции. Проверенных примеров: <b>{reviewed}</b>.</p>
+      <table class="data-table"><thead><tr><th>Текст</th><th>Правила</th><th>ML</th><th>Верный уровень</th></tr></thead>
+      <tbody>{rows_html}</tbody></table>
+    </section>
+    """
+
 def _render_page(bot, request: web.Request | None = None, message: str = "") -> str:
     summary = policy_summary()
     if request is not None:
         summary["client_ip"] = _client_ip(request)
     admin_session = _current_admin_session(request) if request is not None else None
-    remote_configured = bool(REMOTE_MODEL_API_URL and REMOTE_MODEL_API_TOKEN)
     bot_name = escape(str(bot.user) if bot.user else "bot not ready")
     admin_name = escape(_admin_display_name(admin_session))
     avatar_url = escape(_admin_avatar_url(admin_session))
@@ -1016,14 +1053,13 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
         if message
         else ""
     )
-    action = "disable" if is_remote_model_inference_enabled() else "enable"
-    action_label = "Отключить удалённую тяжёлую модель" if action == "disable" else "Включить удалённую тяжёлую модель"
     active_guild_id = _admin_guild_id(bot)
     guild = _active_guild(bot)
     guild_name = escape(guild.name if guild else "Сервер не найден")
     feature_registry = _render_feature_registry(bot, active_guild_id)
     database_panel = _render_database_panel(bot, active_guild_id)
     birthdays_panel = _render_birthdays_panel(bot)
+    toxicity_ml_panel = _render_toxicity_ml_panel()
     restart_card = _render_restart_card(request)
     return f"""<!doctype html>
 <html lang="ru">
@@ -1182,8 +1218,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
           <div class="item"><div class="label">Аккаунт</div><div class="value">{admin_name}</div></div>
           <div class="item"><div class="label">Сервер</div><div class="value">{guild_name}<br><span class="tech-id">ID {active_guild_id or "-"}</span></div></div>
           <div class="item"><div class="label">Где запущено</div><div class="value">{_status_chip(summary["is_server_runtime"], "VPS", "Локально")}</div></div>
-          <div class="item"><div class="label">Удалённая модель</div><div class="value">{_status_chip(is_remote_model_inference_enabled(), "Включена", "Выключена")}</div></div>
-          <div class="item"><div class="label">Bridge</div><div class="value">{_status_chip(remote_configured, "Настроен", "Не настроен")}</div></div>
+          <div class="item"><div class="label">Пародии</div><div class="value">Markov-only</div></div>
         </div>
       </section>
 
@@ -1197,6 +1232,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
 
       {database_panel}
       {birthdays_panel}
+      {toxicity_ml_panel}
 
       <section class="card" id="system">
         <h2>Система</h2>
@@ -1204,22 +1240,8 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
           <div class="item"><div class="label">Хост</div><div class="value">{escape(summary["hostname"])}</div></div>
           <div class="item"><div class="label">Твой IP</div><div class="value">{client_ip or "-"}</div></div>
           <div class="item"><div class="label">Разрешённые IP</div><div class="value">{allowed_ips}</div></div>
-          <div class="item"><div class="label">GPT-обучение на VPS</div><div class="value">{_status_chip(is_gpt_training_allowed(), "Разрешено", "Заблокировано")}</div></div>
           <div class="item"><div class="label">Профилактика на VPS</div><div class="value">{_status_chip(is_full_maintenance_allowed(), "Разрешена", "Заблокирована")}</div></div>
           <div class="item"><div class="label">Ежедневный сбор</div><div class="value">{_status_chip(is_daily_markov_collection_enabled(), "Включён", "Выключен")}</div></div>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="system-card">
-          <div>
-            <h2>Удалённая тяжёлая модель</h2>
-            <p class="help">Переключатель управляет только использованием уже подключённой модели в текущем процессе бота.</p>
-          </div>
-          <form method="post" action="/remote-models">
-            <input type="hidden" name="action" value="{action}">
-            <button type="submit">{escape(action_label)}</button>
-          </form>
         </div>
       </section>
 
@@ -1370,23 +1392,6 @@ async def _discord_token_login(request: web.Request) -> web.StreamResponse:
         raise web.HTTPForbidden(text="Discord user is not a server admin")
 
     return _create_admin_session_response(request, user_data, member)
-
-
-async def _remote_models(request: web.Request) -> web.Response:
-    _assert_ip_allowed(request)
-    if not _is_authorized(request):
-        raise web.HTTPUnauthorized(text="Admin token required")
-    data = await request.post()
-    action = (data.get("action") or "").strip().lower()
-    if action == "enable":
-        set_remote_model_inference_enabled(True)
-        message = "Удалённая тяжёлая модель включена для текущего процесса бота."
-    elif action == "disable":
-        set_remote_model_inference_enabled(False)
-        message = "Удалённая тяжёлая модель отключена для текущего процесса бота."
-    else:
-        message = "Неизвестное действие."
-    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
 async def _maintenance_restart(request: web.Request) -> web.Response:
@@ -1552,6 +1557,37 @@ async def _birthday_save(request: web.Request) -> web.Response:
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 
 
+async def _toxicity_ml_feedback(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    data = await request.post()
+    message_raw = str(data.get("message_id") or "").strip()
+    level_raw = str(data.get("level") or "").strip()
+    if not message_raw.isdigit() or level_raw not in {"0", "1", "2", "3"}:
+        raise web.HTTPBadRequest(text="Invalid toxicity feedback")
+    session = _current_admin_session(request)
+    reviewer_id = int((session or {}).get("discord_user_id") or 0)
+    with sqlite3.connect(SOCIAL_DB) as conn:
+        row = conn.execute(
+            "SELECT msg_snippet FROM toxicity_ml_shadow WHERE message_id=?",
+            (int(message_raw),),
+        ).fetchone()
+        if not row:
+            raise web.HTTPNotFound(text="Shadow sample not found")
+        conn.execute(
+            """
+            INSERT INTO toxicity_ml_feedback(message_id,msg_snippet,corrected_level,reviewer_id,reviewed_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(message_id) DO UPDATE SET corrected_level=excluded.corrected_level,
+                reviewer_id=excluded.reviewer_id,reviewed_at=excluded.reviewed_at
+            """,
+            (int(message_raw), str(row[0]), int(level_raw), reviewer_id, datetime.utcnow().isoformat()),
+        )
+    message = f"Пример {message_raw} размечен уровнем {level_raw}."
+    return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
 async def _birthday_delete(request: web.Request) -> web.Response:
     _assert_ip_allowed(request)
     if not _is_authorized(request):
@@ -1597,7 +1633,6 @@ async def start_admin_panel(bot, log) -> None:
     app.router.add_get("/login", _login)
     app.router.add_get("/auth/discord/callback", _discord_callback)
     app.router.add_post("/auth/discord/token", _discord_token_login)
-    app.router.add_post("/remote-models", _remote_models)
     app.router.add_post("/maintenance/restart", _maintenance_restart)
     app.router.add_post("/features/{feature}/enabled", _feature_enabled)
     app.router.add_post("/features/{feature}/channel", _feature_channel)
@@ -1606,6 +1641,7 @@ async def start_admin_panel(bot, log) -> None:
     app.router.add_post("/features/daily_summary/text", _daily_summary_text)
     app.router.add_post("/user-data/birthdays", _birthday_save)
     app.router.add_post("/user-data/birthdays/delete", _birthday_delete)
+    app.router.add_post("/toxicity-ml/feedback", _toxicity_ml_feedback)
     app.router.add_post("/logout", _logout)
 
     runner = web.AppRunner(app)

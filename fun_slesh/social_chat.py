@@ -386,7 +386,6 @@ class SocialChat(commands.Cog):
 
         try:
             from fun_slesh.parody_engine import generate_phrase, model_exists
-            from fun_slesh.parody_gpt import generate_author_phrase, generate_neuro_phrase, GPT_OK, gpt_model_exists
 
             # Для неожиданных рофлов сначала пробуем самые смешные локальные модели.
             if kind in {"chaos", "ambient", "talk", "question", "direct"}:
@@ -400,15 +399,6 @@ class SocialChat(commands.Cog):
                     if phrase:
                         return f"{random.choice(PARODY_PREFIXES)} *{phrase}*"
 
-                if model_exists(user_id, "автор") and random.random() < 0.45:
-                    phrase = await asyncio.to_thread(generate_author_phrase, user_id)
-                    if phrase:
-                        return f"{random.choice(PARODY_PREFIXES)} *{phrase}*"
-
-                if GPT_OK and gpt_model_exists(user_id) and random.random() < 0.2:
-                    phrase = await asyncio.to_thread(generate_neuro_phrase, user_id)
-                    if phrase:
-                        return f"{random.choice(PARODY_PREFIXES)} *{phrase}*"
         except Exception:
             pass
 
@@ -418,18 +408,12 @@ class SocialChat(commands.Cog):
         user_id = message.author.id
         try:
             from fun_slesh.parody_engine import generate_phrase, model_exists
-            from fun_slesh.parody_gpt import generate_author_phrase, generate_neuro_phrase, GPT_OK, gpt_model_exists
 
             phrase = None
             if model_exists(user_id, "разум"):
                 phrase = await asyncio.to_thread(generate_phrase, user_id, "разум")
             elif model_exists(user_id, "мем"):
                 phrase = await asyncio.to_thread(generate_phrase, user_id, "мем")
-            elif model_exists(user_id, "автор"):
-                phrase = await asyncio.to_thread(generate_author_phrase, user_id)
-            elif GPT_OK and gpt_model_exists(user_id):
-                phrase = await asyncio.to_thread(generate_neuro_phrase, user_id)
-
             if phrase:
                 return f"{random.choice(TROLL_PREFIXES)} *{phrase}*"
         except Exception:

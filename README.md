@@ -1,493 +1,160 @@
-# ViPik Discord Bot
+# ViPik Discord Platform
 
-Discord-бот для одного сервера с играми, экономикой, статистикой, пародией на стиль речи, Steam, напоминаниями и автоматизацией.
+ViPik — self-hosted Discord-бот с приватной веб-панелью и собственным web/app. Проект объединяет серверные функции, общие пользовательские данные, чат/DM, игровую статистику, экономику, модерацию и локальные ML-пайплайны без платных API.
 
-Если проект открывает другой ИИ или новый человек, сначала прочитай:
+## Главные архитектурные правила
 
-- [AGENT_CONTEXT.md](D:/dis-bot/AGENT_CONTEXT.md)
-- [docs/PLATFORM_REVIEW.md](D:/dis-bot/docs/PLATFORM_REVIEW.md)
+- Пародии работают **только через Markov**. GPT, Transformers, Persona-режим и model bridge удалены.
+- Тяжёлое обучение и пакетная обработка выполняются на основном ПК; VPS хранит данные, лёгкие артефакты и выполняет inference.
+- Исключение — безопасные лёгкие модели, которые можно обучить на VPS без заметной нагрузки, если данные нельзя экспортировать.
+- ML-модель не получает право применять санкции без достаточной проверенной разметки.
+- Пользовательские данные имеют один канонический store; Discord, админка и web/app не должны вести независимые копии.
+- Используются только бесплатные/self-hosted компоненты.
 
-Этот репозиторий уже не про "просто локальный бот". У проекта есть рабочая прод-схема:
+## Что уже работает
 
-- код редактируется на ПК;
-- бот постоянно живёт на VPS;
-- `messages.db` собирается на VPS и считается главным источником сообщений;
-- безопасный `Markov` дообучается на VPS автоматически;
-- тяжёлая `GPT`-модель обучается только на ПК;
-- если bridge включён, VPS использует тяжёлую модель с ПК через `Tailscale`.
+### Discord-бот
 
-## Быстрый смысл
+- Markov-пародии двух качеств: `мем` и `разум`;
+- сбор корпуса сообщений с фильтрами каналов;
+- профиль стиля, вычисляемый из статистики корпуса без отдельной Persona-модели;
+- рейтинги удачных и неудачных Markov-фраз;
+- активности, игровые сессии, привычки и игровые хокку на шаблонах/статистике;
+- ежедневные и периодические итоги сервера;
+- экономика, репутация, роли, дни рождения, напоминания;
+- Steam, Riot/LoL и Wuthering Waves-интеграции;
+- токсичность: рабочие правила + отдельный ML-классификатор в `shadow`-режиме;
+- социальные ответы и троллинг используют только Markov.
 
-Если тебе нужно понять проект за 2 минуты:
+### Приватная админ-панель
 
-1. Бот в проде работает на VPS как `systemd`-сервис `vipik-discord-bot`.
-2. Код деплоится отдельно от тяжёлых моделей и баз.
-3. На VPS нельзя запускать тяжёлое GPT-обучение.
-4. На ПК главный интерфейс обслуживания — [scripts/bot_control_gui.py](D:/dis-bot/scripts/bot_control_gui.py); `.exe` собирается локально при необходимости.
-5. Веб-панель на VPS нужна только для просмотра статуса и безопасного переключения удалённой тяжёлой модели.
+- вход через Discord OAuth и проверка серверных прав;
+- IP allowlist, защищённая сессия и безопасные write-запросы;
+- единый реестр функций и каналов;
+- просмотр известных баз и настроек;
+- управление днями рождения через общий store;
+- просмотр shadow-предсказаний токсичности и ручная разметка уровня `0..3`;
+- условный перезапуск только после настроек, которым он действительно нужен.
 
-## Для другого агента / другого аккаунта
+### Web/app
 
-Если этот проект открывает другой LLM-агент, другой аккаунт ChatGPT/Codex/Claude Code или новый человек, ему нужно знать следующее:
-
-- не коммитить секреты, токены, `KGTD.env`, базы и `models/`;
-- не пытаться обучать GPT на VPS;
-- не ломать ежедневный цикл `сбор сообщений -> Markov` на VPS;
-- не считать локальную `messages.db` источником правды, если она не была синхронизирована с VPS;
-- не тащить тяжёлую GPT-модель на VPS;
-- любые изменения в деплое, bridge, `systemd`, `Tailscale`, runtime policy и env-флагах требуют аккуратности;
-- главный локальный интерфейс обслуживания — прямой запуск [scripts/bot_control_gui.py](D:/dis-bot/scripts/bot_control_gui.py); готовый `.exe` не хранится в репозитории.
-
-Короткий operational contract:
-
-- локально: обучение GPT, git, sync базы, управление bridge;
-- на VPS: прод-бот, `messages.db`, безопасный `Markov`, веб-панель, systemd;
-- через bridge: только inference тяжёлой GPT-модели с ПК.
-
-## Архитектура
-
-### Где что живёт
-
-- ПК:
-  - разработка кода;
-  - локальный `git`;
-  - локальное GPT-обучение;
-  - локальные модели в `models/`;
-  - запуск bridge-сервера модели;
-  - [scripts/bot_control_gui.py](D:/dis-bot/scripts/bot_control_gui.py).
-
-- VPS:
-  - прод-бот;
-  - `KGTD.env`;
-  - боевые SQLite-базы;
-  - ежедневный сбор сообщений;
-  - ежедневный безопасный `Markov`;
-  - веб-панель администратора;
-  - `systemd`-сервис.
-
-### Источник правды по данным
-
-- Главный источник сообщений: `messages.db` на VPS.
-- ПК не должен вести "свою отдельную правду" по сообщениям.
-- На ПК база должна регулярно подтягиваться с VPS.
-
-### Что делает bridge
-
-Bridge нужен только для тяжёлой GPT-модели.
-
-Схема:
-
-- модель физически лежит на ПК;
-- бот на VPS при необходимости обращается к API на ПК;
-- связь идёт через `Tailscale`;
-- если ПК выключен или bridge отключён, бот продолжает работать без тяжёлой GPT.
-
-## Безопасность
-
-### Что не должно попадать в git
-
-Нельзя коммитить:
-
-- `KGTD.env`
-- любые реальные токены и API-ключи
-- `datebase/*.db`
-- `models/`
-- приватные SSH-ключи
-- временные архивы деплоя
-- логи
-- локальные state-файлы центра управления
-
-### Что уже исключено
-
-Смотри [`.gitignore`](D:/dis-bot/.gitignore).
-
-Отдельно уже игнорируются:
-
-- `.control_center.local.json`
-- `models/`
-- `datebase/`
-- `KGTD.env`
-
-### Важные ограничения проекта
-
-- GPT-обучение на VPS запрещено по умолчанию.
-- Полная тяжёлая `/профилактика` на VPS запрещена по умолчанию.
-- Веб-панель нельзя открывать публично без `Tailscale` и токена.
-- Bridge нельзя считать публичным API.
+- Discord OAuth и одноразовый код входа из Discord;
+- единый профиль пользователя;
+- комнаты, сообщения и канонические личные DM;
+- DM доступны только двум участникам; админские права не раскрывают чужую переписку;
+- редактирование и удаление сообщений проверяют автора;
+- API статуса версионированных ML-артефактов;
+- CSRF/origin-проверки, CSP и безопасные cookie.
 
 ## Структура проекта
 
-### Основные файлы
-
-- [main_file.py](D:/dis-bot/main_file.py) — точка входа бота.
-- [config.py](D:/dis-bot/config.py) — чтение переменных окружения.
-- [README.md](D:/dis-bot/README.md) — эта документация.
-- [docs/PLATFORM_REVIEW.md](D:/dis-bot/docs/PLATFORM_REVIEW.md) — текущая карта ревью и решений по платформе.
-- [KGTD.env.example](D:/dis-bot/KGTD.env.example) — пример env-файла.
-
-### Основные папки
-
-- [fun_slesh](D:/dis-bot/fun_slesh) — slash-команды и логика модулей.
-  В том числе:
-  - `heroes_troll.py` — троллит игроков, которые запускают Heroes of Might and Magic в Discord activity;
-  - `sixty_seven.py` — кидает случайные Giphy-реакции на мем `67 / six seven`;
-  - `toxicity.py` — реакция на токсичные сообщения;
-  - `social_chat.py` — лёгкая разговорная болтовня бота в чате, неожиданные рофлы и мем-картинки;
-  - `parody_engine.py` — пародии, Markov, Persona и GPT.
-- [core](D:/dis-bot/core) — runtime policy, админ-панель и базовая логика.
-- [scheduled](D:/dis-bot/scheduled) — фоновые задачи.
-- [scripts](D:/dis-bot/scripts) — локальные/VPS служебные скрипты.
-- [deploy/systemd](D:/dis-bot/deploy/systemd) — шаблоны systemd.
-- [datebase](D:/dis-bot/datebase) — SQLite-базы.
-- [models](D:/dis-bot/models) — локальные модели и артефакты.
-
-## Переменные окружения
-
-Бот читает `KGTD.env`.
-
-Минимальный шаблон:
-
-```env
-tok=YOUR_DISCORD_BOT_TOKEN
-STEAM_API_KEY=YOUR_STEAM_API_KEY
-
-REMOTE_MODEL_API_URL=
-REMOTE_MODEL_API_TOKEN=
-
-BOT_SERVER_MODE=true
-ALLOW_GPT_TRAINING_ON_SERVER=false
-ALLOW_FULL_MAINTENANCE_ON_SERVER=false
-ALLOW_REMOTE_MODEL_INFERENCE=true
-
-ENABLE_DAILY_MARKOV_RETRAIN_ON_SERVER=true
-ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER=true
-DAILY_MARKOV_RETRAIN_HOUR=3
-DAILY_MARKOV_RETRAIN_MINUTE=15
-
-WEB_ADMIN_ENABLED=false
-WEB_ADMIN_HOST=127.0.0.1
-WEB_ADMIN_PORT=8080
-WEB_ADMIN_PUBLIC_URL=
-WEB_ADMIN_DISCORD_REDIRECT_URI=http://127.0.0.1:8080/auth/discord/callback
-WEB_ADMIN_CHANNEL_NAME=whitehouse
-WEB_ADMIN_CHANNEL_ID=0
-WEB_ADMIN_TOKEN=
-WEB_ADMIN_ALLOWED_IPS=
-WEB_ADMIN_TITLE=ViPik Bot Control
-```
-
-### Главные флаги
-
-- `BOT_SERVER_MODE=true` — включает серверный режим.
-- `ALLOW_GPT_TRAINING_ON_SERVER=false` — блокирует GPT-обучение на VPS.
-- `ALLOW_FULL_MAINTENANCE_ON_SERVER=false` — блокирует тяжёлую профилактику на VPS.
-- `ALLOW_REMOTE_MODEL_INFERENCE=true` — разрешает использовать bridge.
-- `ENABLE_DAILY_MARKOV_RETRAIN_ON_SERVER=true` — ежедневный `Markov`.
-- `ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER=true` — ежедневный добор сообщений.
-- `WEB_ADMIN_ENABLED=true` — включает веб-панель.
-- `WEB_ADMIN_PUBLIC_URL=` — адрес, который команда `/админ` отдаёт кнопкой в Discord; если пусто, используется `http://WEB_ADMIN_HOST:WEB_ADMIN_PORT`.
-- `WEB_ADMIN_DISCORD_REDIRECT_URI=` — Discord OAuth callback для админ-панели; должен быть добавлен в Discord Developer Portal.
-- `WEB_ADMIN_CHANNEL_NAME=whitehouse` — канал, где бот держит постоянную кнопку админ-панели.
-- `WEB_ADMIN_CHANNEL_ID=0` — точный ID канала для постоянной кнопки; если задан, важнее имени.
-- `WEB_ADMIN_TOKEN=` — аварийный fallback для API/header, обычный вход идет через Discord OAuth.
-- `WEB_ADMIN_ALLOWED_IPS=` — IP/CIDR allowlist для веб-панели.
-- Если `DISCORD_CLIENT_ID` пустой, админка использует application id запущенного бота; если `DISCORD_CLIENT_SECRET` пустой, вход работает через Discord token-flow без ручного секрета.
-
-## Что работает автоматически
-
-### На VPS
-
-- бот под `systemd`;
-- ежедневный добор новых сообщений;
-- ежедневный безопасный `Markov`;
-- фоновые Discord-задачи;
-- веб-панель;
-- использование bridge, если он включён.
-
-### На ПК
-
-- локальное GPT-обучение;
-- синхронизация `messages.db` с VPS;
-- включение/выключение bridge;
-- git workflow;
-- отправка лёгких артефактов на VPS.
-
-## GUI управления
-
-Главный локальный интерфейс:
-
-- [scripts/bot_control_gui.py](D:/dis-bot/scripts/bot_control_gui.py)
-
-Это основной однооконный интерфейс обслуживания проекта. Старый batch-центр больше не считается главным способом работы.
-
-### Что умеет GUI
-
-- вкладки `Обзор`, `Документация` и `Лог`;
-- одна главная кнопка `Включить GPT модели` / `Выключить GPT модели`;
-- одна главная кнопка `Скачать свежую DB и обучить GPT`;
-- одна главная кнопка `Обновить статусы`;
-- быстрые индикаторы `Bridge`, `VPS`, `Бот`, `Команды`, `База сегодня`, `Markov сегодня`, `Tailscale`, `GPT мост`;
-- `git status`, `git pull`, `commit + push`;
-- установка локальных зависимостей;
-- запуск бота локально;
-- отправка лёгких моделей и баз на VPS;
-- установка ежедневной sync-задачи;
-- установка бота на новый VPS;
-- открытие веб-панели;
-- окно настроек подключения отдельной кнопкой, а не отдельной вкладкой.
-
-### Сборка `.exe`
-
-- [scripts/build_bot_control_gui.ps1](D:/dis-bot/scripts/build_bot_control_gui.ps1)
-
-Готовый файл после сборки:
-
-- `dist_build_<timestamp>/ViPikBotControl.exe`
-
-Сборки не хранятся в git. Если нужен `.exe`, собери его локально этим скриптом.
-
-### Что делать обычно
-
-#### Если нужен локальный GPT-training
-
-1. В GUI нажать `Скачать свежую DB и обучить GPT`.
-2. Выбрать: для всех или для одного пользователя.
-3. Обучение пойдёт на ПК и его лог появится во вкладке `Лог`.
-
-#### Если нужен bridge
-
-1. В GUI нажать `Включить GPT модели`.
-2. Если больше не нужен — нажать `Выключить GPT модели`.
-
-#### Если нужны последние правки
-
-1. В GUI нажать `Git pull`
-
-## Локальное обучение
-
-### Что реально происходит при GPT-training
-
-- обучение идёт на ПК, не на VPS;
-- используется локальная копия `messages.db`;
-- обученная модель остаётся на ПК;
-- если bridge включён, VPS потом использует её автоматически.
-
-### Какие скрипты за это отвечают
-
-- [scripts/train_models_menu.ps1](D:/dis-bot/scripts/train_models_menu.ps1)
-- [scripts/train_local.ps1](D:/dis-bot/scripts/train_local.ps1)
-- [scripts/train_local.py](D:/dis-bot/scripts/train_local.py)
-
-### Режимы обучения
-
-- `Только GPT`
-- `Только Markov и Persona`
-- `Всё вместе`
-
-## Bridge тяжёлой модели
-
-### Что нужно для работы
-
-- ПК включён;
-- `Tailscale` включён;
-- bridge поднят локально;
-- в боте на VPS включено использование удалённой модели.
-
-### Файлы bridge
-
-- [scripts/model_bridge_server.py](D:/dis-bot/scripts/model_bridge_server.py)
-- [scripts/start_model_bridge.ps1](D:/dis-bot/scripts/start_model_bridge.ps1)
-- [scripts/stop_model_bridge.ps1](D:/dis-bot/scripts/stop_model_bridge.ps1)
-- [scripts/enable_remote_models.ps1](D:/dis-bot/scripts/enable_remote_models.ps1)
-- [scripts/disable_remote_models.ps1](D:/dis-bot/scripts/disable_remote_models.ps1)
-
-### Важный принцип
-
-Bridge не переносит модель на VPS. Он только даёт VPS возможность спросить модель на твоём ПК.
-
-## Веб-панель
-
-### Для чего она нужна
-
-Веб-панель — это не замена локальному GUI. Это безопасная VPS-панель для:
-
-- просмотра статуса;
-- просмотра защитной политики;
-- включения/выключения использования удалённой тяжёлой модели;
-- первого слоя feature settings: включение фич, output/allow/exclude-каналы и JSON payload;
-- сохранения настроек с перезапуском бота через systemd; кнопка появляется только после изменений, которым нужен чистый старт;
-- общего редактирования пользовательских данных: например ДР можно заполнить в админке или через `/др`, запись будет одна и та же;
-- быстрого контроля прод-режима.
-
-### Что нельзя переносить в веб-панель
-
-Нельзя безопасно перенести туда:
-
-- локальное обучение GPT;
-- sync `messages.db` на ПК;
-- локальный `git pull/commit/push`;
-- локальный запуск bridge;
-- всё, что должно выполняться именно на твоём ПК.
-
-Следующие настройки постепенно должны переехать именно в эту админскую поверхность: каналы автопостов, WWM/Steam/voice roles, токсичность, болтовня, фильтры, экономика, роли и maintenance.
-
-### Как включать безопасно
-
-Для `Tailscale-only` режима:
-
-```env
-WEB_ADMIN_ENABLED=true
-WEB_ADMIN_HOST=100.90.24.117
-WEB_ADMIN_PORT=8080
-WEB_ADMIN_PUBLIC_URL=http://100.90.24.117:8080
-WEB_ADMIN_DISCORD_REDIRECT_URI=http://100.90.24.117:8080/auth/discord/callback
-WEB_ADMIN_CHANNEL_NAME=whitehouse
-WEB_ADMIN_CHANNEL_ID=0
-WEB_ADMIN_TOKEN=
-WEB_ADMIN_ALLOWED_IPS=
-```
-
-Или строже:
-
-```env
-WEB_ADMIN_ALLOWED_IPS=100.69.97.40/32
-```
-
-### Как открывать
-
-Открывать из устройства в твоём `tailnet`:
-
 ```text
-http://100.90.24.117:8080/
+core/                   канонические stores, сервисы, runtime policy, админка
+fun_slesh/              Discord cogs и slash-команды
+scheduled/              фоновые задачи
+web_app/                отдельный web/app сервис
+scripts/                deploy, backup, локальное обучение и sync артефактов
+datebase/               runtime SQLite (не источник кода)
+models/                 лёгкие артефакты и manifest.json
+tests/                  unit/integration tests
+deploy/systemd/          шаблоны systemd
 ```
 
-Если включён посторонний браузерный VPN, панель может не открываться. Для неё нужен `Tailscale`, а не сторонний VPN-прокси.
+Ключевые границы пародий:
 
-## Git workflow
+- `core/parody_message_store.py` — корпус и checkpoint-данные;
+- `core/parody_feedback_store.py` — оценки фраз;
+- `core/parody_model_service.py` — обучение и inference Markov;
+- `fun_slesh/parody_engine.py` — только Discord UI/orchestration;
+- `core/ml_artifacts.py` — SHA256, версия и переносимость артефактов.
 
-### Базовые команды
+## ML/AI вне пародий
+
+### Токсичность
+
+`core/toxicity_model_service.py` реализует лёгкий Multinomial Naive Bayes по hashed character n-grams. Модель:
+
+- не требует `torch`, `transformers` или внешнего API;
+- загружается лениво из `models/toxicity_nb.json`;
+- сравнивается с правилами, но `effective_level` остаётся уровнем правил;
+- пишет shadow-предсказания в `toxicity_ml_shadow`;
+- получает проверенную разметку из `toxicity_ml_feedback` через админ-панель.
+
+Обучение:
 
 ```powershell
-git status
-git add .
-git commit -m "Сообщение"
-git push origin main
+python scripts/train_toxicity_model.py --max-clean 2000
 ```
 
-### Перед push проверять
+Пока проверенных меток мало, модель остаётся только наблюдателем. Переход к предупреждениям или автоматике допустим после отдельной оценки precision/recall на ручной разметке.
 
-- нет ли `KGTD.env`
-- нет ли `.db`
-- нет ли `models/`
-- нет ли приватных ключей
-- нет ли временных архивов/мусора
+### Следующие бесплатные ML-пайплайны
 
-### Что делать перед работой после чужих изменений
+1. Активность: прогноз привычного времени игр и риск пропуска — сначала как подсказки.
+2. Экономика: поиск аномалий начислений и подозрительных циклов, без автоматического списания.
+3. Игры: рекомендации по совместным сессиям на основе пересечения истории и расписания.
+4. Качество данных: дубликаты профилей, устаревшие связи и аномальные записи.
+5. Итоги: ранжирование событий дня и персонализация блоков без генеративной GPT-модели.
 
-Используй:
+## Локальное Markov-обучение
 
-- кнопку `Git pull` в GUI
-
-или:
+Сначала синхронизировать свежий `messages.db`, затем обучить:
 
 ```powershell
-git pull origin main
+powershell -ExecutionPolicy Bypass -File scripts/sync_messages_from_vps.ps1
+powershell -ExecutionPolicy Bypass -File scripts/train_local.ps1 -All
 ```
 
-## VPS с нуля
+Для одного пользователя:
 
-### Требуется
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/train_local.ps1 -UserId 123456789012345678
+```
 
-- Linux VPS
-- SSH-доступ
-- локальный ключ SSH
-- этот репозиторий на ПК
+Синхронизация лёгких артефактов на VPS:
 
-### Основной путь
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/sync_training_to_vps.ps1
+```
 
-Через GUI:
+Скрипт сначала обновляет `models/manifest.json`, прекращает работу при пустом наборе артефактов и не отправляет каталоги тяжёлых моделей.
 
-- кнопка `Поставить бота на новый VPS`
+## Конфигурация
 
-Вручную:
+Скопируй `KGTD.env.example` в `KGTD.env` и заполни секреты. Минимально нужен Discord bot token. Основные группы:
 
-- [scripts/install_bot_on_vps.ps1](D:/dis-bot/scripts/install_bot_on_vps.ps1)
+- Discord bot/OAuth;
+- web/app session и bot API;
+- Steam/Riot API при использовании интеграций;
+- server safety toggles;
+- приватная web-admin панель;
+- LiveKit, если включается self-hosted voice.
 
-### Что делает установщик
+`KGTD.env` нельзя коммитить или включать в deploy bundle.
 
-- ставит Python и пакеты;
-- создаёт пользователя;
-- кладёт код;
-- создаёт `.venv`;
-- ставит зависимости;
-- создаёт `systemd`;
-- включает сервис;
-- создаёт пустой `KGTD.env`.
+## Проверка
 
-## Деплой и синхронизация
+```powershell
+python -m unittest tests.test_core_foundation
+python -m py_compile main_file.py core/admin_panel.py web_app/server.py fun_slesh/parody_engine.py fun_slesh/toxicity.py
+git diff --check
+```
 
-### Что деплоится через git
+## Production
 
-- код
-- скрипты
-- документация
-- runtime policy
+Рабочий каталог VPS: `/opt/dis-bot`.
 
-### Что не деплоится через git
+Systemd units:
 
-- тяжёлые модели
-- боевые базы
-- реальные секреты
+- `vipik-discord-bot.service`;
+- `vipik-web-app.service`.
 
-### Лёгкие артефакты на VPS
+После deploy необходимо проверить:
 
-Для отправки лёгких моделей и баз:
+```bash
+systemctl is-active vipik-discord-bot vipik-web-app
+journalctl -u vipik-discord-bot --no-pager -n 100
+journalctl -u vipik-web-app --no-pager -n 100
+```
 
-- [scripts/sync_training_to_vps.ps1](D:/dis-bot/scripts/sync_training_to_vps.ps1)
-
-По умолчанию GPT туда не уходит.
-
-## Полезные файлы
-
-- [scripts/sync_messages_from_vps.ps1](D:/dis-bot/scripts/sync_messages_from_vps.ps1)
-- [scripts/install_local_message_sync_task.ps1](D:/dis-bot/scripts/install_local_message_sync_task.ps1)
-- [scripts/install_bot_on_vps.ps1](D:/dis-bot/scripts/install_bot_on_vps.ps1)
-- [scripts/sync_training_to_vps.ps1](D:/dis-bot/scripts/sync_training_to_vps.ps1)
-- [scripts/train_local.py](D:/dis-bot/scripts/train_local.py)
-- [scripts/train_models_menu.ps1](D:/dis-bot/scripts/train_models_menu.ps1)
-- [core/runtime_policy.py](D:/dis-bot/core/runtime_policy.py)
-- [core/admin_panel.py](D:/dis-bot/core/admin_panel.py)
-- [deploy/systemd/vipik-discord-bot.service.template](D:/dis-bot/deploy/systemd/vipik-discord-bot.service.template)
-
-## Известные ограничения
-
-- голосовые audio-функции Discord требуют `PyNaCl`;
-- тяжёлые GPT-модели не рассчитаны на хранение и обучение на текущем VPS;
-- bridge не заменяет полноценный локальный training;
-- источник правды по сообщениям должен быть один, и сейчас это VPS;
-- веб-панель не должна становиться публичной интернет-панелью.
-
-## Что делать, если что-то сломалось
-
-### Если не работает локальный training
-
-1. обновить проект через `Git pull`
-2. проверить `.venv`
-3. проверить `messages.db`
-4. снова нажать `Скачать свежую DB и обучить GPT`
-
-### Если не работает bridge
-
-1. убедиться, что `Tailscale` включён;
-2. убедиться, что ПК включён;
-3. в GUI:
-   - `Включить GPT модели` чтобы поднять bridge и связать VPS;
-   - `Выключить GPT модели` чтобы разорвать связь и погасить bridge.
-
-### Если потерян VPS
-
-1. поднять новый VPS;
-2. в GUI нажать `Поставить бота на новый VPS`;
-3. заполнить `KGTD.env`;
-4. восстановить лёгкие артефакты;
-5. включить bridge, если нужен GPT-режим.
+Приватный web/app доступен через Tailscale. Не открывай админку и app в публичный интернет без отдельного reverse proxy, TLS и пересмотра модели доступа.

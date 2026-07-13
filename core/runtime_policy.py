@@ -13,9 +13,7 @@ HOSTNAME = socket.gethostname()
 IS_WINDOWS = os.name == "nt"
 IS_SERVER_RUNTIME = _env_flag("BOT_SERVER_MODE", default=not IS_WINDOWS)
 
-ALLOW_GPT_TRAINING_ON_SERVER = _env_flag("ALLOW_GPT_TRAINING_ON_SERVER", default=False)
 ALLOW_FULL_MAINTENANCE_ON_SERVER = _env_flag("ALLOW_FULL_MAINTENANCE_ON_SERVER", default=False)
-ALLOW_REMOTE_MODEL_INFERENCE = _env_flag("ALLOW_REMOTE_MODEL_INFERENCE", default=True)
 ENABLE_DAILY_MARKOV_RETRAIN_ON_SERVER = _env_flag("ENABLE_DAILY_MARKOV_RETRAIN_ON_SERVER", default=False)
 ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER = _env_flag("ENABLE_DAILY_MARKOV_COLLECTION_ON_SERVER", default=True)
 ENABLE_WWM_KB_REFRESH_ON_SERVER = _env_flag("ENABLE_WWM_KB_REFRESH_ON_SERVER", default=False)
@@ -33,25 +31,8 @@ WEB_ADMIN_CHANNEL_NAME = os.getenv("WEB_ADMIN_CHANNEL_NAME", "whitehouse").strip
 WEB_ADMIN_CHANNEL_ID = int(os.getenv("WEB_ADMIN_CHANNEL_ID", "0") or "0")
 WEB_ADMIN_DISCORD_REDIRECT_URI = os.getenv("WEB_ADMIN_DISCORD_REDIRECT_URI", "").strip()
 
-_runtime_state = {
-    "remote_model_inference": ALLOW_REMOTE_MODEL_INFERENCE,
-}
-
-
-def is_gpt_training_allowed() -> bool:
-    return (not IS_SERVER_RUNTIME) or ALLOW_GPT_TRAINING_ON_SERVER
-
-
 def is_full_maintenance_allowed() -> bool:
     return (not IS_SERVER_RUNTIME) or ALLOW_FULL_MAINTENANCE_ON_SERVER
-
-
-def is_remote_model_inference_enabled() -> bool:
-    return bool(_runtime_state["remote_model_inference"])
-
-
-def set_remote_model_inference_enabled(enabled: bool) -> None:
-    _runtime_state["remote_model_inference"] = bool(enabled)
 
 
 def get_web_admin_url() -> str:
@@ -82,9 +63,7 @@ def policy_summary() -> dict:
     return {
         "hostname": HOSTNAME,
         "is_server_runtime": IS_SERVER_RUNTIME,
-        "gpt_training_allowed": is_gpt_training_allowed(),
         "full_maintenance_allowed": is_full_maintenance_allowed(),
-        "remote_model_inference_enabled": is_remote_model_inference_enabled(),
         "daily_markov_retrain_enabled": is_daily_markov_retrain_enabled(),
         "daily_markov_collection_enabled": is_daily_markov_collection_enabled(),
         "daily_markov_retrain_hour": DAILY_MARKOV_RETRAIN_HOUR,

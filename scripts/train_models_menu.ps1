@@ -31,17 +31,9 @@ if ($syncChoice -eq "1") {
 }
 
 Write-Host ""
-$trainKind = Ask-Choice "Что обучать? 1=Только GPT, 2=Только Markov и Persona, 3=Всё вместе" @("1", "2", "3")
-$modes = switch ($trainKind) {
-    "1" { "gpt" }
-    "2" { "markovify" }
-    "3" { "all" }
-}
-
-Write-Host ""
 $scope = Ask-Choice "Для кого обучать? 1=Для всех пользователей, 2=Для одного пользователя" @("1", "2")
 if ($scope -eq "1") {
-    powershell -ExecutionPolicy Bypass -File ".\scripts\train_local.ps1" -All -Modes $modes
+    powershell -ExecutionPolicy Bypass -File ".\scripts\train_local.ps1" -All
     exit $LASTEXITCODE
 }
 
@@ -50,5 +42,5 @@ if ([string]::IsNullOrWhiteSpace($userId)) {
     throw "Discord user id не может быть пустым."
 }
 
-powershell -ExecutionPolicy Bypass -File ".\scripts\train_local.ps1" -UserId $userId.Trim() -Modes $modes
+powershell -ExecutionPolicy Bypass -File ".\scripts\train_local.ps1" -UserId $userId.Trim()
 exit $LASTEXITCODE

@@ -151,3 +151,15 @@ def remove_artifacts(*, pipeline: str, user_id: int | None, kinds: set[str] | No
             manifest["artifacts"] = kept
             _write_unlocked(manifest)
         return removed
+
+
+def remove_pipeline_artifacts(pipeline: str) -> int:
+    """Remove every manifest entry for a retired pipeline without deleting model files."""
+    with _LOCK:
+        manifest = _read_unlocked()
+        kept = [item for item in manifest["artifacts"] if item.get("pipeline") != pipeline]
+        removed = len(manifest["artifacts"]) - len(kept)
+        if removed:
+            manifest["artifacts"] = kept
+            _write_unlocked(manifest)
+        return removed

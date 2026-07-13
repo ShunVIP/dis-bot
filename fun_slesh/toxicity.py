@@ -2,8 +2,8 @@
 # fun_slesh/toxicity.py
 """
 Детектор токсичности + троллинг:
-  - on_message: анализирует каждое сообщение через быстрый эвристический фильтр
-  - При обнаружении: публично позорит, пародирует через Markov/GPT, ведёт счётчик
+  - on_message: анализирует сообщения правилами и теневой ML-моделью
+  - При обнаружении правилами: публично реагирует, пародирует через Markov, ведёт счётчик
   - Счётчик сбрасывается раз в неделю
 
 Команды:
@@ -13,7 +13,7 @@
   /токсичность_канал — (Админ) ограничить работу определёнными каналами
 """
 
-import sqlite3, random, re, asyncio
+import sqlite3, random
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -21,6 +21,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from core.paths import SOCIAL_DB
+from core.toxicity_model_service import detect_rule_level, detect_toxicity
 from core.settings_store import (
     clear_feature_channel,
     clear_feature_channels,
@@ -36,40 +37,6 @@ DB_PATH  = SOCIAL_DB
 UTC      = timezone.utc
 MSK      = ZoneInfo("Europe/Moscow")
 FEATURE_TOXICITY = "toxicity"
-
-# ── Токсичные паттерны (эвристика, без ML) ────────────────────────────────────
-# Три уровня: мягкий (1), средний (2), жёсткий (3)
-TOXIC_PATTERNS = {
-    1: [  # мягкий — грубость, наезды
-        r'\bтупой\b', r'\bидиот\b', r'\bдебил\b', r'\bкретин\b',
-        r'\bлох\b', r'\bнуб\b', r'\bноуб\b', r'\bзалупа\b',
-        r'\bурод\b', r'\bуродли\w+', r'\bмудак\b', r'\bпридурок\b',
-        r'\bшлюх\w*\b', r'\bпошёл\s+нах\w*', r'\bиди\s+нах\w*',
-        r'\bнуб\w*\b', r'\bказёл\b', r'\bкозёл\b',
-        r'\bбля\w*\b', r'\bговно\b', r'\bжопа\b', r'\bхуй\b',
-        r'\bбнс\b', r'\bbns\b', r'\bкодзима\b', r'\bгений\b',
-    ],
-    2: [  # средний — оскорбления
-        r'\bеба\w+\b', r'\bёба\w+\b', r'\bеблан\b', r'\bёблан\b',
-        r'\bпиздёж\b', r'\bпиздёт\b', r'\bпиздун\b',
-        r'\bзаткнись\b', r'\bзаткни\s+пасть',
-        r'\bты\s+отстой\b', r'\bты\s+дно\b',
-        r'\bпроиграл\s+в\s+жизни', r'\bнеудачник\b',
-        r'\bсосёшь\b', r'\bсоси\b',
-        r'\bебну\w*\b', r'\bёбну\w*\b',
-    ],
-    3: [  # жёсткий — прямые оскорбления/угрозы
-        r'\bпошёл\s+нахуй\b', r'\bиди\s+нахуй\b',
-        r'\bпиздец\s+тебе\b', r'\bубью\b', r'\bубить\s+тебя',
-        r'\bсдохни\b', r'\bсдохнешь\b',
-    ],
-}
-
-# Компилируем
-_COMPILED: dict[int, list] = {
-    lvl: [re.compile(p, re.IGNORECASE | re.UNICODE) for p in patterns]
-    for lvl, patterns in TOXIC_PATTERNS.items()
-}
 
 # Шаблоны ответов по уровням (публичный позор)
 SHAME_TEMPLATES = {
@@ -110,6 +77,27 @@ def _ensure_tables():
                 week      TEXT    NOT NULL,
                 count     INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_id, guild_id, week)
+            );
+
+            CREATE TABLE IF NOT EXISTS toxicity_ml_shadow (
+                message_id    INTEGER PRIMARY KEY,
+                guild_id      INTEGER NOT NULL,
+                channel_id    INTEGER NOT NULL,
+                user_id       INTEGER NOT NULL,
+                rule_level    INTEGER NOT NULL,
+                ml_level      INTEGER NOT NULL,
+                ml_confidence REAL NOT NULL,
+                model_version TEXT NOT NULL DEFAULT '',
+                msg_snippet   TEXT NOT NULL DEFAULT '',
+                logged_at     TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS toxicity_ml_feedback (
+                message_id      INTEGER PRIMARY KEY,
+                msg_snippet     TEXT NOT NULL,
+                corrected_level INTEGER NOT NULL CHECK(corrected_level BETWEEN 0 AND 3),
+                reviewer_id     INTEGER NOT NULL,
+                reviewed_at     TEXT NOT NULL
             );
 
         """)
@@ -164,11 +152,33 @@ def _clear_toxicity_excluded_channel(guild_id: int, channel_id: int) -> int:
 
 def _detect_level(text: str) -> int:
     """Возвращает уровень токсичности (0 = нет)."""
-    for lvl in (3, 2, 1):
-        for pat in _COMPILED[lvl]:
-            if pat.search(text):
-                return lvl
-    return 0
+    return detect_rule_level(text)
+
+
+def _save_shadow_prediction(message: discord.Message, prediction: dict):
+    if not prediction.get("model_version"):
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO toxicity_ml_shadow(
+                message_id,guild_id,channel_id,user_id,rule_level,ml_level,
+                ml_confidence,model_version,msg_snippet,logged_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                message.id,
+                message.guild.id,
+                message.channel.id,
+                message.author.id,
+                prediction["rule_level"],
+                prediction["ml_level"],
+                prediction["ml_confidence"],
+                prediction["model_version"],
+                message.content[:160],
+                datetime.now(UTC).isoformat(),
+            ),
+        )
 
 
 def _current_week() -> str:
@@ -210,23 +220,6 @@ def _markov_troll(user_id: int) -> str | None:
             sentence = generate_phrase(user_id, "мем")
             if sentence:
                 return sentence
-    except Exception:
-        pass
-    return None
-
-
-async def _gpt_troll(user_id: int, toxic_msg: str) -> str | None:
-    """Генерирует ответ через GPT в стиле пользователя."""
-    try:
-        from fun_slesh.parody_persona import load_persona
-        from fun_slesh.parody_gpt import generate_gpt_phrase
-        profile = load_persona(user_id)
-        if not profile:
-            return None
-        phrase = await asyncio.get_event_loop().run_in_executor(
-            None, generate_gpt_phrase, profile, toxic_msg
-        )
-        return phrase
     except Exception:
         pass
     return None
@@ -299,7 +292,9 @@ class Toxicity(commands.Cog):
             return
 
         # Детектируем
-        level = _detect_level(message.content)
+        prediction = detect_toxicity(message.content)
+        _save_shadow_prediction(message, prediction)
+        level = prediction["effective_level"]
         if level < threshold:
             return
 
@@ -323,12 +318,6 @@ class Toxicity(commands.Cog):
         markov = _markov_troll(user_id)
         if markov:
             parody = markov
-        elif level >= 2:
-            # GPT только для среднего+ уровня
-            gpt = await _gpt_troll(user_id, message.content)
-            if gpt:
-                parody = gpt
-
         response = _build_troll_response(
             mention=message.author.mention,
             count=count,

@@ -3,6 +3,3 @@
 #   python -m pip install -r requirements-ml.txt
 
 -r requirements.txt
-transformers
-datasets
-torch

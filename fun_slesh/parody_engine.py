@@ -6,11 +6,8 @@ ML-движок пародии.
 /пародия  — все модели в одной команде (параметр "модель"):
     🎲 Мем      — markovify state_size=2
     🧠 Разум    — markovify state_size=3 + фильтр осознанности
-    📊 Автор    — TF-IDF шаблоны
-    🤖 Нейро    — ruGPT-3 fine-tune
-
 /батл, /коллаж, /эпоха, /тема, /мем_фраза — спецрежимы
-/дообучить   — markovify + persona + GPT (админ)
+/дообучить   — обучение Markov-моделей (админ)
 /профилактика — сброс → сбор → дообучить (всё сразу, админ)
 /список_пользователей, /модели_статус
 """
@@ -20,8 +17,7 @@ import sys
 import asyncio
 import random
 import ctypes
-import importlib
-import importlib.util
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -51,6 +47,7 @@ from discord import app_commands
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fun_slesh.parody_channel_settings import filter_parody_channels
+from fun_slesh.parody_filters import apply_word_filters, get_blocked_words, get_downranked_words
 from core.runtime_policy import (
     DAILY_MARKOV_RETRAIN_HOUR,
     DAILY_MARKOV_RETRAIN_MINUTE,
@@ -58,7 +55,6 @@ from core.runtime_policy import (
     is_daily_markov_collection_enabled,
     is_daily_markov_retrain_enabled,
     is_full_maintenance_allowed,
-    is_gpt_training_allowed,
 )
 from core.parody_feedback_store import (
     ensure_feedback_tables as _ensure_ratings_db,
@@ -93,78 +89,15 @@ from core.parody_model_service import (
     train_user_all_qualities,
 )
 
-try:
-    from fun_slesh.parody_engine_wakelock import prevent_sleep, allow_sleep
-    WAKELOCK_OK = True
-except Exception:
-    WAKELOCK_OK = False
-    def prevent_sleep(keep_display=False): pass
-    def allow_sleep(): pass
-
 from fun_slesh.parody_collector import (
     get_user_messages, get_user_stats, get_all_user_ids,
     collect_channel, _ensure_db as ensure_collector_db,
 )
 
-# Persona — без GPU
-try:
-    from fun_slesh.parody_persona import (
-        _ensure_persona_db, build_persona, save_persona,
-        load_persona, persona_exists, build_all_personas,
-    )
-    PERSONA_OK = True
-except Exception as e:
-    PERSONA_OK = False
-    print(f"[parody] ⚠️  Persona: {e}")
-
-# GPT backend is intentionally lazy: importing torch/transformers added ~25s to
-# every local bot start even when nobody used a neural parody command.
-GPT_OK = all(importlib.util.find_spec(name) is not None for name in ("torch", "transformers", "datasets"))
-TRANSFORMERS_OK = GPT_OK
-_GPT_BACKEND = None
-
-
-def _gpt_backend():
-    global _GPT_BACKEND, GPT_OK, TRANSFORMERS_OK
-    if _GPT_BACKEND is None and GPT_OK:
-        try:
-            _GPT_BACKEND = importlib.import_module("fun_slesh.parody_gpt")
-            GPT_OK = bool(getattr(_GPT_BACKEND, "TRANSFORMERS_OK", False))
-            TRANSFORMERS_OK = GPT_OK
-        except Exception as exc:
-            GPT_OK = False
-            TRANSFORMERS_OK = False
-            print(f"[parody] ⚠️  GPT: {exc}")
-    return _GPT_BACKEND
-
-
-def gpt_model_exists(user_id: int) -> bool:
-    backend = _gpt_backend()
-    return bool(backend and backend.gpt_model_exists(user_id))
-
-
-def generate_author_phrase(user_id: int):
-    backend = _gpt_backend()
-    return backend.generate_author_phrase(user_id) if backend else None
-
-
-def generate_neuro_phrase(user_id: int):
-    backend = _gpt_backend()
-    return backend.generate_neuro_phrase(user_id) if backend else None
-
-
-async def fine_tune_user(user_id: int, messages: list[str], epochs: int = 3) -> bool:
-    backend = _gpt_backend()
-    return bool(backend and await backend.fine_tune_user(user_id, messages, epochs=epochs))
-
 MSK = ZoneInfo("Europe/Moscow")
 UTC = timezone.utc
 
 _MK_EXECUTOR = ThreadPoolExecutor(max_workers=1)
-
-
-def _gpt_requested(mode: str) -> bool:
-    return mode in ("все", "gpt")
 
 
 def _server_training_guard_embed(title: str, description: str) -> discord.Embed:
@@ -181,11 +114,7 @@ KNOWN_DUPLICATES: dict[int, list[int]] = {
 }
 
 def model_exists(user_id: int, quality: str = DEFAULT_MODEL) -> bool:
-    if quality == "автор":
-        return PERSONA_OK and persona_exists(user_id)
-    if quality == "нейро":
-        return GPT_OK and gpt_model_exists(user_id)
-    return markov_model_exists(user_id, quality)
+    return quality in QUALITY_LEVELS and markov_model_exists(user_id, quality)
 
 # ─── Объединение дублей ───────────────────────────────────────────────────────
 def _merge_accounts(primary_id: int, secondary_id: int) -> int:
@@ -278,10 +207,10 @@ class RatingView(discord.ui.View):
 # ─── Вспомогательная: полное дообучение всех моделей ─────────────────────────
 async def _do_full_retrain(guild: discord.Guild, collect: bool = False) -> dict:
     """
-    Запускает полный цикл: [сбор] → markovify → persona → GPT.
+    Запускает полный цикл: [сбор] → Markov.
     Возвращает статистику.
     """
-    stats = {"collected": 0, "markovify": 0, "persona": 0, "gpt": 0}
+    stats = {"collected": 0, "markovify": 0}
 
     collect_allowed = collect and (not IS_SERVER_RUNTIME or is_full_maintenance_allowed())
 
@@ -297,25 +226,6 @@ async def _do_full_retrain(guild: discord.Guild, collect: bool = False) -> dict:
     # 2. Markovify в executor
     mk_results = await train_all_users_async(min_messages=50)
     stats["markovify"] = len(mk_results)
-
-    # 3. Persona
-    if PERSONA_OK:
-        def _build_personas():
-            return build_all_personas(min_messages=50)
-        loop = asyncio.get_event_loop()
-        personas = await loop.run_in_executor(_MK_EXECUTOR, _build_personas)
-        stats["persona"] = len(personas)
-
-    # 4. GPT
-    if GPT_OK and is_gpt_training_allowed():
-        def _collect_gpt():
-            return [(uid, get_user_messages(uid)) for uid in get_all_user_ids()
-                    if len(get_user_messages(uid)) >= 200]
-        loop = asyncio.get_event_loop()
-        gpt_pairs = await loop.run_in_executor(_MK_EXECUTOR, _collect_gpt)
-        for uid, msgs in gpt_pairs:
-            if await fine_tune_user(uid, msgs, epochs=3):
-                stats["gpt"] += 1
 
     return stats
 
@@ -382,8 +292,6 @@ class ParodyEngine(commands.Cog):
         self.bot = bot
         ensure_collector_db()
         _ensure_ratings_db()
-        if PERSONA_OK:
-            _ensure_persona_db()
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         if not MARKOV_OK:
             print("[parody] ⚠️  markovify не установлен!")
@@ -404,7 +312,7 @@ class ParodyEngine(commands.Cog):
         for guild in self.bot.guilds:
             stats = await _do_full_retrain(guild, collect=not IS_SERVER_RUNTIME or is_full_maintenance_allowed())
             print(f"[parody] {guild.name}: +{stats['collected']} сообщ | "
-                  f"mk:{stats['markovify']} persona:{stats['persona']} gpt:{stats['gpt']}")
+                  f"markov:{stats['markovify']}")
         print("[parody] ✅ Готово")
 
     async def _daily_safe_markov_retrain(self):
@@ -427,8 +335,6 @@ class ParodyEngine(commands.Cog):
     @app_commands.choices(модель=[
         app_commands.Choice(name="🎲 Мем — абсурдный рандом",       value="мем"),
         app_commands.Choice(name="🧠 Разум — максимум осознанности", value="разум"),
-        app_commands.Choice(name="📊 Автор — TF-IDF стиль",          value="автор"),
-        app_commands.Choice(name="🤖 Нейрослоп — ruGPT fine-tune",   value="нейро"),
     ])
     async def пародия(self, interaction: discord.Interaction,
                       пользователь: discord.Member | None = None,
@@ -458,21 +364,6 @@ class ParodyEngine(commands.Cog):
         except Exception:
             pass
 
-        # Для автор/нейро проверяем ПОСЛЕ defer
-        if модель == "автор" and not PERSONA_OK:
-            await interaction.followup.send("❌ Persona недоступна.", ephemeral=True)
-            return
-        if модель == "нейро":
-            if not GPT_OK:
-                await interaction.followup.send("❌ ruGPT не установлен.", ephemeral=True)
-                return
-            gpt_exists = await asyncio.to_thread(gpt_model_exists, target_id)
-            if not gpt_exists:
-                await interaction.followup.send(
-                    f"😕 Нейро-модель для **{display_name}** не обучена.\n"
-                    f"Запусти `/дообучить` сначала.", ephemeral=True)
-                return
-
         # Для markovify проверяем ПОСЛЕ defer
         if модель in QUALITY_LEVELS and not await asyncio.to_thread(model_exists, target_id, модель):
             msgs = await asyncio.to_thread(get_user_messages, target_id)
@@ -484,29 +375,15 @@ class ParodyEngine(commands.Cog):
         # Генерация
         phrase, color, icon, footer = None, discord.Color.purple(), "💬", ""
 
-        if модель == "автор":
-            if not await asyncio.to_thread(persona_exists, target_id):
-                msgs = await asyncio.to_thread(get_user_messages, target_id)
-                profile = await asyncio.to_thread(build_persona, target_id, msgs)
-                username = await asyncio.to_thread(lambda: get_user_stats(target_id).get("username", str(target_id)))
-                await asyncio.to_thread(save_persona, target_id, username, profile, len(msgs))
-            phrase = await asyncio.to_thread(generate_author_phrase, target_id)
-            color, icon, footer = discord.Color.teal(), "📊", "Автор · TF-IDF шаблоны"
-
-        elif модель == "нейро":
-            phrase = await asyncio.to_thread(generate_neuro_phrase, target_id)
-            color, icon, footer = discord.Color.brand_red(), "🤖", "НЕЙРОслоп · ruGPT fine-tune"
-
-        else:
-            if not await asyncio.to_thread(model_exists, target_id, модель):
-                msgs = await asyncio.to_thread(get_user_messages, target_id)
-                trained = await asyncio.to_thread(train_user, target_id, msgs, модель)
-                if not trained:
-                    await interaction.followup.send("❌ Не удалось обучить модель.")
-                    return
-            phrase = await asyncio.to_thread(generate_phrase, target_id, модель)
-            q = QUALITY_LEVELS[модель]
-            color, icon, footer = discord.Color.purple(), "💬", f"{q['emoji']} {модель.capitalize()} · {q['desc']}"
+        if not await asyncio.to_thread(model_exists, target_id, модель):
+            msgs = await asyncio.to_thread(get_user_messages, target_id)
+            trained = await asyncio.to_thread(train_user, target_id, msgs, модель)
+            if not trained:
+                await interaction.followup.send("❌ Не удалось обучить модель.")
+                return
+        phrase = await asyncio.to_thread(generate_phrase, target_id, модель)
+        q = QUALITY_LEVELS[модель]
+        color, icon, footer = discord.Color.purple(), "💬", f"{q['emoji']} {модель.capitalize()} · {q['desc']}"
 
         if not phrase:
             await interaction.followup.send("🤔 Не удалось сгенерировать. Попробуй ещё раз.")
@@ -535,8 +412,6 @@ class ParodyEngine(commands.Cog):
     @app_commands.choices(модель=[
         app_commands.Choice(name="🎲 Мем",                    value="мем"),
         app_commands.Choice(name="🧠 Разум",                  value="разум"),
-        app_commands.Choice(name="📊 Автор — TF-IDF стиль",   value="автор"),
-        app_commands.Choice(name="🤖 Нейрослоп — ruGPT",      value="нейро"),
     ])
     async def батл(self, interaction: discord.Interaction,
                    пользователь1: discord.Member | None = None,
@@ -578,11 +453,7 @@ class ParodyEngine(commands.Cog):
         context_word = None
         for i in range(7):
             uid, name = (id1, name1) if i % 2 == 0 else (id2, name2)
-            if модель in ("автор", "нейро"):
-                from fun_slesh.parody_gpt import generate_author_phrase, generate_neuro_phrase, GPT_OK, gpt_model_exists
-                phrase = generate_author_phrase(uid) if модель == "автор" else                          ((generate_neuro_phrase(uid) if GPT_OK and gpt_model_exists(uid) else None) or generate_phrase(uid, "разум"))
-            else:
-                phrase = generate_phrase(uid, модель, context_word=context_word) or generate_phrase(uid, модель)
+            phrase = generate_phrase(uid, модель, context_word=context_word) or generate_phrase(uid, модель)
             phrase = _strip_roles(phrase or "...")
             words = [w for w in phrase.split() if len(w) > 3]
             context_word = random.choice(words) if words else None
@@ -603,8 +474,6 @@ class ParodyEngine(commands.Cog):
     @app_commands.choices(модель=[
         app_commands.Choice(name="🎲 Мем",                    value="мем"),
         app_commands.Choice(name="🧠 Разум",                  value="разум"),
-        app_commands.Choice(name="📊 Автор — TF-IDF стиль",   value="автор"),
-        app_commands.Choice(name="🤖 Нейрослоп — ruGPT",      value="нейро"),
     ])
     async def коллаж(self, interaction: discord.Interaction,
                      пользователь1: discord.Member | None = None,
@@ -641,14 +510,7 @@ class ParodyEngine(commands.Cog):
             if not model_exists(uid, модель):
                 train_user(uid, get_user_messages(uid), модель)
 
-        if модель in ("автор", "нейро"):
-            from fun_slesh.parody_gpt import generate_author_phrase, generate_neuro_phrase, GPT_OK, gpt_model_exists
-            p1 = generate_author_phrase(id1) if модель == "автор" else                  ((generate_neuro_phrase(id1) if GPT_OK and gpt_model_exists(id1) else None) or generate_phrase(id1, "разум"))
-            p2 = generate_author_phrase(id2) if модель == "автор" else                  ((generate_neuro_phrase(id2) if GPT_OK and gpt_model_exists(id2) else None) or generate_phrase(id2, "разум"))
-            w1 = (p1 or "").split(); w2 = (p2 or "").split()
-            phrase = " ".join(w1[:len(w1)//2+1] + w2[len(w2)//2:]) if w1 and w2 else (p1 or p2)
-        else:
-            phrase = generate_collage(id1, id2, модель)
+        phrase = generate_collage(id1, id2, модель)
         if not phrase:
             await interaction.followup.send("🤔 Не удалось. Попробуй ещё раз.")
             return
@@ -670,8 +532,6 @@ class ParodyEngine(commands.Cog):
     @app_commands.choices(модель=[
         app_commands.Choice(name="🎲 Мем",                    value="мем"),
         app_commands.Choice(name="🧠 Разум",                  value="разум"),
-        app_commands.Choice(name="📊 Автор — TF-IDF стиль",   value="автор"),
-        app_commands.Choice(name="🤖 Нейрослоп — ruGPT",      value="нейро"),
     ])
     async def эпоха(self, interaction: discord.Interaction,
                     год: int,
@@ -709,11 +569,7 @@ class ParodyEngine(commands.Cog):
             await interaction.followup.send(f"😕 Нет сообщений за {period_label} год(а).")
             return
 
-        if модель in ("автор", "нейро"):
-            from fun_slesh.parody_gpt import generate_author_phrase, generate_neuro_phrase, GPT_OK, gpt_model_exists
-            phrase = generate_author_phrase(target_id) if модель == "автор" else                      ((generate_neuro_phrase(target_id) if GPT_OK and gpt_model_exists(target_id) else None) or                       generate_epoch(target_id, год, "разум"))
-        else:
-            phrase = generate_epoch(target_id, год, модель)
+        phrase = generate_epoch(target_id, год, модель)
 
         if not phrase:
             await interaction.followup.send("🤔 Не удалось. Попробуй ещё раз.")
@@ -736,8 +592,6 @@ class ParodyEngine(commands.Cog):
     @app_commands.choices(модель=[
         app_commands.Choice(name="🎲 Мем",                    value="мем"),
         app_commands.Choice(name="🧠 Разум",                  value="разум"),
-        app_commands.Choice(name="📊 Автор — TF-IDF стиль",   value="автор"),
-        app_commands.Choice(name="🤖 Нейрослоп — ruGPT",      value="нейро"),
     ])
     async def тема(self, interaction: discord.Interaction,
                    ключевое_слово: str,
@@ -760,11 +614,7 @@ class ParodyEngine(commands.Cog):
                 f"😕 Слово **«{ключевое_слово}»** встречается у **{display_name}** только {len(filtered)} раз (нужно ≥15).")
             return
 
-        if модель in ("автор", "нейро"):
-            from fun_slesh.parody_gpt import generate_author_phrase, generate_neuro_phrase, GPT_OK, gpt_model_exists
-            phrase = generate_author_phrase(target_id) if модель == "автор" else                      ((generate_neuro_phrase(target_id) if GPT_OK and gpt_model_exists(target_id) else None) or                       generate_topic(target_id, ключевое_слово, "разум"))
-        else:
-            phrase = generate_topic(target_id, ключевое_слово, модель)
+        phrase = generate_topic(target_id, ключевое_слово, модель)
         if not phrase:
             await interaction.followup.send("🤔 Не удалось. Попробуй ещё раз.")
             return
@@ -785,8 +635,6 @@ class ParodyEngine(commands.Cog):
     @app_commands.choices(модель=[
         app_commands.Choice(name="🎲 Мем — абсурдный рандом",       value="мем"),
         app_commands.Choice(name="🧠 Разум — осознанная фраза",      value="разум"),
-        app_commands.Choice(name="📊 Автор — TF-IDF стиль",          value="автор"),
-        app_commands.Choice(name="🤖 Нейрослоп — ruGPT fine-tune",   value="нейро"),
     ])
     async def мем_фраза(self, interaction: discord.Interaction,
                         пользователь: discord.Member | None = None,
@@ -819,19 +667,13 @@ class ParodyEngine(commands.Cog):
             return length_score + lol_score + caps_score + punct_score
 
         candidates = []
-        if модель in ("автор", "нейро"):
-            from fun_slesh.parody_gpt import generate_author_phrase, generate_neuro_phrase, GPT_OK, gpt_model_exists
-            for _ in range(8):
-                p = generate_author_phrase(target_id) if модель == "автор" else                     (generate_neuro_phrase(target_id) if GPT_OK and gpt_model_exists(target_id) else None)
+        if not model_exists(target_id, модель):
+            train_user(target_id, msgs, модель)
+        mk = _load_model(target_id, модель)
+        if mk:
+            for _ in range(12):
+                p = mk.make_short_sentence(max_chars=100, tries=30)
                 if p: candidates.append(p)
-        else:
-            if not model_exists(target_id, модель):
-                train_user(target_id, msgs, модель)
-            mk = _load_model(target_id, модель)
-            if mk:
-                for _ in range(12):
-                    p = mk.make_short_sentence(max_chars=100, tries=30)
-                    if p: candidates.append(p)
             if not candidates:
                 p = generate_phrase(target_id, модель)
                 if p: candidates.append(p)
@@ -856,10 +698,6 @@ class ParodyEngine(commands.Cog):
     async def профиль_стиля(self, interaction: discord.Interaction,
                              пользователь: discord.Member | None = None,
                              ник_или_id: str | None = None):
-        if not PERSONA_OK:
-            await interaction.response.send_message("❌ Persona недоступна.", ephemeral=True)
-            return
-
         target_id, display_name, avatar_url = None, None, None
         if пользователь:
             target_id, display_name, avatar_url = пользователь.id, пользователь.display_name, пользователь.display_avatar.url
@@ -870,62 +708,55 @@ class ParodyEngine(commands.Cog):
             return
 
         await interaction.response.defer(thinking=True)
-
-        if not persona_exists(target_id):
-            msgs = get_user_messages(target_id)
-            if len(msgs) < 50:
-                await interaction.followup.send(f"😕 Мало данных: {len(msgs)} сообщ.")
-                return
-            profile = build_persona(target_id, msgs)
-            save_persona(target_id, get_user_stats(target_id).get("username", str(target_id)), profile, len(msgs))
-
-        persona = load_persona(target_id)
-        if not persona:
-            await interaction.followup.send("❌ Не удалось построить профиль.")
+        msgs = get_user_messages(target_id)
+        if not msgs:
+            await interaction.followup.send("😕 Для пользователя ещё нет сообщений.")
             return
 
-        em = persona.get("emotional", {})
-        char_words = persona.get("char_words", [])[:15]
-        top_bigrams = persona.get("top_bigrams", [])[:8]
-        bigrams_str = " · ".join(f"{b[0]} {b[1]}" for b in top_bigrams if len(b) == 2)
-
-        def bar(val, max_val=50):
-            filled = min(int(val / max_val * 10), 10)
-            return "█" * filled + "░" * (10 - filled)
+        tokenized = [re.findall(r"[a-zа-яё0-9']+", msg.lower()) for msg in msgs]
+        lengths = [len(words) for words in tokenized]
+        all_words = [word for words in tokenized for word in words]
+        stop_words = {"и", "в", "во", "не", "на", "я", "что", "а", "но", "это", "как", "ты", "он", "она", "мы", "вы", "они", "у", "за", "с", "со", "к", "по", "из", "для", "же", "то"}
+        blocked = get_blocked_words()
+        downranked = get_downranked_words()
+        word_counts = Counter(word for word in all_words if len(word) > 2 and word not in stop_words)
+        characteristic = [
+            word for word, score in sorted(
+                ((word, apply_word_filters(word, count, blocked, downranked)) for word, count in word_counts.items()),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            if score > 0
+        ][:15]
+        avg_len = sum(lengths) / len(lengths) if lengths else 0.0
+        short_pct = 100 * sum(length <= 3 for length in lengths) / len(lengths)
+        long_pct = 100 * sum(length >= 15 for length in lengths) / len(lengths)
+        question_pct = 100 * sum("?" in msg for msg in msgs) / len(msgs)
+        exclamation_pct = 100 * sum("!" in msg for msg in msgs) / len(msgs)
 
         emb = discord.Embed(title=f"🎭 Паспорт стиля: {display_name}", color=discord.Color.og_blurple())
         if avatar_url:
             emb.set_thumbnail(url=avatar_url)
         emb.add_field(name="📏 Длина сообщений",
-            value=f"Среднее: **{persona.get('avg_msg_len', 0):.1f}** слов\n"
-                  f"Короткие (≤3): **{persona.get('short_pct', 0):.0f}%**\n"
-                  f"Длинные (≥15): **{persona.get('long_pct', 0):.0f}%**", inline=True)
-        emb.add_field(name="😤 Эмоции",
-            value=f"Мат: {bar(em.get('мат_на_100', 0))} {em.get('мат_на_100', 0):.0f}/100\n"
-                  f"Юмор: {bar(em.get('юмор_на_100', 0))} {em.get('юмор_на_100', 0):.0f}/100\n"
-                  f"❓{em.get('вопросы_пct', 0):.0f}% · ❗{em.get('восклиц_pct', 0):.0f}%", inline=True)
+            value=f"Среднее: **{avg_len:.1f}** слов\n"
+                  f"Короткие (≤3): **{short_pct:.0f}%**\n"
+                  f"Длинные (≥15): **{long_pct:.0f}%**", inline=True)
+        emb.add_field(name="💬 Интонация",
+            value=f"Вопросы: **{question_pct:.0f}%**\nВосклицания: **{exclamation_pct:.0f}%**", inline=True)
         emb.add_field(name="🔤 Характерные слова",
-            value=" · ".join(f"`{w}`" for w in char_words) or "—", inline=False)
-        emb.add_field(name="🔗 Любимые словосочетания", value=bigrams_str or "—", inline=False)
+            value=" · ".join(f"`{word}`" for word in characteristic) or "—", inline=False)
         emb.add_field(name="📚 Словарный запас",
-            value=f"**{persona.get('vocab_size', 0):,}** уникальных слов", inline=True)
-        emb.add_field(name="🤖 Нейро-модель",
-            value="✅ Обучена" if (GPT_OK and gpt_model_exists(target_id)) else "⬜ Не обучена", inline=True)
+            value=f"**{len(set(all_words)):,}** уникальных слов", inline=True)
 
         # Сырые данные из БД (было в /стиль_статистика)
         stats = get_user_stats(target_id)
         msg_count = stats.get("count", 0)
         first_msg = (stats.get("first") or "")[:10]
         last_msg  = (stats.get("last")  or "")[:10]
-        mk_ready  = all(_model_path(target_id, q) and __import__("os").path.exists(_model_path(target_id, q))
-                        for q in ["мем", "разум"])
-        status_parts = []
-        if mk_ready:        status_parts.append("🎲 Markovify ✅")
-        else:               status_parts.append("🎲 Markovify ⬜")
-        if persona_exists(target_id): status_parts.append("📊 Persona ✅")
-        else:               status_parts.append("📊 Persona ⬜")
-        if GPT_OK and gpt_model_exists(target_id): status_parts.append("🤖 GPT ✅")
-        else:               status_parts.append("🤖 GPT ⬜")
+        status_parts = [
+            f"{QUALITY_LEVELS[quality]['emoji']} {quality.capitalize()} {'✅' if model_exists(target_id, quality) else '⬜'}"
+            for quality in ("мем", "разум")
+        ]
 
         emb.add_field(
             name="📦 База данных",
@@ -934,115 +765,44 @@ class ParodyEngine(commands.Cog):
                   + (f"\nГотовность: {'✅ Достаточно' if msg_count >= 200 else f'⚠️ Мало ({msg_count}/200)'}"),
             inline=False
         )
-        emb.add_field(name="⚙️ Модели", value="  ".join(status_parts), inline=False)
-        emb.set_footer(text=f"Профиль по {persona.get('msg_count', 0):,} сообщениям · /пародия чтобы попробовать")
+        emb.add_field(name="⚙️ Markov-модели", value="  ".join(status_parts), inline=False)
+        emb.set_footer(text=f"Профиль по {len(msgs):,} сообщениям · /пародия чтобы попробовать")
         await interaction.followup.send(embed=emb)
 
     # ── /дообучить ────────────────────────────────────────────────────────────
-    @app_commands.command(name="дообучить", description="(Админ) Обучить модели: markovify + persona + GPT")
-    @app_commands.describe(
-        пользователь="Конкретный пользователь (или все если не указан)",
-        модели="Какие модели обучить (по умолчанию — все)",
-        только_markovify="Быстрый режим: только markovify, без Persona и GPT",
-    )
-    @app_commands.choices(модели=[
-        app_commands.Choice(name="🔄 Все (Markovify + Persona + GPT)",  value="все"),
-        app_commands.Choice(name="🎲🧠 Только Markovify",               value="markovify"),
-        app_commands.Choice(name="📊 Только Persona",                   value="persona"),
-        app_commands.Choice(name="🤖 Только GPT fine-tune",             value="gpt"),
-    ])
+    @app_commands.command(name="дообучить", description="(Админ) Обучить Markov-модели")
+    @app_commands.describe(пользователь="Конкретный пользователь (или все если не указан)")
     @app_commands.checks.has_permissions(administrator=True)
     async def дообучить(self, interaction: discord.Interaction,
-                        пользователь: discord.Member | None = None,
-                        модели: str = "все",
-                        только_markovify: bool = False):
-        # только_markovify — обратная совместимость
-        if только_markovify:
-            модели = "markovify"
+                        пользователь: discord.Member | None = None):
         await interaction.response.defer(thinking=True)
-
-        if _gpt_requested(модели) and not is_gpt_training_allowed():
-            emb = _server_training_guard_embed(
-                "🛡️ GPT-обучение на VPS заблокировано",
-                "На сервере отключено тяжёлое GPT-дообучение, чтобы не перегружать диск и память.\n\n"
-                "Что можно сделать:\n"
-                "1. В Discord выбрать `Только Markovify` или `Только Persona`.\n"
-                "2. Для GPT использовать локально GUI `ViPikBotControl.exe` на ПК.\n"
-                "3. Для генерации с ПК подключать bridge через локальный GUI.",
-            )
-            await interaction.followup.send(embed=emb, ephemeral=True)
-            return
-
         _prevent_sleep()  # ПК не спит пока идёт обучение
-
-        if пользователь:
-            msgs = get_user_messages(пользователь.id)
-            if len(msgs) < 50:
-                await interaction.followup.send(f"❌ Мало данных: {len(msgs)} сообщ.")
-                return
-            status = await interaction.followup.send(f"⏳ Обучаю **{пользователь.display_name}**...", wait=True)
-            mk_results = train_user_all_qualities(пользователь.id, msgs) if модели in ("все", "markovify") else {}
-            lines = [f"🎲🧠 Markovify: {', '.join(q for q,v in mk_results.items() if v) or 'пропущено'}"]
-            if PERSONA_OK and модели in ("все", "persona"):
-                profile = build_persona(пользователь.id, msgs)
-                save_persona(пользователь.id, пользователь.display_name, profile, len(msgs))
-                lines.append("📊 Persona: обновлена")
-            if GPT_OK and модели in ("все", "gpt") and len(msgs) >= 200 and is_gpt_training_allowed():
-                await status.edit(content=f"⏳ GPT fine-tune для **{пользователь.display_name}**...")
-                ok = await fine_tune_user(пользователь.id, msgs, epochs=3)
-                lines.append(f"🤖 GPT: {'✅' if ok else '❌'}")
-            emb = discord.Embed(title=f"✅ {пользователь.display_name} — готово",
-                description="\n".join(lines) + f"\n\nСообщений: **{len(msgs)}**",
-                color=discord.Color.green())
-            _allow_sleep()
+        try:
+            if пользователь:
+                msgs = get_user_messages(пользователь.id)
+                if len(msgs) < 50:
+                    await interaction.followup.send(f"❌ Мало данных: {len(msgs)} сообщ.")
+                    return
+                status = await interaction.followup.send(f"⏳ Обучаю **{пользователь.display_name}**...", wait=True)
+                results = train_user_all_qualities(пользователь.id, msgs)
+                ready = ", ".join(quality for quality, ok in results.items() if ok) or "нет"
+                emb = discord.Embed(
+                    title=f"✅ {пользователь.display_name} — готово",
+                    description=f"Markov-модели: **{ready}**\nСообщений: **{len(msgs)}**",
+                    color=discord.Color.green(),
+                )
+            else:
+                uids = get_all_user_ids()
+                status = await interaction.followup.send(f"⏳ Обучаю Markov-модели для **{len(uids)}** пользователей...", wait=True)
+                results = await train_all_users_async(min_messages=50)
+                emb = discord.Embed(
+                    title="🧠 Дообучение завершено",
+                    description=f"Markov-модели обновлены для **{len(results)}** пользователей.\nСледующее автообучение: **воскресенье 03:00 МСК**",
+                    color=discord.Color.green(),
+                )
             await _safe_send(interaction, status, emb, interaction.channel)
-        else:
-            uids = get_all_user_ids()
-            status = await interaction.followup.send(
-                f"⏳ Обучаю **{len(uids)}** пользователей...\n"
-                f"{'Только Markovify' if модели == 'markovify' else ('Только Persona' if модели == 'persona' else ('Только GPT' if модели == 'gpt' else 'Markovify → Persona → GPT'))}", wait=True)
-
-            prevent_sleep()
-            mk_results = await train_all_users_async(min_messages=50) if модели in ("все", "markovify") else {}
-            persona_count, gpt_count = 0, 0
-
-            if PERSONA_OK and модели in ("все", "persona"):
-                try:
-                    await status.edit(content=f"⏳ Persona-профили ({len(mk_results)} польз.)...")
-                except Exception:
-                    pass
-                loop = asyncio.get_event_loop()
-                personas = await loop.run_in_executor(_MK_EXECUTOR,
-                    lambda: build_all_personas(min_messages=50))
-                persona_count = len(personas)
-
-            if GPT_OK and модели in ("все", "gpt") and is_gpt_training_allowed():
-                loop = asyncio.get_event_loop()
-                gpt_pairs = await loop.run_in_executor(_MK_EXECUTOR,
-                    lambda: [(uid, get_user_messages(uid)) for uid in get_all_user_ids()
-                             if len(get_user_messages(uid)) >= 200])
-                for i, (uid, msgs_u) in enumerate(gpt_pairs, 1):
-                    stats_u = get_user_stats(uid)
-                    try:
-                        await status.edit(content=f"⏳ GPT {i}/{len(gpt_pairs)}: {stats_u.get('username', uid)}...")
-                    except Exception:
-                        pass
-                    if await fine_tune_user(uid, msgs_u, epochs=3):
-                        gpt_count += 1
-
-            emb = discord.Embed(
-                title="🧠 Дообучение завершено",
-                description=(
-                    f"🎲🧠 Markovify: **{len(mk_results)}** пользователей\n"
-                    f"📊 Persona: **{persona_count}** профилей\n"
-                    f"🤖 GPT: **{gpt_count}** моделей\n\n"
-                    f"Следующее авто-обучение: **воскресенье 03:00 МСК**"
-                ),
-                color=discord.Color.green()
-            )
-            allow_sleep()
+        finally:
             _allow_sleep()
-            await _safe_send(interaction, status, emb, interaction.channel)
 
     # ── /профилактика ─────────────────────────────────────────────────────────
     @app_commands.command(name="профилактика",
@@ -1054,17 +814,16 @@ class ParodyEngine(commands.Cog):
         if not is_full_maintenance_allowed():
             emb = _server_training_guard_embed(
                 "🛡️ Профилактика на VPS заблокирована",
-                "Полная профилактика включает массовый сбор сообщений и GPT-дообучение, поэтому на сервере она выключена по умолчанию.\n\n"
+                "Полная профилактика включает массовый сбор сообщений и переобучение всех Markov-моделей, поэтому на сервере она выключена по умолчанию.\n\n"
                 "Безопасный путь:\n"
-                "1. Сбор и лёгкие модели держать на VPS.\n"
-                "2. GPT-обучение запускать локально через GUI `ViPikBotControl.exe`.\n"
-                "3. Для использования тяжёлой модели подключать ПК через локальный GUI.",
+                "1. Ежедневный сбор и лёгкое автообучение оставить на VPS.\n"
+                "2. Полную профилактику запускать локально на ПК.\n"
+                "3. После проверки синхронизировать Markov-артефакты на VPS.",
             )
             await interaction.followup.send(embed=emb, ephemeral=True)
             return
 
-        # Блокируем сон Windows на время профилактики
-        prevent_sleep()
+        _prevent_sleep()
 
         # Шаг 1: сброс чекпоинтов
         deleted = reset_checkpoints()
@@ -1073,10 +832,9 @@ class ParodyEngine(commands.Cog):
             embed=discord.Embed(
                 title="🔧 Профилактика запущена",
                 description=(
-                    f"**Шаг 1/4:** ✅ Сброшено {deleted} чекпоинтов\n"
-                    f"**Шаг 2/4:** ⏳ Сбор сообщений со всех каналов...\n"
-                    f"**Шаг 3/4:** ⬜ Markovify + Persona\n"
-                    f"**Шаг 4/4:** ⬜ GPT fine-tune\n\n"
+                    f"**Шаг 1/3:** ✅ Сброшено {deleted} чекпоинтов\n"
+                    f"**Шаг 2/3:** ⏳ Сбор сообщений со всех каналов...\n"
+                    f"**Шаг 3/3:** ⬜ Обучение Markov-моделей\n\n"
                     f"*Можешь идти отдыхать — бот всё сделает сам*"
                 ),
                 color=discord.Color.orange()
@@ -1096,69 +854,33 @@ class ParodyEngine(commands.Cog):
 
         try:
             await status.edit(embed=discord.Embed(
-                title="🔧 Профилактика — шаг 3/4",
+                title="🔧 Профилактика — шаг 3/3",
                 description=(
-                    f"**Шаг 1/4:** ✅ Сброшено {deleted} чекпоинтов\n"
-                    f"**Шаг 2/4:** ✅ Собрано +{total_collected} сообщений\n"
-                    f"**Шаг 3/4:** ⏳ Обучение Markovify + Persona...\n"
-                    f"**Шаг 4/4:** ⬜ GPT fine-tune\n"
+                    f"**Шаг 1/3:** ✅ Сброшено {deleted} чекпоинтов\n"
+                    f"**Шаг 2/3:** ✅ Собрано +{total_collected} сообщений\n"
+                    f"**Шаг 3/3:** ⏳ Обучение Markov-моделей...\n"
                 ),
                 color=discord.Color.orange()
             ))
         except Exception:
             pass
 
-        # Шаг 3: markovify + persona
+        # Шаг 3: Markov
         mk_results = await train_all_users_async(min_messages=50)
-        persona_count = 0
-        if PERSONA_OK:
-            loop = asyncio.get_event_loop()
-            personas = await loop.run_in_executor(_MK_EXECUTOR,
-                lambda: build_all_personas(min_messages=50))
-            persona_count = len(personas)
-
-        try:
-            await status.edit(embed=discord.Embed(
-                title="🔧 Профилактика — шаг 4/4",
-                description=(
-                    f"**Шаг 1/4:** ✅ Сброшено {deleted} чекпоинтов\n"
-                    f"**Шаг 2/4:** ✅ Собрано +{total_collected} сообщений\n"
-                    f"**Шаг 3/4:** ✅ Markovify: {len(mk_results)} | Persona: {persona_count}\n"
-                    f"**Шаг 4/4:** ⏳ GPT fine-tune...\n"
-                ),
-                color=discord.Color.orange()
-            ))
-        except Exception:
-            pass
-
-        # Шаг 4: GPT
-        gpt_count = 0
-        if GPT_OK and is_gpt_training_allowed():
-            loop = asyncio.get_event_loop()
-            gpt_pairs = await loop.run_in_executor(_MK_EXECUTOR,
-                lambda: [(uid, get_user_messages(uid)) for uid in get_all_user_ids()
-                         if len(get_user_messages(uid)) >= 200])
-            for uid, msgs_u in gpt_pairs:
-                if await fine_tune_user(uid, msgs_u, epochs=3):
-                    gpt_count += 1
 
         # Финал
         uids = get_all_user_ids()
         final_emb = discord.Embed(
             title="✅ Профилактика завершена",
             description=(
-                f"**Шаг 1/4:** ✅ Сброшено **{deleted}** чекпоинтов\n"
-                f"**Шаг 2/4:** ✅ Собрано **+{total_collected}** сообщений\n"
-                f"**Шаг 3/4:** ✅ Markovify: **{len(mk_results)}** | Persona: **{persona_count}**\n"
-                f"**Шаг 4/4:** ✅ GPT: **{gpt_count}** моделей\n\n"
+                f"**Шаг 1/3:** ✅ Сброшено **{deleted}** чекпоинтов\n"
+                f"**Шаг 2/3:** ✅ Собрано **+{total_collected}** сообщений\n"
+                f"**Шаг 3/3:** ✅ Markov-модели: **{len(mk_results)}** пользователей\n\n"
                 f"Пользователей в базе: **{len(uids)}**\n"
                 f"Следующая авто-профилактика: **воскресенье 03:00 МСК**"
             ),
             color=discord.Color.green()
         )
-        # Снимаем блокировку сна
-        allow_sleep()
-
         _allow_sleep()  # профилактика завершена — можно спать
         await _safe_send(interaction, status, final_emb, interaction.channel)
 
@@ -1182,8 +904,7 @@ class ParodyEngine(commands.Cog):
         def make_embed(page: int) -> discord.Embed:
             rows = []
             for uid, username, count in users_data[page * PAGE:(page + 1) * PAGE]:
-                if GPT_OK and gpt_model_exists(uid):      badge = "🤖"
-                elif model_exists(uid, "разум"):           badge = "🧠"
+                if model_exists(uid, "разум"):             badge = "🧠"
                 elif model_exists(uid, "мем"):             badge = "🎲"
                 else:                                      badge = "⬜"
                 on_server = "" if interaction.guild.get_member(uid) else " *(ушёл)*"
@@ -1197,7 +918,7 @@ class ParodyEngine(commands.Cog):
                 value="`/пародия` · `/батл` · `/коллаж` · `/эпоха` · `/тема`\nДля ушедших: `ник_или_id:ник`",
                 inline=False
             )
-            emb.set_footer(text=f"Стр. {page+1}/{total_pages} | 🤖нейро 🧠разум 🎲мем ⬜нет модели")
+            emb.set_footer(text=f"Стр. {page+1}/{total_pages} | 🧠разум 🎲мем ⬜нет модели")
             return emb
 
         def make_view(page: int) -> discord.ui.View:
@@ -1233,18 +954,17 @@ class ParodyEngine(commands.Cog):
         for uid in uids:
             stats = get_user_stats(uid)
             mk = "".join(QUALITY_LEVELS[q]["emoji"] if model_exists(uid, q) else "·" for q in ["мем","разум"])
-            gpt = "🤖" if (GPT_OK and gpt_model_exists(uid)) else "·"
             good = len(get_good_phrases(uid, "разум"))
             bad  = len(get_bad_phrases(uid, "разум"))
             rating_str = f" 👍{good}/👎{bad}" if good or bad else ""
-            lines.append(f"`{mk}{gpt}` **{stats['username']}** — {stats['count']:,} сообщ.{rating_str}")
+            lines.append(f"`{mk}` **{stats['username']}** — {stats['count']:,} сообщ.{rating_str}")
         lines.sort()
         emb = discord.Embed(
-            title="🤖 Статус моделей",
+            title="🎭 Статус Markov-моделей",
             description="\n".join(lines[:25]),
             color=discord.Color.blurple()
         )
-        emb.set_footer(text=f"🎲мем 🧠разум 🤖нейро | · = не обучена | Всего: {len(uids)}")
+        emb.set_footer(text=f"🎲мем 🧠разум | · = не обучена | Всего: {len(uids)}")
         await interaction.followup.send(embed=emb, ephemeral=True)
 
 

@@ -30,8 +30,6 @@ PUBLIC_MENU_COMMANDS = {"команды", "админ"}
 SKIP_EXTENSION_FILES = {
     "parody_channel_settings.py",
     "parody_engine_wakelock.py",
-    "parody_gpt.py",
-    "parody_persona.py",
 }
 
 

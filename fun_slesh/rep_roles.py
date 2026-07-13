@@ -2,7 +2,7 @@
 # fun_slesh/rep_roles.py
 """
 Система ролей по Размера:
-  - Бот создаёт роль с нейро-названием из Persona при достижении порога
+  - Бот создаёт роль из характерных слов корпуса при достижении порога
   - Одна активная Размер-роль на человека
   - Роль живёт 7 дней, потом обновляется (та же или новая если порог вырос)
   - Админ может сделать роль постоянной
@@ -15,7 +15,8 @@
   /моя_репа_роль       — посмотреть свою текущую роль и когда обновится
 """
 
-import os, sqlite3, json, random
+import os, sqlite3, random, re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
@@ -26,7 +27,6 @@ from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 DB_PATH  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
-PER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "persona.db"))
 UTC      = timezone.utc
 MSK      = ZoneInfo("Europe/Moscow")
 
@@ -88,21 +88,21 @@ def _best_threshold(guild_id: int, rep: int) -> Optional[tuple[int, str]]:
         ).fetchone()
     return row  # (min_rep, label) или None
 
-# ── Нейро-название роли ───────────────────────────────────────────────────────
+# ── Название роли по корпусу сообщений ────────────────────────────────────────
 def _generate_role_name(user_id: int, threshold: int, label: str) -> str:
-    """
-    Берёт char_words из Persona и генерирует смешное название.
-    Fallback — набор шаблонов.
-    """
+    """Берёт частые содержательные слова пользователя; fallback — шаблоны."""
     char_words: list[str] = []
     try:
-        with sqlite3.connect(PER_PATH) as conn:
-            row = conn.execute(
-                "SELECT profile FROM personas WHERE user_id=?", (user_id,)
-            ).fetchone()
-        if row:
-            profile    = json.loads(row[0])
-            char_words = profile.get("char_words", [])[:15]
+        from core.parody_message_store import get_user_messages
+
+        stop_words = {"что", "это", "как", "для", "его", "она", "они", "или", "так", "уже", "ещё", "только"}
+        words = (
+            word
+            for message in get_user_messages(user_id)
+            for word in re.findall(r"[a-zа-яё]{3,}", message.lower())
+            if word not in stop_words
+        )
+        char_words = [word for word, _ in Counter(words).most_common(15)]
     except Exception:
         pass
 

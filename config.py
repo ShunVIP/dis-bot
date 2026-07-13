@@ -34,15 +34,9 @@ RIOT_API_KEY = os.getenv("RIOT_API_KEY", "").strip()
 RIOT_PLATFORM_REGION = os.getenv("RIOT_PLATFORM_REGION", "ru").strip()
 RIOT_REGIONAL_ROUTING = os.getenv("RIOT_REGIONAL_ROUTING", "europe").strip()
 
-# Remote heavy-model bridge, optional.
-REMOTE_MODEL_API_URL = os.getenv("REMOTE_MODEL_API_URL", "").strip()
-REMOTE_MODEL_API_TOKEN = os.getenv("REMOTE_MODEL_API_TOKEN", "").strip()
-
 # Server safety toggles.
 BOT_SERVER_MODE = os.getenv("BOT_SERVER_MODE", "").strip()
-ALLOW_GPT_TRAINING_ON_SERVER = os.getenv("ALLOW_GPT_TRAINING_ON_SERVER", "").strip()
 ALLOW_FULL_MAINTENANCE_ON_SERVER = os.getenv("ALLOW_FULL_MAINTENANCE_ON_SERVER", "").strip()
-ALLOW_REMOTE_MODEL_INFERENCE = os.getenv("ALLOW_REMOTE_MODEL_INFERENCE", "").strip()
 
 # Optional browser admin panel.
 WEB_ADMIN_ENABLED = os.getenv("WEB_ADMIN_ENABLED", "").strip()
