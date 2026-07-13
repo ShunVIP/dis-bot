@@ -9,7 +9,17 @@ add_rule() {
   fi
 }
 
+allow_loopback() {
+  local command_name="$1" protocol="$2" port="$3"
+  command -v "$command_name" >/dev/null 2>&1 || return 0
+  if ! "$command_name" -C INPUT -i lo -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null; then
+    "$command_name" -I INPUT 1 -i lo -p "$protocol" --dport "$port" -j ACCEPT
+  fi
+}
+
 for firewall in iptables ip6tables; do
   add_rule "$firewall" tcp 7881
   add_rule "$firewall" udp 7882
+  allow_loopback "$firewall" tcp 7881
+  allow_loopback "$firewall" udp 7882
 done
