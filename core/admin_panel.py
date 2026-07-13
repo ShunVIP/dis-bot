@@ -1007,7 +1007,8 @@ def _render_toxicity_ml_panel() -> str:
                 FROM toxicity_ml_shadow s
                 LEFT JOIN toxicity_ml_feedback f ON f.message_id=s.message_id
                 WHERE f.message_id IS NULL
-                ORDER BY s.logged_at DESC LIMIT 20
+                ORDER BY (s.rule_level != s.ml_level) DESC, s.ml_confidence DESC, s.logged_at DESC
+                LIMIT 20
                 """
             ).fetchall()
             reviewed = conn.execute("SELECT COUNT(*) FROM toxicity_ml_feedback").fetchone()[0]
