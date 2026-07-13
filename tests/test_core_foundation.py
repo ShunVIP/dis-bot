@@ -8,12 +8,13 @@ import hmac
 import json
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_store, toxicity_model_service, voice_store, web_app_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -49,6 +50,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(platform_store, "SOCIAL_DB", self.db_path),
             patch.object(voice_store, "SOCIAL_DB", self.db_path),
             patch.object(summary_store, "SOCIAL_DB", self.db_path),
+            patch.object(summary_stats_store, "SOCIAL_DB", self.db_path),
             patch.object(audit_settings, "SOCIAL_DB", self.db_path),
             patch.object(audit_settings, "BIRTHDAYS_DB", self.db_path),
             patch.object(finalize_settings_migration, "SOCIAL_DB", self.db_path),
@@ -499,6 +501,106 @@ class SummaryStoreTests(IsolatedDatabaseTest):
         self.assertTrue(summary_store.mark_summary_posted(1, "weekly", "2026-W28"))
         self.assertFalse(summary_store.mark_summary_posted(1, "weekly", "2026-W28"))
         self.assertTrue(summary_store.was_summary_posted(1, "weekly", "2026-W28"))
+
+
+class SummaryStatsStoreTests(IsolatedDatabaseTest):
+    def _create_tables(self):
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE msg_stats_daily(
+                    guild_id INTEGER, user_id INTEGER, date TEXT, messages INTEGER,
+                    words INTEGER DEFAULT 0, emojis INTEGER DEFAULT 0
+                );
+                CREATE TABLE voice_totals_daily(
+                    guild_id INTEGER, user_id INTEGER, date TEXT, seconds INTEGER
+                );
+                CREATE TABLE voice_sessions(
+                    guild_id INTEGER, channel_id INTEGER, started_at TEXT
+                );
+                """
+            )
+
+    def test_empty_daily_aggregates_have_stable_shape(self):
+        self._create_tables()
+
+        stats = summary_stats_store.get_today_stats(7, today_date=date(2026, 7, 13))
+
+        self.assertEqual(stats["date"], "2026-07-13")
+        self.assertEqual(stats["total_msgs"], 0)
+        self.assertEqual(stats["total_voice_s"], 0)
+        self.assertEqual(stats["total_game_s"], 0)
+        self.assertEqual(stats["top_chatters"], [])
+        self.assertEqual(stats["top_voice"], [])
+        self.assertEqual(stats["voice_channels"], [])
+        self.assertEqual(stats["toxic_count"], 0)
+        self.assertEqual(stats["rep_events"], 0)
+
+    def test_daily_aggregates_use_moscow_bounds_and_isolate_guilds(self):
+        self._create_tables()
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE msg_word_freq_daily(guild_id INTEGER, date TEXT, word TEXT, count INTEGER);
+                CREATE TABLE msg_emoji_freq_daily(guild_id INTEGER, date TEXT, emoji TEXT, count INTEGER);
+                CREATE TABLE toxicity_log(
+                    guild_id INTEGER, user_id INTEGER, level INTEGER,
+                    msg_snippet TEXT, logged_at TEXT
+                );
+                CREATE TABLE reputation(date TEXT);
+                CREATE TABLE activity_sessions(
+                    guild_id INTEGER, user_id INTEGER, activity_name TEXT,
+                    activity_type TEXT, seconds INTEGER, started_at TEXT
+                );
+                INSERT INTO msg_stats_daily VALUES
+                    (7, 101, '2026-07-13', 8, 0, 0),
+                    (7, 102, '2026-07-13', 12, 0, 0),
+                    (8, 999, '2026-07-13', 500, 0, 0);
+                INSERT INTO voice_totals_daily VALUES
+                    (7, 101, '2026-07-13', 90),
+                    (7, 102, '2026-07-13', 150),
+                    (8, 999, '2026-07-13', 9000);
+                INSERT INTO voice_sessions VALUES
+                    (7, 501, '2026-07-13T10:00:00+00:00'),
+                    (8, 999, '2026-07-13T10:00:00+00:00');
+                INSERT INTO msg_word_freq_daily VALUES
+                    (7, '2026-07-13', 'бот', 4),
+                    (7, '2026-07-13', 'игра', 7),
+                    (8, '2026-07-13', 'чужое', 99);
+                INSERT INTO msg_emoji_freq_daily VALUES
+                    (7, '2026-07-13', ':)', 3),
+                    (7, '2026-07-13', ':D', 5);
+                INSERT INTO toxicity_log VALUES
+                    (7, 101, 1, 'мягкая цитата', '2026-07-12T21:00:00+00:00'),
+                    (7, 101, 3, 'сильная цитата', '2026-07-13T12:00:00+00:00'),
+                    (7, 102, 2, 'за пределом', '2026-07-13T21:00:00+00:00'),
+                    (8, 999, 3, 'чужой сервер', '2026-07-13T12:00:00+00:00');
+                INSERT INTO reputation VALUES ('2026-07-13');
+                INSERT INTO activity_sessions VALUES
+                    (7, 101, 'Game A', 'game', 120, '2026-07-12T21:00:00+00:00'),
+                    (7, 102, 'Game A', 'game', 180, '2026-07-13T20:59:59+00:00'),
+                    (7, 101, 'Game B', 'game', 60, '2026-07-13T21:00:00+00:00'),
+                    (7, 101, 'Editor', 'app', 500, '2026-07-13T12:00:00+00:00'),
+                    (8, 999, 'Other', 'game', 9999, '2026-07-13T12:00:00+00:00');
+                """
+            )
+
+        stats = summary_stats_store.get_today_stats(7, today_date=date(2026, 7, 13))
+
+        self.assertEqual(stats["total_msgs"], 20)
+        self.assertEqual(stats["top_chatters"], [(102, 12), (101, 8)])
+        self.assertEqual(stats["total_voice_s"], 240)
+        self.assertEqual(stats["top_voice"], [(102, 150), (101, 90)])
+        self.assertEqual(stats["top_words"], [("игра", 7), ("бот", 4)])
+        self.assertEqual(stats["top_emojis"], [(":D", 5), (":)", 3)])
+        self.assertEqual(stats["voice_channels"], [501])
+        self.assertEqual(stats["toxic_count"], 2)
+        self.assertEqual(stats["toxic_leader"], (101, 2))
+        self.assertEqual(stats["toxic_quote"], "сильная цитата")
+        self.assertEqual(stats["total_game_s"], 300)
+        self.assertEqual(stats["top_games"], [("Game A", 300)])
+        self.assertEqual(stats["top_game_users"], [(102, 180), (101, 120)])
+        self.assertEqual(stats["rep_events"], 1)
 
 
 class DataCatalogTests(IsolatedDatabaseTest):
