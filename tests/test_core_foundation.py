@@ -547,15 +547,21 @@ class SummaryStatsStoreTests(IsolatedDatabaseTest):
                     guild_id INTEGER, user_id INTEGER, level INTEGER,
                     msg_snippet TEXT, logged_at TEXT
                 );
-                CREATE TABLE reputation(date TEXT);
+                CREATE TABLE reputation(user_id INTEGER, delta INTEGER, date TEXT);
+                CREATE TABLE coins_wallet(user_id INTEGER, balance INTEGER);
+                CREATE TABLE daily_rewards(user_id INTEGER, streak INTEGER);
+                CREATE TABLE toxicity_weekly(guild_id INTEGER, user_id INTEGER, week TEXT, count INTEGER);
+                CREATE TABLE heroes_sessions(
+                    guild_id INTEGER, user_id INTEGER, seconds INTEGER, started_at TEXT
+                );
                 CREATE TABLE activity_sessions(
                     guild_id INTEGER, user_id INTEGER, activity_name TEXT,
                     activity_type TEXT, seconds INTEGER, started_at TEXT
                 );
                 INSERT INTO msg_stats_daily VALUES
-                    (7, 101, '2026-07-13', 8, 0, 0),
-                    (7, 102, '2026-07-13', 12, 0, 0),
-                    (8, 999, '2026-07-13', 500, 0, 0);
+                    (7, 101, '2026-07-13', 8, 80, 2),
+                    (7, 102, '2026-07-13', 12, 50, 6),
+                    (8, 999, '2026-07-13', 500, 900, 99);
                 INSERT INTO voice_totals_daily VALUES
                     (7, 101, '2026-07-13', 90),
                     (7, 102, '2026-07-13', 150),
@@ -575,7 +581,15 @@ class SummaryStatsStoreTests(IsolatedDatabaseTest):
                     (7, 101, 3, 'сильная цитата', '2026-07-13T12:00:00+00:00'),
                     (7, 102, 2, 'за пределом', '2026-07-13T21:00:00+00:00'),
                     (8, 999, 3, 'чужой сервер', '2026-07-13T12:00:00+00:00');
-                INSERT INTO reputation VALUES ('2026-07-13');
+                INSERT INTO reputation VALUES (101, 2, '2026-07-13');
+                INSERT INTO coins_wallet VALUES (101, 25), (102, 80);
+                INSERT INTO daily_rewards VALUES (101, 3), (102, 7);
+                INSERT INTO toxicity_weekly VALUES
+                    (7, 101, '2026-W28', 4),
+                    (8, 999, '2026-W28', 100);
+                INSERT INTO heroes_sessions VALUES
+                    (7, 102, 75, '2026-07-13T12:00:00+00:00'),
+                    (8, 999, 900, '2026-07-13T12:00:00+00:00');
                 INSERT INTO activity_sessions VALUES
                     (7, 101, 'Game A', 'game', 120, '2026-07-12T21:00:00+00:00'),
                     (7, 102, 'Game A', 'game', 180, '2026-07-13T20:59:59+00:00'),
@@ -601,6 +615,32 @@ class SummaryStatsStoreTests(IsolatedDatabaseTest):
         self.assertEqual(stats["top_games"], [("Game A", 300)])
         self.assertEqual(stats["top_game_users"], [(102, 180), (101, 120)])
         self.assertEqual(stats["rep_events"], 1)
+
+        period = summary_stats_store.get_period_stats(
+            7, date(2026, 7, 7), date(2026, 7, 14)
+        )
+        self.assertEqual(period["since"], "2026-07-07")
+        self.assertEqual(period["until"], "2026-07-14")
+        self.assertEqual(period["top_msgs"], [(102, 12), (101, 8)])
+        self.assertEqual(period["top_words"], [(101, 80), (102, 50)])
+        self.assertEqual(period["top_emojis"], [(102, 6), (101, 2)])
+        self.assertEqual(period["top_balance"], [(102, 80), (101, 25)])
+        self.assertEqual(period["top_streaks"], [(102, 7), (101, 3)])
+        self.assertEqual(period["top_rep"], [(101, 2)])
+        self.assertEqual(period["top_toxic"], [(101, 4)])
+        self.assertEqual(period["top_heroes"], [(102, 75)])
+        self.assertEqual(period["top_activities"], [("Editor", "app", 500), ("Game A", "game", 300)])
+        self.assertEqual(period["top_other_activities"], [("Editor", "app", 500)])
+        self.assertEqual(period["top_activity_users"], [(101, 620), (102, 180)])
+        self.assertEqual(period["total_msgs"], 20)
+        self.assertEqual(period["total_voice_s"], 240)
+        self.assertEqual(period["total_game_s"], 300)
+
+    def test_period_rejects_empty_or_reversed_range(self):
+        with self.assertRaises(ValueError):
+            summary_stats_store.get_period_stats(
+                7, date(2026, 7, 13), date(2026, 7, 13)
+            )
 
 
 class DataCatalogTests(IsolatedDatabaseTest):

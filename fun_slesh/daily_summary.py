@@ -13,15 +13,14 @@
   /итог_недели         — показать еженедельный дайджест прямо сейчас
 """
 
-import sqlite3, random, asyncio
-from datetime import datetime, timedelta, timezone, date
+import random, asyncio
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands
 from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from core.paths import MESSAGES_DB, SOCIAL_DB
 from core.summary_service import (
     DEFAULT_SUMMARY_TEXTS,
     SUMMARY_THEME_COLORS,
@@ -37,7 +36,10 @@ from core.summary_store import (
     mark_summary_posted as _mark_posted,
     was_summary_posted as _was_posted,
 )
-from core.summary_stats_store import get_today_stats as _get_today_stats
+from core.summary_stats_store import (
+    get_period_stats as _get_period_stats,
+    get_today_stats as _get_today_stats,
+)
 from core.settings_store import (
     get_feature_payload,
     get_feature_policy,
@@ -48,9 +50,6 @@ from core.settings_store import (
 )
 from utils.logger import log as _base_log
 
-DB_PATH = SOCIAL_DB
-MSG_DB  = MESSAGES_DB
-UTC     = timezone.utc
 MSK     = ZoneInfo("Europe/Moscow")
 FEATURE_DAILY_SUMMARY = "daily_summary"
 SUMMARY_CUSTOM_ID_PREFIX = "vipik:summary"
@@ -180,13 +179,6 @@ def _save_summary_enabled(guild_id: int, enabled: bool):
     set_feature_enabled(guild_id, FEATURE_DAILY_SUMMARY, enabled)
 
 
-def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
-    ).fetchone()
-    return bool(row)
-
-
 def _fmt_seconds(sec: int) -> str:
     h = sec // 3600
     m = (sec % 3600) // 60
@@ -211,299 +203,6 @@ def _month_bounds_msk() -> tuple[date, date]:
     else:
         start_next_month = today.replace(month=today.month + 1, day=1)
     return start_this_month, start_next_month
-
-
-def _top_rows(conn: sqlite3.Connection, query: str, params: tuple) -> list[tuple]:
-    return conn.execute(query, params).fetchall()
-
-
-def _get_period_stats(guild_id: int, start_period: date, end_period: date) -> dict:
-    since = start_period.isoformat()
-    until = end_period.isoformat()
-    toxicity_week_code = (end_period - timedelta(days=1)).strftime("%Y-W%W") if (end_period - start_period).days <= 8 else ""
-    start_period_utc = datetime.combine(start_period, datetime.min.time(), MSK).astimezone(UTC).isoformat()
-    end_period_utc = datetime.combine(end_period, datetime.min.time(), MSK).astimezone(UTC).isoformat()
-
-    with sqlite3.connect(DB_PATH) as conn:
-        top_msgs = _top_rows(
-            conn,
-            """
-            SELECT user_id, SUM(messages) AS total
-            FROM msg_stats_daily
-            WHERE guild_id=? AND date>=? AND date<?
-            GROUP BY user_id
-            ORDER BY total DESC LIMIT 5
-            """,
-            (guild_id, since, until),
-        )
-        top_words = _top_rows(
-            conn,
-            """
-            SELECT user_id, SUM(words) AS total
-            FROM msg_stats_daily
-            WHERE guild_id=? AND date>=? AND date<?
-            GROUP BY user_id
-            ORDER BY total DESC LIMIT 5
-            """,
-            (guild_id, since, until),
-        )
-        top_emojis = _top_rows(
-            conn,
-            """
-            SELECT user_id, SUM(emojis) AS total
-            FROM msg_stats_daily
-            WHERE guild_id=? AND date>=? AND date<?
-            GROUP BY user_id
-            ORDER BY total DESC LIMIT 5
-            """,
-            (guild_id, since, until),
-        )
-        top_word_terms = _top_rows(
-            conn,
-            """
-            SELECT word, SUM(count) AS total
-            FROM msg_word_freq_daily
-            WHERE guild_id=? AND date>=? AND date<?
-            GROUP BY word
-            ORDER BY total DESC, word ASC LIMIT 3
-            """,
-            (guild_id, since, until),
-        ) if _table_exists(conn, "msg_word_freq_daily") else []
-        top_emoji_terms = _top_rows(
-            conn,
-            """
-            SELECT emoji, SUM(count) AS total
-            FROM msg_emoji_freq_daily
-            WHERE guild_id=? AND date>=? AND date<?
-            GROUP BY emoji
-            ORDER BY total DESC, emoji ASC LIMIT 3
-            """,
-            (guild_id, since, until),
-        ) if _table_exists(conn, "msg_emoji_freq_daily") else []
-        total_msgs = conn.execute(
-            "SELECT COALESCE(SUM(messages), 0) FROM msg_stats_daily WHERE guild_id=? AND date>=? AND date<?",
-            (guild_id, since, until),
-        ).fetchone()[0]
-        top_voice = _top_rows(
-            conn,
-            """
-            SELECT user_id, SUM(seconds) AS total
-            FROM voice_totals_daily
-            WHERE guild_id=? AND date>=? AND date<?
-            GROUP BY user_id
-            ORDER BY total DESC LIMIT 5
-            """,
-            (guild_id, since, until),
-        )
-        total_voice = conn.execute(
-            "SELECT COALESCE(SUM(seconds), 0) FROM voice_totals_daily WHERE guild_id=? AND date>=? AND date<?",
-            (guild_id, since, until),
-        ).fetchone()[0]
-        top_balance = _top_rows(
-            conn,
-            """
-            SELECT user_id, balance
-            FROM coins_wallet
-            ORDER BY balance DESC LIMIT 5
-            """,
-            (),
-        ) if _table_exists(conn, "coins_wallet") else []
-        top_streaks = _top_rows(
-            conn,
-            """
-            SELECT user_id, streak
-            FROM daily_rewards
-            ORDER BY streak DESC LIMIT 5
-            """,
-            (),
-        ) if _table_exists(conn, "daily_rewards") else []
-        top_rep = _top_rows(
-            conn,
-            """
-            SELECT user_id, SUM(delta) AS total
-            FROM reputation
-            GROUP BY user_id
-            HAVING total > 0
-            ORDER BY total DESC LIMIT 5
-            """,
-            (),
-        ) if _table_exists(conn, "reputation") else []
-        top_toxic = _top_rows(
-            conn,
-            """
-            SELECT user_id, count
-            FROM toxicity_weekly
-            WHERE guild_id=? AND week=?
-            ORDER BY count DESC LIMIT 5
-            """,
-            (guild_id, toxicity_week_code),
-        ) if toxicity_week_code and _table_exists(conn, "toxicity_weekly") else []
-        top_heroes = _top_rows(
-            conn,
-            """
-            SELECT user_id, COALESCE(SUM(seconds), 0) AS total_seconds
-            FROM heroes_sessions
-            WHERE guild_id=? AND started_at>=? AND started_at<?
-            GROUP BY user_id
-            HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 5
-            """,
-            (
-                guild_id,
-                start_period_utc,
-                end_period_utc,
-            ),
-        ) if _table_exists(conn, "heroes_sessions") else []
-        top_activities = _top_rows(
-            conn,
-            """
-            SELECT activity_name, activity_type, COALESCE(SUM(seconds), 0) AS total_seconds
-            FROM activity_sessions
-            WHERE guild_id=? AND started_at>=? AND started_at<?
-            GROUP BY activity_name, activity_type
-            HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 5
-            """,
-            (
-                guild_id,
-                start_period_utc,
-                end_period_utc,
-            ),
-        ) if _table_exists(conn, "activity_sessions") else []
-        top_games = _top_rows(
-            conn,
-            """
-            SELECT activity_name, COALESCE(SUM(seconds), 0) AS total_seconds
-            FROM activity_sessions
-            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
-            GROUP BY activity_name
-            HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 10
-            """,
-            (
-                guild_id,
-                start_period_utc,
-                end_period_utc,
-            ),
-        ) if _table_exists(conn, "activity_sessions") else []
-        top_game_users = _top_rows(
-            conn,
-            """
-            SELECT user_id, COALESCE(SUM(seconds), 0) AS total_seconds
-            FROM activity_sessions
-            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
-            GROUP BY user_id
-            HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 10
-            """,
-            (
-                guild_id,
-                start_period_utc,
-                end_period_utc,
-            ),
-        ) if _table_exists(conn, "activity_sessions") else []
-        top_user_games = _top_rows(
-            conn,
-            """
-            SELECT user_id, activity_name, COALESCE(SUM(seconds), 0) AS total_seconds
-            FROM activity_sessions
-            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
-            GROUP BY user_id, activity_name
-            HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 200
-            """,
-            (guild_id, start_period_utc, end_period_utc),
-        ) if _table_exists(conn, "activity_sessions") else []
-        total_game_s = conn.execute(
-            """
-            SELECT COALESCE(SUM(seconds), 0)
-            FROM activity_sessions
-            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type='game'
-            """,
-            (guild_id, start_period_utc, end_period_utc),
-        ).fetchone()[0] if _table_exists(conn, "activity_sessions") else 0
-        top_other_activities = _top_rows(
-            conn,
-            """
-            SELECT activity_name, activity_type, COALESCE(SUM(seconds), 0) AS total_seconds
-            FROM activity_sessions
-            WHERE guild_id=? AND started_at>=? AND started_at<? AND activity_type<>'game'
-            GROUP BY activity_name, activity_type
-            HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 5
-            """,
-            (
-                guild_id,
-                start_period_utc,
-                end_period_utc,
-            ),
-        ) if _table_exists(conn, "activity_sessions") else []
-        top_activity_users = _top_rows(
-            conn,
-            """
-            SELECT user_id, COALESCE(SUM(seconds), 0) AS total_seconds
-            FROM activity_sessions
-            WHERE guild_id=? AND started_at>=? AND started_at<?
-            GROUP BY user_id
-            HAVING total_seconds > 0
-            ORDER BY total_seconds DESC LIMIT 5
-            """,
-            (
-                guild_id,
-                start_period_utc,
-                end_period_utc,
-            ),
-        ) if _table_exists(conn, "activity_sessions") else []
-        toxic_leader = _top_rows(
-            conn,
-            """
-            SELECT user_id, COUNT(*) AS total
-            FROM toxicity_log
-            WHERE guild_id=? AND logged_at>=? AND logged_at<?
-            GROUP BY user_id
-            ORDER BY total DESC LIMIT 1
-            """,
-            (guild_id, start_period_utc, end_period_utc),
-        ) if _table_exists(conn, "toxicity_log") else []
-        toxic_quote = None
-        if toxic_leader:
-            quote_row = conn.execute(
-                """
-                SELECT msg_snippet
-                FROM toxicity_log
-                WHERE guild_id=? AND user_id=? AND logged_at>=? AND logged_at<?
-                ORDER BY level DESC, logged_at DESC LIMIT 1
-                """,
-                (guild_id, int(toxic_leader[0][0]), start_period_utc, end_period_utc),
-            ).fetchone()
-            toxic_quote = quote_row[0] if quote_row else None
-
-    return {
-        "since": since,
-        "until": until,
-        "top_msgs": top_msgs,
-        "top_words": top_words,
-        "top_emojis": top_emojis,
-        "top_word_terms": top_word_terms,
-        "top_emoji_terms": top_emoji_terms,
-        "top_voice": top_voice,
-        "top_balance": top_balance,
-        "top_streaks": top_streaks,
-        "top_rep": top_rep,
-        "top_toxic": top_toxic or toxic_leader,
-        "top_heroes": top_heroes,
-        "top_activities": top_activities,
-        "top_games": top_games,
-        "top_game_users": top_game_users,
-        "top_user_games": top_user_games,
-        "top_other_activities": top_other_activities,
-        "top_activity_users": top_activity_users,
-        "toxic_leader": toxic_leader[0] if toxic_leader else None,
-        "toxic_quote": toxic_quote,
-        "total_msgs": total_msgs,
-        "total_voice_s": total_voice,
-        "total_game_s": total_game_s,
-    }
 
 
 def _get_weekly_stats(guild_id: int) -> dict:
