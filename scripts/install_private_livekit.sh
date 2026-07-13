@@ -62,6 +62,12 @@ keys:
 EOF
 chmod 0600 /etc/vipik-livekit.yaml
 
+cat > /etc/sysctl.d/99-vipik-livekit.conf <<'EOF'
+net.core.rmem_max=5000000
+net.core.wmem_max=5000000
+EOF
+sysctl -p /etc/sysctl.d/99-vipik-livekit.conf >/dev/null
+
 upsert_env LIVEKIT_API_KEY "$API_KEY"
 upsert_env LIVEKIT_API_SECRET "$API_SECRET"
 upsert_env LIVEKIT_URL "wss://${TAILSCALE_DNS}:8443"
