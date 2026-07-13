@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, toxicity_model_service, web_app_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, toxicity_model_service, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -471,6 +471,34 @@ class ToxicityMlTests(unittest.TestCase):
         self.assertTrue(version.startswith("tox-nb-"))
         prediction = toxicity_model_service.detect_toxicity("обычная спокойная беседа")
         self.assertEqual(prediction["effective_level"], prediction["rule_level"])
+
+
+class MlInsightsTests(IsolatedDatabaseTest):
+    def test_advisory_insights_find_anomalies_pairs_and_quality_issues(self):
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE coin_ledger(id INTEGER PRIMARY KEY, user_id INTEGER, delta INTEGER, reason TEXT, meta TEXT, created_at TEXT);
+                CREATE TABLE coins_wallet(user_id INTEGER PRIMARY KEY, balance INTEGER, updated_at TEXT);
+                INSERT INTO coin_ledger VALUES(1,1,10,'daily','{}','now');
+                INSERT INTO coin_ledger VALUES(2,1,12,'daily','{}','now');
+                INSERT INTO coin_ledger VALUES(3,1,500,'daily','{}','now');
+                INSERT INTO coins_wallet VALUES(1,999,'now');
+                CREATE TABLE activity_sessions(id INTEGER PRIMARY KEY, guild_id INTEGER, user_id INTEGER, activity_name TEXT, activity_type TEXT, started_at TEXT, ended_at TEXT, seconds INTEGER);
+                INSERT INTO activity_sessions VALUES(1,7,1,'Game A','game','a','b',3600);
+                INSERT INTO activity_sessions VALUES(2,7,2,'Game A','game','a','b',1800);
+                CREATE TABLE steam_profiles(user_id INTEGER PRIMARY KEY);
+                CREATE TABLE steam_owned_games_cache(user_id INTEGER, appid INTEGER);
+                INSERT INTO steam_owned_games_cache VALUES(99,1);
+                """
+            )
+        result = ml_insights.build_ml_insights(database=self.db_path, guild_id=7)
+        self.assertEqual(result["mode"], "advisory")
+        self.assertEqual(result["economy"]["anomalies"][0]["delta"], 500)
+        self.assertEqual(result["economy"]["wallet_mismatches"][0]["user_id"], 1)
+        self.assertEqual(result["activity"]["compatible_players"][0]["shared_games"], ["Game A"])
+        self.assertEqual(result["data_quality"]["checks"]["orphan_steam_games"], 1)
+        self.assertFalse(result["data_quality"]["healthy"])
 
 
 if __name__ == "__main__":

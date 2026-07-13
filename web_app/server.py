@@ -57,6 +57,7 @@ from core.community_store import (
 from core.profile_service import get_unified_profile, update_unified_profile
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
 from core.ml_artifacts import load_artifact_manifest
+from core.ml_insights import build_ml_insights
 from core.platform_store import (
     add_platform_message,
     can_access_platform_target,
@@ -676,6 +677,12 @@ async def api_ml_status(request: web.Request):
     )
 
 
+async def api_ml_insights(request: web.Request):
+    _require_admin(request)
+    guild_id = int(request.query.get("guild_id") or 0) or None
+    return _json(build_ml_insights(guild_id=guild_id))
+
+
 async def api_patch_feature(request: web.Request):
     _require_admin(request)
     guild_id = int(request.match_info["guild_id"])
@@ -1000,6 +1007,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/platform/messages/{message_id}/reactions", api_platform_message_reaction)
     app.router.add_get("/api/settings", api_settings)
     app.router.add_get("/api/ml/status", api_ml_status)
+    app.router.add_get("/api/ml/insights", api_ml_insights)
     app.router.add_patch("/api/guilds/{guild_id}/features/{feature}", api_patch_feature)
     app.router.add_put("/api/guilds/{guild_id}/features/{feature}/channels/{mode}/{channel_id}", api_put_channel)
     app.router.add_delete("/api/guilds/{guild_id}/features/{feature}/channels/{mode}/{channel_id}", api_delete_channel)
