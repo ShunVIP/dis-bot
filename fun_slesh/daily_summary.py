@@ -32,6 +32,11 @@ from core.summary_service import (
     render_summary_template as _render_summary_template,
     truthy_setting as _truthy_payload,
 )
+from core.summary_store import (
+    ensure_summary_tables as _ensure_tables,
+    mark_summary_posted as _mark_posted,
+    was_summary_posted as _was_posted,
+)
 from core.settings_store import (
     get_feature_payload,
     get_feature_policy,
@@ -154,19 +159,6 @@ REIMI_HAIKU_REQUEST = (
     "Данных сегодня почти нет.\n"
     "Сервер ждёт строки."
 )
-
-
-def _ensure_tables():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS summary_post_log (
-                guild_id     INTEGER NOT NULL,
-                summary_type TEXT    NOT NULL,
-                period_key   TEXT    NOT NULL,
-                posted_at    TEXT    NOT NULL,
-                PRIMARY KEY (guild_id, summary_type, period_key)
-            );
-        """)
 
 
 def _summary_targets(bot: commands.Bot) -> list[tuple[int, int]]:
@@ -1085,30 +1077,6 @@ def _weekly_period_key() -> str:
 def _monthly_period_key() -> str:
     start_month, start_next_month = _month_bounds_msk()
     return f"{start_month.isoformat()}_{start_next_month.isoformat()}"
-
-
-def _mark_posted(guild_id: int, summary_type: str, period_key: str):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO summary_post_log(guild_id, summary_type, period_key, posted_at)
-            VALUES(?,?,?,?)
-            """,
-            (guild_id, summary_type, period_key, datetime.now(UTC).isoformat()),
-        )
-        conn.commit()
-
-
-def _was_posted(guild_id: int, summary_type: str, period_key: str) -> bool:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            """
-            SELECT 1 FROM summary_post_log
-            WHERE guild_id=? AND summary_type=? AND period_key=?
-            """,
-            (guild_id, summary_type, period_key),
-        ).fetchone()
-    return bool(row)
 
 
 async def _build_period_embed(

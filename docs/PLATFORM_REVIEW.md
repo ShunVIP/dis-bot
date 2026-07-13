@@ -98,6 +98,8 @@
 
 ## Module settings migration 2026-06-30
 
+> Статус на 2026-07-13: миграция завершена. Описанные ниже fallback и dual-write были переходным состоянием. Production coverage-аудит подтвердил 4/4 legacy-строки без расхождений; исходные config-таблицы переименованы в `*_legacy_backup`, а runtime использует только `core.settings_store`.
+
 Первый подключенный модуль: `fun_slesh/daily_summary.py`.
 
 - Автопостинг итогов дня/недели/месяца теперь читает `daily_summary` policy из `core.settings_store`.

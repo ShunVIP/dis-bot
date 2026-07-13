@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, toxicity_model_service, voice_store, web_app_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_store, toxicity_model_service, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -48,6 +48,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
             patch.object(platform_store, "SOCIAL_DB", self.db_path),
             patch.object(voice_store, "SOCIAL_DB", self.db_path),
+            patch.object(summary_store, "SOCIAL_DB", self.db_path),
             patch.object(audit_settings, "SOCIAL_DB", self.db_path),
             patch.object(audit_settings, "BIRTHDAYS_DB", self.db_path),
             patch.object(finalize_settings_migration, "SOCIAL_DB", self.db_path),
@@ -490,6 +491,14 @@ class SummaryServiceTests(unittest.TestCase):
         self.assertEqual(bounded_int({"limit": "bad"}, "limit", 3), 3)
         self.assertTrue(block_enabled({}, "daily_block_stats"))
         self.assertFalse(block_enabled({"daily_block_stats": "выкл"}, "daily_block_stats"))
+
+
+class SummaryStoreTests(IsolatedDatabaseTest):
+    def test_post_log_is_idempotent_and_uses_shared_connection_policy(self):
+        self.assertFalse(summary_store.was_summary_posted(1, "weekly", "2026-W28"))
+        self.assertTrue(summary_store.mark_summary_posted(1, "weekly", "2026-W28"))
+        self.assertFalse(summary_store.mark_summary_posted(1, "weekly", "2026-W28"))
+        self.assertTrue(summary_store.was_summary_posted(1, "weekly", "2026-W28"))
 
 
 class DataCatalogTests(IsolatedDatabaseTest):

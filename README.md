@@ -44,6 +44,8 @@ ViPik — self-hosted Discord-бот с приватной веб-панелью
 - DM доступны только двум участникам; админские права не раскрывают чужую переписку;
 - редактирование и удаление сообщений проверяют автора;
 - API статуса версионированных ML-артефактов;
+- приватные голосовые комнаты через self-hosted LiveKit, выбор устройств и показ экрана;
+- закрытые voice-комнаты с membership и ограниченными приглашениями;
 - CSRF/origin-проверки, CSP и безопасные cookie.
 
 ## Структура проекта
@@ -152,14 +154,18 @@ git diff --check
 Systemd units:
 
 - `vipik-discord-bot.service`;
-- `vipik-web-app.service`.
+- `vipik-web-app.service`;
+- `vipik-livekit.service`.
 
 После deploy необходимо проверить:
 
 ```bash
-systemctl is-active vipik-discord-bot vipik-web-app
+systemctl is-active vipik-discord-bot vipik-web-app vipik-livekit
 journalctl -u vipik-discord-bot --no-pager -n 100
 journalctl -u vipik-web-app --no-pager -n 100
+scripts/smoke_livekit.sh
 ```
 
-Приватный web/app доступен через Tailscale. Не открывай админку и app в публичный интернет без отдельного reverse proxy, TLS и пересмотра модели доступа.
+Приватный web/app и signaling LiveKit публикуются через Tailscale Serve после однократного включения Serve владельцем tailnet. Media-порты разрешены только через `tailscale0`; публичное размещение без отдельного security review запрещено.
+
+Production-миграция feature-настроек завершена: рабочие модули читают только `core.settings_store`, а проверенные старые config-таблицы выведены из runtime-пути в архивные таблицы `*_legacy_backup`.
