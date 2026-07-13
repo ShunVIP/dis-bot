@@ -71,8 +71,8 @@ install -m 0644 "$APP_DIR/deploy/systemd/vipik-livekit.service.template" "/etc/s
 docker pull livekit/livekit-server:v1.13.1
 systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}.service"
-tailscale serve --bg --https=443 "http://${TAILSCALE_IP}:3000"
-tailscale serve --bg --https=8443 "http://${TAILSCALE_IP}:7880"
+tailscale serve --yes --bg --https=443 "http://${TAILSCALE_IP}:3000"
+tailscale serve --yes --bg --https=8443 "http://${TAILSCALE_IP}:7880"
 systemctl restart vipik-web-app.service
 systemctl is-active --quiet "${SERVICE_NAME}.service"
 systemctl is-active --quiet vipik-web-app.service
