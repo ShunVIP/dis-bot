@@ -4,8 +4,6 @@
 Игры сервера:
   /кнб              — КНБ с ботом
   /кнб_дуэль        — PvP КНБ
-  /кнб_ход          — ход в дуэли
-  /кнб_отмена       — отмена дуэли
   /угадай           — угадай число
   /виселица         — соло виселица против бота
   /виселица_старт   — мультиплеер: загадать слово
@@ -14,8 +12,7 @@
   /бж_дуэль         — блэкджек PvP (оба против бота, кто ближе к 21)
 """
 
-import os, sqlite3, random, asyncio
-from datetime import datetime, timedelta, timezone
+import random
 
 import discord
 from discord.ext import commands
@@ -23,11 +20,18 @@ from discord import app_commands
 
 from core.economy import add_coins, get_balance
 from core.economy_profile import currency_amount
+from core.game_service import (
+    CHOICES,
+    card_value as _card_value,
+    hand_text as _hand_str,
+    hand_total as _hand_total,
+    mask_hangman_word as _mask_word,
+    new_deck as _new_deck,
+    normalize_hangman_word,
+    rps_result as _rps_result,
+)
+from core.game_store import ensure_game_tables, guess_hangman_letter, start_hangman_game
 from utils.events_bus import emit
-
-UTC     = timezone.utc
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
-CHOICES = ("камень", "ножницы", "бумага")
 
 # ── Слова для виселицы ────────────────────────────────────────────────────────
 HANGMAN_WORDS = [
@@ -42,72 +46,6 @@ HANGMAN_WORDS = [
     "кинотеатр","библиотека","стадион","аквариум","зоопарк",
     "абракадабра","хулиганство","безобразие","вдохновение","загадочный",
 ]
-
-# ── Колода карт ────────────────────────────────────────────────────────────────
-SUITS  = ["♠", "♥", "♦", "♣"]
-RANKS  = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
-VALUES = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"10":10,
-          "J":10,"Q":10,"K":10,"A":11}
-
-def _new_deck() -> list[str]:
-    deck = [f"{r}{s}" for s in SUITS for r in RANKS]
-    random.shuffle(deck)
-    return deck
-
-def _card_value(card: str) -> int:
-    rank = card[:-1]  # убираем масть
-    return VALUES.get(rank, 0)
-
-def _hand_total(hand: list[str]) -> int:
-    total = sum(_card_value(c) for c in hand)
-    aces  = sum(1 for c in hand if c[:-1] == "A")
-    while total > 21 and aces:
-        total -= 10
-        aces  -= 1
-    return total
-
-def _hand_str(hand: list[str]) -> str:
-    return " ".join(hand)
-
-# ── БД ────────────────────────────────────────────────────────────────────────
-def _ensure_tables():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS rps_duels (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id     INTEGER NOT NULL,
-                channel_id   INTEGER NOT NULL,
-                initiator_id INTEGER NOT NULL,
-                opponent_id  INTEGER NOT NULL,
-                init_choice  TEXT,
-                opp_choice   TEXT,
-                status       TEXT NOT NULL,
-                created_at   TEXT NOT NULL,
-                expires_at   TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_rps_status  ON rps_duels(status);
-            CREATE INDEX IF NOT EXISTS idx_rps_channel ON rps_duels(channel_id);
-
-            -- Мультиплеер виселица
-            CREATE TABLE IF NOT EXISTS hangman_games (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id    INTEGER NOT NULL,
-                channel_id  INTEGER NOT NULL,
-                host_id     INTEGER NOT NULL,
-                word        TEXT    NOT NULL,
-                guessed     TEXT    NOT NULL DEFAULT '',
-                wrong       TEXT    NOT NULL DEFAULT '',
-                status      TEXT    NOT NULL DEFAULT 'active',
-                created_at  TEXT    NOT NULL
-            );
-        """)
-
-# ── КНБ helpers ───────────────────────────────────────────────────────────────
-def _rps_result(user: str, bot_pick: str) -> int:
-    if user == bot_pick: return 0
-    return 1 if (user, bot_pick) in {("камень","ножницы"),
-                                      ("ножницы","бумага"),
-                                      ("бумага","камень")} else -1
 
 def _money(user_id: int, amount: int) -> str:
     return currency_amount(user_id, amount)
@@ -126,9 +64,6 @@ HANGMAN_STAGES = [
     "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n / \\  |\n      |\n=========```",
 ]
 MAX_WRONG = len(HANGMAN_STAGES) - 1
-
-def _mask_word(word: str, guessed: set[str]) -> str:
-    return " ".join(c if c in guessed or c == "-" else r"\_" for c in word)
 
 def _hangman_embed(word: str, guessed_str: str, wrong_str: str,
                    status: str = "active") -> discord.Embed:
@@ -159,7 +94,7 @@ def _hangman_embed(word: str, guessed_str: str, wrong_str: str,
 class Games(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        _ensure_tables()
+        ensure_game_tables()
         # Активные соло-игры виселицы: user_id → {word, guessed, wrong}
         self._solo_hangman: dict[int, dict] = {}
 
@@ -218,95 +153,6 @@ class Games(commands.Cog):
             allowed_mentions=discord.AllowedMentions(users=True),
         )
 
-    @app_commands.command(name="кнб_ход", description="Сделать скрытый ход в PvP дуэли")
-    @app_commands.describe(дуэль="ID дуэли", выбор="Твой выбор")
-    @app_commands.choices(выбор=[
-        app_commands.Choice(name="камень",  value="камень"),
-        app_commands.Choice(name="ножницы", value="ножницы"),
-        app_commands.Choice(name="бумага",  value="бумага"),
-    ])
-    async def кнб_ход(self, interaction: discord.Interaction,
-                       дуэль: int, выбор: str):
-        now = datetime.now(UTC)
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT id,guild_id,channel_id,initiator_id,opponent_id,"
-                "init_choice,opp_choice,status,expires_at FROM rps_duels WHERE id=?",
-                (дуэль,)
-            ).fetchone()
-        if not row:
-            await interaction.response.send_message("❌ Дуэль не найдена.", ephemeral=True)
-            return
-        _id,guild_id,ch_id,init_id,opp_id,init_ch,opp_ch,status,expires = row
-        if status != "open":
-            await interaction.response.send_message("⛔ Дуэль уже завершена.", ephemeral=True)
-            return
-        if datetime.fromisoformat(expires) < now:
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute("UPDATE rps_duels SET status='expired' WHERE id=?", (_id,))
-            await interaction.response.send_message("⌛ Время истекло.", ephemeral=True)
-            return
-        if interaction.user.id not in (init_id, opp_id):
-            await interaction.response.send_message("❌ Ты не участник.", ephemeral=True)
-            return
-        col   = "init_choice" if interaction.user.id == init_id else "opp_choice"
-        cur_v = init_ch if col == "init_choice" else opp_ch
-        if cur_v:
-            await interaction.response.send_message("🔒 Ход уже сделан.", ephemeral=True)
-            return
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(f"UPDATE rps_duels SET {col}=? WHERE id=?", (выбор, _id))
-            row2 = conn.execute(
-                "SELECT init_choice,opp_choice,status FROM rps_duels WHERE id=?",(_id,)
-            ).fetchone()
-        c_init, c_opp, c_st = row2
-        await interaction.response.send_message(f"✅ Ход принят: **{выбор}**", ephemeral=True)
-        if c_init and c_opp and c_st == "open":
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute(
-                    "UPDATE rps_duels SET status='done' WHERE id=? AND status='open'",(_id,))
-            res = _rps_result(c_init, c_opp)
-            reward_txt = ""
-            if res > 0:
-                nb = add_coins(init_id, 20, "game_win", {"game":"rps_pvp"})
-                await emit("game_win", user_id=init_id, game="rps")
-                reward_txt = f"\n🏆 Победитель: <@{init_id}> +{_money(init_id, 20)} → **{_money(init_id, nb)}**"
-            elif res < 0:
-                nb = add_coins(opp_id, 20, "game_win", {"game":"rps_pvp"})
-                await emit("game_win", user_id=opp_id, game="rps")
-                reward_txt = f"\n🏆 Победитель: <@{opp_id}> +{_money(opp_id, 20)} → **{_money(opp_id, nb)}**"
-            else:
-                reward_txt = "\n🤝 Ничья!"
-            emb = discord.Embed(
-                title="⚔️ Итог КНБ дуэли",
-                description=(f"<@{init_id}>: **{c_init}**\n"
-                              f"<@{opp_id}>: **{c_opp}**{reward_txt}"),
-                color=discord.Color.gold()
-            )
-            ch = self.bot.get_channel(ch_id)
-            if ch:
-                await ch.send(embed=emb)
-
-    @app_commands.command(name="кнб_отмена", description="Отменить свою дуэль КНБ")
-    @app_commands.describe(дуэль="ID дуэли")
-    async def кнб_отмена(self, interaction: discord.Interaction, дуэль: int):
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT initiator_id, status FROM rps_duels WHERE id=?", (дуэль,)
-            ).fetchone()
-        if not row:
-            await interaction.response.send_message("❌ Не найдено.", ephemeral=True)
-            return
-        if row[1] != "open":
-            await interaction.response.send_message("⛔ Уже завершена.", ephemeral=True)
-            return
-        if row[0] != interaction.user.id:
-            await interaction.response.send_message("❌ Только создатель может отменить.", ephemeral=True)
-            return
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("UPDATE rps_duels SET status='cancelled' WHERE id=?", (дуэль,))
-        await interaction.response.send_message(f"🛑 Дуэль #{дуэль} отменена.")
-
     # ════════════════════════════════════════════════════════════
     #  Угадай число
     # ════════════════════════════════════════════════════════════
@@ -353,10 +199,10 @@ class Games(commands.Cog):
                 ephemeral=True)
             return
 
-        word = слово.strip().lower() if слово.strip() else random.choice(HANGMAN_WORDS)
-        # Фильтруем — только кириллица и дефис
-        import re
-        if not re.match(r'^[а-яёa-z\-]+$', word):
+        candidate = слово if слово.strip() else random.choice(HANGMAN_WORDS)
+        try:
+            word = normalize_hangman_word(candidate, minimum=1)
+        except ValueError:
             await interaction.response.send_message(
                 "❌ Слово может содержать только буквы и дефис.", ephemeral=True)
             return
@@ -376,27 +222,20 @@ class Games(commands.Cog):
                           description="Мультиплеер виселица — загадать слово для сервера")
     @app_commands.describe(слово="Слово которое угадывают другие")
     async def виселица_старт(self, interaction: discord.Interaction, слово: str):
-        import re
-        word = слово.strip().lower()
-        if not re.match(r'^[а-яёa-z\-]{2,}$', word):
+        try:
+            word = normalize_hangman_word(слово, minimum=2)
+        except ValueError:
             await interaction.response.send_message(
                 "❌ Слово: только буквы (2+ символа).", ephemeral=True)
             return
 
-        # Закрываем старую игру в этом канале если есть
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "UPDATE hangman_games SET status='cancelled'"
-                " WHERE channel_id=? AND status='active'",
-                (interaction.channel.id,)
-            )
-            cur = conn.execute(
-                "INSERT INTO hangman_games(guild_id,channel_id,host_id,word,"
-                "guessed,wrong,status,created_at) VALUES(?,?,?,?,'','','active',?)",
-                (interaction.guild.id, interaction.channel.id,
-                 interaction.user.id, word, datetime.now(UTC).isoformat())
-            )
-            game_id = cur.lastrowid
+        game = start_hangman_game(
+            interaction.guild.id,
+            interaction.channel.id,
+            interaction.user.id,
+            word,
+        )
+        game_id = game["id"]
 
         await interaction.response.send_message(
             f"✅ Слово загадано ({len(word)} букв). Игра #{game_id}",
@@ -416,80 +255,66 @@ class Games(commands.Cog):
             await interaction.response.send_message("❌ Введи одну букву.", ephemeral=True)
             return
 
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT id,host_id,word,guessed,wrong,status FROM hangman_games"
-                " WHERE channel_id=? AND status='active' ORDER BY id DESC LIMIT 1",
-                (interaction.channel.id,)
-            ).fetchone()
-
-        if not row:
+        result = guess_hangman_letter(
+            interaction.channel.id,
+            interaction.user.id,
+            letter,
+            max_wrong=MAX_WRONG,
+        )
+        outcome = result["outcome"]
+        if outcome == "no_game":
             await interaction.response.send_message(
-                "❌ Нет активной игры в этом канале.", ephemeral=True)
+                "❌ Нет активной игры в этом канале.", ephemeral=True
+            )
+            return
+        if outcome == "host_forbidden":
+            await interaction.response.send_message(
+                "❌ Загадавший не может угадывать.", ephemeral=True
+            )
+            return
+        if outcome == "repeated":
+            await interaction.response.send_message(
+                f"⚠️ Буква `{letter.upper()}` уже была.", ephemeral=True
+            )
             return
 
-        game_id, host_id, word, guessed_str, wrong_str, status = row
-        if interaction.user.id == host_id:
-            await interaction.response.send_message(
-                "❌ Загадавший не может угадывать.", ephemeral=True)
-            return
-
-        guessed = set(guessed_str)
-        wrong   = list(wrong_str)
-
-        if letter in guessed or letter in wrong:
-            await interaction.response.send_message(
-                f"⚠️ Буква `{letter.upper()}` уже была.", ephemeral=True)
-            return
-
-        if letter in word:
-            guessed.add(letter)
-            new_guessed = "".join(sorted(guessed))
-            # Проверяем победу
-            if all(c in guessed or c == "-" for c in word):
-                with sqlite3.connect(DB_PATH) as conn:
-                    conn.execute(
-                        "UPDATE hangman_games SET guessed=?,status='win' WHERE id=?",
-                        (new_guessed, game_id)
-                    )
-                reward = 30
-                nb = add_coins(interaction.user.id, reward, "game_win", {"game":"hangman"})
-                await emit("game_win", user_id=interaction.user.id, game="hangman")
-                emb = _hangman_embed(word, new_guessed, wrong_str, "win")
-                emb.add_field(
-                    name="🏆 Победитель",
-                    value=f"{interaction.user.mention} угадал последнюю букву!\n+{_money(interaction.user.id, reward)} → **{_money(interaction.user.id, nb)}**",
-                    inline=False)
-                await interaction.response.send_message(embed=emb)
-                return
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute(
-                    "UPDATE hangman_games SET guessed=? WHERE id=?",
-                    (new_guessed, game_id)
-                )
-            emb = _hangman_embed(word, new_guessed, wrong_str)
-            emb.add_field(name="✅", value=f"{interaction.user.mention} угадал `{letter.upper()}`!")
+        game = result["game"]
+        if outcome == "win":
+            reward = 30
+            new_balance = add_coins(
+                interaction.user.id, reward, "game_win", {"game": "hangman"}
+            )
+            await emit("game_win", user_id=interaction.user.id, game="hangman")
+            embed = _hangman_embed(
+                game["word"], game["guessed"], game["wrong"], "win"
+            )
+            embed.add_field(
+                name="🏆 Победитель",
+                value=(
+                    f"{interaction.user.mention} угадал последнюю букву!\n"
+                    f"+{_money(interaction.user.id, reward)} → "
+                    f"**{_money(interaction.user.id, new_balance)}**"
+                ),
+                inline=False,
+            )
+        elif outcome == "hit":
+            embed = _hangman_embed(game["word"], game["guessed"], game["wrong"])
+            embed.add_field(
+                name="✅",
+                value=f"{interaction.user.mention} угадал `{letter.upper()}`!",
+            )
+        elif outcome == "lose":
+            embed = _hangman_embed(
+                game["word"], game["guessed"], game["wrong"], "lose"
+            )
         else:
-            wrong.append(letter.upper())
-            new_wrong = "".join(wrong)
-            if len(wrong) >= MAX_WRONG:
-                with sqlite3.connect(DB_PATH) as conn:
-                    conn.execute(
-                        "UPDATE hangman_games SET wrong=?,status='lose' WHERE id=?",
-                        (new_wrong, game_id)
-                    )
-                emb = _hangman_embed(word, guessed_str, new_wrong, "lose")
-                await interaction.response.send_message(embed=emb)
-                return
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute(
-                    "UPDATE hangman_games SET wrong=? WHERE id=?",
-                    (new_wrong, game_id)
-                )
-            emb = _hangman_embed(word, guessed_str, new_wrong)
-            emb.add_field(name="❌", value=f"{interaction.user.mention} ошибся: `{letter.upper()}`")
+            embed = _hangman_embed(game["word"], game["guessed"], game["wrong"])
+            embed.add_field(
+                name="❌",
+                value=f"{interaction.user.mention} ошибся: `{letter.upper()}`",
+            )
 
-        await interaction.response.send_message(embed=emb)
+        await interaction.response.send_message(embed=embed)
 
     # ════════════════════════════════════════════════════════════
     #  БЛЭКДЖЕК — соло против бота

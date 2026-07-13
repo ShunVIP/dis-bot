@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, game_service, game_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -45,6 +45,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(settings_migration, "BIRTHDAYS_DB", self.db_path),
             patch.object(birthday_store, "BIRTHDAYS_DB", self.db_path),
             patch.object(game_profiles, "SOCIAL_DB", self.db_path),
+            patch.object(game_store, "SOCIAL_DB", self.db_path),
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
             patch.object(platform_store, "SOCIAL_DB", self.db_path),
@@ -641,6 +642,63 @@ class SummaryStatsStoreTests(IsolatedDatabaseTest):
             summary_stats_store.get_period_stats(
                 7, date(2026, 7, 13), date(2026, 7, 13)
             )
+
+
+class GameLayerTests(IsolatedDatabaseTest):
+    def test_pure_game_rules_cover_rps_blackjack_and_word_validation(self):
+        self.assertEqual(game_service.rps_result("камень", "ножницы"), 1)
+        self.assertEqual(game_service.rps_result("бумага", "ножницы"), -1)
+        self.assertEqual(game_service.rps_result("камень", "камень"), 0)
+        self.assertEqual(game_service.hand_total(["A♠", "A♥", "9♦"]), 21)
+        self.assertEqual(game_service.hand_total(["K♠", "Q♥", "2♦"]), 22)
+        self.assertEqual(len(set(game_service.new_deck())), 52)
+        self.assertEqual(game_service.normalize_hangman_word("  Тест-слово "), "тест-слово")
+        with self.assertRaises(ValueError):
+            game_service.normalize_hangman_word("x")
+
+    def test_hangman_store_replaces_channel_game_and_applies_atomic_turns(self):
+        first = game_store.start_hangman_game(
+            7, 50, 100, "старое", created_at="2026-07-13T00:00:00+00:00"
+        )
+        second = game_store.start_hangman_game(
+            7, 50, 101, "аб", created_at="2026-07-13T00:01:00+00:00"
+        )
+        other = game_store.start_hangman_game(
+            8, 60, 200, "вг", created_at="2026-07-13T00:02:00+00:00"
+        )
+
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(game_store.get_active_hangman_game(50)["id"], second["id"])
+        self.assertEqual(game_store.get_active_hangman_game(60)["id"], other["id"])
+        self.assertEqual(
+            game_store.guess_hangman_letter(50, 101, "а", max_wrong=2)["outcome"],
+            "host_forbidden",
+        )
+        hit = game_store.guess_hangman_letter(50, 300, "а", max_wrong=2)
+        self.assertEqual(hit["outcome"], "hit")
+        self.assertEqual(hit["game"]["guessed"], "а")
+        self.assertEqual(
+            game_store.guess_hangman_letter(50, 300, "А", max_wrong=2)["outcome"],
+            "repeated",
+        )
+        won = game_store.guess_hangman_letter(50, 300, "б", max_wrong=2)
+        self.assertEqual(won["outcome"], "win")
+        self.assertEqual(won["game"]["status"], "win")
+        self.assertIsNone(game_store.get_active_hangman_game(50))
+
+        self.assertEqual(
+            game_store.guess_hangman_letter(60, 300, "д", max_wrong=2)["outcome"],
+            "miss",
+        )
+        lost = game_store.guess_hangman_letter(60, 300, "е", max_wrong=2)
+        self.assertEqual(lost["outcome"], "lose")
+        self.assertEqual(lost["game"]["wrong"], "ДЕ")
+
+        with db_connection(self.db_path) as conn:
+            old_status = conn.execute(
+                "SELECT status FROM hangman_games WHERE id=?", (first["id"],)
+            ).fetchone()[0]
+        self.assertEqual(old_status, "cancelled")
 
 
 class DataCatalogTests(IsolatedDatabaseTest):
