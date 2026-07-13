@@ -1,8 +1,9 @@
-const CACHE_NAME = "vipik-control-v1";
+const CACHE_NAME = "vipik-control-v2";
 const APP_SHELL = [
   "/",
   "/static/styles.css",
   "/static/app.js",
+  "/static/vendor/livekit-client.umd.min.js",
   "/static/manifest.json",
   "/static/icon.svg"
 ];

@@ -1,0 +1,17 @@
+[Unit]
+Description=ViPik private LiveKit media server
+After=network-online.target tailscaled.service docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm vipik-livekit
+ExecStart=/usr/bin/docker run --rm --name vipik-livekit --network host --volume /etc/vipik-livekit.yaml:/etc/livekit.yaml:ro livekit/livekit-server:v1.13.1 --config /etc/livekit.yaml
+ExecStop=/usr/bin/docker stop -t 15 vipik-livekit
+Restart=always
+RestartSec=5
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target

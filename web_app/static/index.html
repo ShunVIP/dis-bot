@@ -259,6 +259,7 @@
             <div id="voiceRooms" class="voice-room-list"></div>
             <form id="voiceRoomForm" class="voice-room-form">
               <input id="voiceRoomName" placeholder="Новая комната">
+              <label class="check-line"><input id="voiceRoomPrivate" type="checkbox"> Приватная</label>
               <button class="button" type="submit">Создать</button>
             </form>
           </aside>
@@ -273,9 +274,16 @@
             <div id="voiceMembers" class="voice-members">
               <div class="voice-empty">Пока никто не подключён</div>
             </div>
+            <div id="voiceMedia" class="voice-media hidden"></div>
+            <div id="voiceAudio" class="voice-audio" aria-hidden="true"></div>
+            <div id="voiceDevicePanel" class="voice-device-panel hidden">
+              <label>Микрофон<select id="voiceInputDevice"></select></label>
+              <label>Вывод звука<select id="voiceOutputDevice"></select></label>
+            </div>
             <div class="voice-controls">
               <button id="voiceMute" class="voice-control" type="button" disabled title="Микрофон">🎙</button>
               <button id="voiceDeafen" class="voice-control" type="button" disabled title="Звук">🎧</button>
+              <button id="voiceScreen" class="voice-control" type="button" disabled title="Показать экран">▣</button>
               <button id="voiceSettings" class="voice-control" type="button" disabled title="Устройства">⚙</button>
               <button id="voiceLeave" class="voice-control danger" type="button" disabled title="Отключиться">⏏</button>
             </div>
@@ -385,6 +393,7 @@
     </section>
   </main>
 
+  <script src="/static/vendor/livekit-client.umd.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

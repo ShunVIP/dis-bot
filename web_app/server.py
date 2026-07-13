@@ -101,7 +101,14 @@ from core.web_app_store import (
     upsert_login_profile,
     upsert_web_user,
 )
-from core.voice_store import create_voice_room, get_voice_room, list_voice_rooms
+from core.voice_store import (
+    can_access_voice_room,
+    create_voice_invite,
+    create_voice_room,
+    get_voice_room,
+    list_voice_rooms,
+    redeem_voice_invite,
+)
 
 DISCORD_API = "https://discord.com/api/v10"
 STATIC_DIR = PROJECT_ROOT / "web_app" / "static"
@@ -196,7 +203,7 @@ def _livekit_token(identity: str, name: str, room_name: str) -> str:
         "iss": LIVEKIT_API_KEY,
         "sub": identity,
         "nbf": now - 5,
-        "exp": now + 6 * 60 * 60,
+        "exp": now + 15 * 60,
         "name": name,
         "video": {
             "room": room_name,
@@ -916,30 +923,61 @@ async def api_lol_unlink(request: web.Request):
 
 
 async def api_voice_rooms(request: web.Request):
-    _require_user(request)
-    guild_id = int(request.query.get("guild_id") or 0)
-    return _json({"rooms": list_voice_rooms(guild_id)})
+    user = _require_user(request)
+    guild_id = 0
+    return _json({"rooms": list_voice_rooms(
+        guild_id,
+        user_id=user["id"],
+        include_private=has_admin_access(user["id"]),
+    )})
 
 
 async def api_voice_room_create(request: web.Request):
     user = _require_user(request)
     data = await request.json()
-    guild_id = int(data.get("guild_id") or 0)
+    guild_id = 0
     name = str(data.get("name") or "").strip()
     if not name:
         return _json({"error": "name_required"}, 400)
-    room = create_voice_room(guild_id, name, created_by=user["id"], is_private=bool(data.get("private")))
+    try:
+        room = create_voice_room(guild_id, name, created_by=user["id"], is_private=bool(data.get("private")))
+    except ValueError as exc:
+        return _json({"error": str(exc)}, 400)
     return _json({"ok": True, "room": room})
+
+
+async def api_voice_invite(request: web.Request):
+    user = _require_user(request)
+    data = await request.json()
+    guild_id = 0
+    room_id = int(data.get("room_id") or 0)
+    room = get_voice_room(room_id, guild_id)
+    if not room:
+        return _json({"error": "room_not_found"}, 404)
+    if not can_access_voice_room(room_id, user["id"], is_admin=has_admin_access(user["id"])):
+        return _json({"error": "room_access_denied"}, 403)
+    token = create_voice_invite(
+        room_id,
+        user["id"],
+        max_uses=10,
+        is_admin=has_admin_access(user["id"]),
+    )
+    return _json({"ok": True, "room_id": room_id, "invite": token, "expires_in": 24 * 60 * 60})
 
 
 async def api_voice_token(request: web.Request):
     user = _require_user(request)
     data = await request.json()
-    guild_id = int(data.get("guild_id") or 0)
+    guild_id = 0
     room_id = int(data.get("room_id") or 0)
     room = get_voice_room(room_id, guild_id)
     if not room:
         return _json({"error": "room_not_found"}, 404)
+    if room["is_private"] and not can_access_voice_room(
+        room_id, user["id"], is_admin=has_admin_access(user["id"])
+    ):
+        if not redeem_voice_invite(room_id, user["id"], str(data.get("invite") or "")):
+            return _json({"error": "room_access_denied"}, 403)
 
     identity = str(user["id"])
     display_name = user.get("global_name") or user.get("username") or identity
@@ -1024,6 +1062,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/lol/unlink", api_lol_unlink)
     app.router.add_get("/api/voice/rooms", api_voice_rooms)
     app.router.add_post("/api/voice/rooms", api_voice_room_create)
+    app.router.add_post("/api/voice/invite", api_voice_invite)
     app.router.add_post("/api/voice/token", api_voice_token)
     app.router.add_post("/api/bot/chat", bot_chat_ingest)
     app.router.add_static("/uploads", UPLOADS_DIR, append_version=True)

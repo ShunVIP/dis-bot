@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, toxicity_model_service, web_app_store
+from core import birthday_store, community_store, economy, economy_profile, game_profiles, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, toxicity_model_service, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import _member_has_admin_access
@@ -20,6 +24,7 @@ from core.summary_service import (
     merge_summary_settings,
     render_summary_template,
 )
+from web_app import server as web_server
 from web_app.server import security_middleware
 from scripts.build_ml_manifest import build_manifest
 from scripts.train_toxicity_model import train_model
@@ -41,6 +46,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
             patch.object(platform_store, "SOCIAL_DB", self.db_path),
+            patch.object(voice_store, "SOCIAL_DB", self.db_path),
             patch.object(parody_message_store, "DB_PATH", self.db_path),
             patch.object(parody_feedback_store, "PARODY_RATINGS_DB", self.db_path),
         ]
@@ -398,6 +404,42 @@ class PermissionTests(IsolatedDatabaseTest):
         self.assertFalse(_member_has_admin_access(regular))
         self.assertTrue(_member_has_admin_access(manager))
         self.assertTrue(_member_has_admin_access(admin))
+
+
+class VoiceRoomTests(IsolatedDatabaseTest):
+    def test_private_room_is_hidden_until_invite_is_redeemed(self):
+        room = voice_store.create_voice_room(7, "Тихая комната", created_by=100, is_private=True)
+
+        self.assertEqual([item["id"] for item in voice_store.list_voice_rooms(7, user_id=100)][-1], room["id"])
+        self.assertNotIn(room["id"], [item["id"] for item in voice_store.list_voice_rooms(7, user_id=200)])
+        self.assertFalse(voice_store.can_access_voice_room(room["id"], 200))
+
+        invite = voice_store.create_voice_invite(room["id"], 100, max_uses=1)
+        self.assertTrue(voice_store.redeem_voice_invite(room["id"], 200, invite))
+        self.assertTrue(voice_store.can_access_voice_room(room["id"], 200))
+        self.assertFalse(voice_store.redeem_voice_invite(room["id"], 300, invite))
+        self.assertIn(room["id"], [item["id"] for item in voice_store.list_voice_rooms(7, user_id=200)])
+
+    def test_room_names_are_normalized_and_custom_rooms_are_bounded(self):
+        room = voice_store.create_voice_room(1, "  Игровая   два  ", created_by=10)
+        self.assertEqual(room["name"], "Игровая два")
+        with self.assertRaises(ValueError):
+            voice_store.create_voice_room(1, "   ", created_by=10)
+
+    def test_livekit_token_is_signed_and_short_lived(self):
+        with patch.object(web_server, "LIVEKIT_API_KEY", "test-key"), patch.object(
+            web_server, "LIVEKIT_API_SECRET", "test-secret"
+        ):
+            token = web_server._livekit_token("42", "User", "room-1")
+        header, payload, signature = token.split(".")
+        expected = hmac.new(b"test-secret", f"{header}.{payload}".encode(), hashlib.sha256).digest()
+        actual = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        self.assertTrue(hmac.compare_digest(expected, actual))
+        self.assertEqual(claims["iss"], "test-key")
+        self.assertEqual(claims["video"]["room"], "room-1")
+        self.assertTrue(claims["video"]["roomJoin"])
+        self.assertLessEqual(claims["exp"] - claims["nbf"], 15 * 60 + 5)
 
 
 class SummaryServiceTests(unittest.TestCase):

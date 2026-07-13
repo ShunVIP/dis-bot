@@ -7,6 +7,7 @@ const state = {
     deafened: false,
     connected: false,
     livekit: null,
+    screenSharing: false,
   },
   platform: {
     scope: "channel",
@@ -115,11 +116,12 @@ function setView(name) {
 }
 
 async function applyInitialVoiceInvite() {
-  const voiceRoomId = Number(new URLSearchParams(location.search).get("voice") || 0);
+  const params = new URLSearchParams(location.search);
+  const voiceRoomId = Number(params.get("voice") || 0);
   if (!voiceRoomId || !state.me?.authenticated) return;
   setView("voice");
   await loadVoiceRooms();
-  await joinVoiceRoom(voiceRoomId);
+  await joinVoiceRoom(voiceRoomId, params.get("voice_invite") || "");
 }
 
 async function applyInitialView() {
@@ -807,7 +809,8 @@ function renderVoiceRooms(rooms) {
   const box = $("voiceRooms");
   box.innerHTML = rooms.map((room) => {
     const active = state.voice.room?.id === room.id ? " active" : "";
-    return `<button class="voice-room${active}" type="button" data-room-id="${room.id}"># ${escapeHtml(room.name)}</button>`;
+    const privacy = room.is_private ? " voice-room-private" : "";
+    return `<button class="voice-room${active}${privacy}" type="button" data-room-id="${room.id}"># ${escapeHtml(room.name)}</button>`;
   }).join("");
   box.querySelectorAll(".voice-room").forEach((button) => {
     button.addEventListener("click", () => joinVoiceRoom(Number(button.dataset.roomId)).catch(console.error));
@@ -820,23 +823,39 @@ function renderVoiceMembers() {
     box.innerHTML = `<div class="voice-empty">Пока никто не подключён</div>`;
     return;
   }
-  const user = state.me.user;
-  const mic = state.voice.muted ? "микрофон выключен" : "говорит";
-  const sound = state.voice.deafened ? "звук выключен" : "слышит комнату";
-  box.innerHTML = `
+  const local = state.voice.livekit?.localParticipant;
+  const remote = state.voice.livekit ? [...state.voice.livekit.remoteParticipants.values()] : [];
+  const participants = [
+    {
+      name: local?.name || state.me.user.global_name || state.me.user.username || String(state.me.user.id),
+      identity: local?.identity || String(state.me.user.id),
+      local: true,
+      speaking: Boolean(local?.isSpeaking),
+      mic: !state.voice.muted,
+    },
+    ...remote.map((participant) => ({
+      name: participant.name || participant.identity,
+      identity: participant.identity,
+      local: false,
+      speaking: Boolean(participant.isSpeaking),
+      mic: Boolean(participant.isMicrophoneEnabled),
+    })),
+  ];
+  box.innerHTML = participants.map((participant) => `
     <div class="voice-member">
-      <strong>${escapeHtml(user.global_name || user.username || String(user.id))}</strong>
-      <span>${mic} · ${sound}</span>
+      <strong>${escapeHtml(participant.name)}${participant.local ? " (вы)" : ""}</strong>
+      <span>${participant.mic ? (participant.speaking ? "говорит" : "микрофон включён") : "микрофон выключен"}${participant.local && state.voice.deafened ? " · звук выключен" : ""}</span>
     </div>
-  `;
+  `).join("");
 }
 
 function setVoiceControls(enabled) {
-  ["voiceMute", "voiceDeafen", "voiceSettings", "voiceLeave"].forEach((id) => {
+  ["voiceMute", "voiceDeafen", "voiceScreen", "voiceSettings", "voiceLeave"].forEach((id) => {
     $(id).disabled = !enabled;
   });
   $("voiceMute").classList.toggle("active", state.voice.muted);
   $("voiceDeafen").classList.toggle("active", state.voice.deafened);
+  $("voiceScreen").classList.toggle("active", state.voice.screenSharing);
 }
 
 async function loadVoiceRooms() {
@@ -845,33 +864,113 @@ async function loadVoiceRooms() {
   renderVoiceRooms(data.rooms || []);
 }
 
-async function createVoiceRoom(name) {
+async function createVoiceRoom(name, isPrivate = false) {
   await api("/api/voice/rooms", {
     method: "POST",
-    body: JSON.stringify({ guild_id: 0, name }),
+    body: JSON.stringify({ guild_id: 0, name, private: isPrivate }),
   });
   await loadVoiceRooms();
 }
 
-async function joinVoiceRoom(roomId) {
+function setVoiceStatus(text) {
+  $("voiceStatus").textContent = text;
+}
+
+function removeVoiceTrack(trackSid) {
+  if (!trackSid) return;
+  document.querySelectorAll(`[data-track-sid="${trackSid}"]`).forEach((item) => item.remove());
+  $("voiceMedia").classList.toggle("hidden", !$("voiceMedia").children.length);
+}
+
+function attachVoiceTrack(track, publication, participant) {
+  const trackSid = publication?.trackSid || track?.sid;
+  if (!trackSid) return;
+  removeVoiceTrack(trackSid);
+  const element = track.attach();
+  element.autoplay = true;
+  if (track.kind === "audio") {
+    element.muted = state.voice.deafened;
+    element.dataset.trackSid = trackSid;
+    $("voiceAudio").appendChild(element);
+    return;
+  }
+  const tile = document.createElement("div");
+  tile.className = "voice-video";
+  tile.dataset.trackSid = trackSid;
+  element.playsInline = true;
+  if (participant === state.voice.livekit?.localParticipant) element.muted = true;
+  const label = document.createElement("span");
+  label.textContent = `${participant?.name || participant?.identity || "Участник"} · экран`;
+  tile.append(element, label);
+  $("voiceMedia").appendChild(tile);
+  $("voiceMedia").classList.remove("hidden");
+}
+
+function bindLiveKitRoom(room) {
+  const { RoomEvent } = window.LivekitClient;
+  const refresh = () => renderVoiceMembers();
+  room.on(RoomEvent.ParticipantConnected, refresh);
+  room.on(RoomEvent.ParticipantDisconnected, refresh);
+  room.on(RoomEvent.ActiveSpeakersChanged, refresh);
+  room.on(RoomEvent.TrackMuted, refresh);
+  room.on(RoomEvent.TrackUnmuted, refresh);
+  room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+    attachVoiceTrack(track, publication, participant);
+    refresh();
+  });
+  room.on(RoomEvent.TrackUnsubscribed, (track, publication) => {
+    track.detach().forEach((element) => element.remove());
+    removeVoiceTrack(publication?.trackSid || track?.sid);
+    refresh();
+  });
+  room.on(RoomEvent.LocalTrackPublished, (publication, participant) => {
+    if (publication.track?.kind === "video") attachVoiceTrack(publication.track, publication, participant);
+    refresh();
+  });
+  room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+    removeVoiceTrack(publication?.trackSid);
+    refresh();
+  });
+  room.on(RoomEvent.Disconnected, () => leaveVoiceRoom({ fromRoom: true }).catch(console.error));
+  room.on(RoomEvent.MediaDevicesError, () => setVoiceStatus("Ошибка устройства: проверь доступ браузера к микрофону или экрану."));
+}
+
+async function joinVoiceRoom(roomId, invite = "") {
   if (!state.me?.authenticated) return;
   await leaveVoiceRoom({ silent: true });
   const payload = await api("/api/voice/token", {
     method: "POST",
-    body: JSON.stringify({ guild_id: 0, room_id: roomId }),
+    body: JSON.stringify({ guild_id: 0, room_id: roomId, invite }),
   });
   state.voice.room = payload.room;
-  state.voice.connected = true;
-  state.voice.muted = false;
-  state.voice.deafened = false;
   $("voiceRoomTitle").textContent = payload.room.name;
-  $("voiceStatus").textContent = payload.configured
-    ? "Подключение к голосовому серверу готово. LiveKit будет использовать этот токен."
-    : "Демо-режим: LiveKit ещё не настроен, но интерфейс и локальный микрофон уже работают.";
+  if (!payload.configured) {
+    setVoiceStatus("Голосовой сервер пока не настроен. Комната доступна, но подключение отключено.");
+    await loadVoiceRooms();
+    return;
+  }
+  if (!window.LivekitClient?.Room) throw new Error("LiveKit SDK is unavailable");
+  setVoiceStatus("Подключаемся к голосовой комнате…");
+  const room = new window.LivekitClient.Room({ adaptiveStream: true, dynacast: true });
+  bindLiveKitRoom(room);
   try {
-    state.voice.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    await room.connect(payload.livekit_url, payload.token);
+    state.voice.livekit = room;
+    await room.localParticipant.setMicrophoneEnabled(true);
+    state.voice.connected = true;
+    state.voice.muted = false;
+    state.voice.deafened = false;
+    setVoiceStatus("Подключено. Микрофон и показ экрана работают внутри приватной сети.");
+    if (invite) {
+      const url = new URL(location.href);
+      url.searchParams.delete("voice_invite");
+      history.replaceState({}, "", url);
+    }
   } catch (error) {
-    $("voiceStatus").textContent = "Комната выбрана, но браузер не дал доступ к микрофону.";
+    room.disconnect();
+    state.voice.livekit = null;
+    setVoiceStatus(`Не удалось подключиться: ${error?.message || "ошибка голосового сервера"}`);
+    throw error;
   }
   setVoiceControls(true);
   renderVoiceMembers();
@@ -879,9 +978,12 @@ async function joinVoiceRoom(roomId) {
 }
 
 async function leaveVoiceRoom(options = {}) {
-  if (state.voice.stream) {
-    state.voice.stream.getTracks().forEach((track) => track.stop());
-  }
+  const room = state.voice.livekit;
+  if (room && !options.fromRoom) room.disconnect();
+  $("voiceAudio").replaceChildren();
+  $("voiceMedia").replaceChildren();
+  $("voiceMedia").classList.add("hidden");
+  $("voiceDevicePanel").classList.add("hidden");
   state.voice = {
     room: null,
     stream: null,
@@ -889,6 +991,7 @@ async function leaveVoiceRoom(options = {}) {
     deafened: false,
     connected: false,
     livekit: null,
+    screenSharing: false,
   };
   setVoiceControls(false);
   renderVoiceMembers();
@@ -899,31 +1002,47 @@ async function leaveVoiceRoom(options = {}) {
   }
 }
 
-function toggleMute() {
+async function toggleMute() {
   if (!state.voice.connected) return;
   state.voice.muted = !state.voice.muted;
-  if (state.voice.stream) {
-    state.voice.stream.getAudioTracks().forEach((track) => {
-      track.enabled = !state.voice.muted && !state.voice.deafened;
-    });
-  }
+  await state.voice.livekit.localParticipant.setMicrophoneEnabled(!state.voice.muted);
   $("voiceMute").title = state.voice.muted ? "Включить микрофон" : "Выключить микрофон";
   setVoiceControls(true);
   renderVoiceMembers();
 }
 
-function toggleDeafen() {
+async function toggleDeafen() {
   if (!state.voice.connected) return;
   state.voice.deafened = !state.voice.deafened;
-  if (state.voice.deafened) state.voice.muted = true;
-  if (state.voice.stream) {
-    state.voice.stream.getAudioTracks().forEach((track) => {
-      track.enabled = !state.voice.muted && !state.voice.deafened;
-    });
+  if (state.voice.deafened && !state.voice.muted) {
+    state.voice.muted = true;
+    await state.voice.livekit.localParticipant.setMicrophoneEnabled(false);
   }
+  $("voiceAudio").querySelectorAll("audio").forEach((audio) => { audio.muted = state.voice.deafened; });
   $("voiceDeafen").title = state.voice.deafened ? "Включить звук" : "Выключить звук";
   setVoiceControls(true);
   renderVoiceMembers();
+}
+
+async function toggleScreenShare() {
+  if (!state.voice.connected) return;
+  const enabled = !state.voice.screenSharing;
+  await state.voice.livekit.localParticipant.setScreenShareEnabled(enabled, { audio: true });
+  state.voice.screenSharing = enabled;
+  $("voiceScreen").title = enabled ? "Остановить показ экрана" : "Показать экран";
+  setVoiceControls(true);
+}
+
+async function loadVoiceDevices() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const fill = (id, kind, fallback) => {
+    const select = $(id);
+    select.innerHTML = devices.filter((device) => device.kind === kind).map((device, index) =>
+      `<option value="${escapeHtml(device.deviceId)}">${escapeHtml(device.label || `${fallback} ${index + 1}`)}</option>`
+    ).join("");
+  };
+  fill("voiceInputDevice", "audioinput", "Микрофон");
+  fill("voiceOutputDevice", "audiooutput", "Динамики");
 }
 
 async function linkLol() {
@@ -1191,20 +1310,49 @@ $("voiceRoomForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const name = $("voiceRoomName").value.trim();
   if (!name) return;
-  await createVoiceRoom(name).catch(console.error);
+  await createVoiceRoom(name, $("voiceRoomPrivate").checked).catch(console.error);
   $("voiceRoomName").value = "";
+  $("voiceRoomPrivate").checked = false;
 });
 
-$("voiceMute").addEventListener("click", toggleMute);
-$("voiceDeafen").addEventListener("click", toggleDeafen);
+$("voiceMute").addEventListener("click", () => toggleMute().catch(console.error));
+$("voiceDeafen").addEventListener("click", () => toggleDeafen().catch(console.error));
+$("voiceScreen").addEventListener("click", () => toggleScreenShare().catch((error) => {
+  setVoiceStatus(`Показ экрана не запущен: ${error?.message || "доступ отменён"}`);
+}));
 $("voiceLeave").addEventListener("click", () => leaveVoiceRoom().catch(console.error));
-$("voiceSettings").addEventListener("click", () => {
-  $("voiceStatus").textContent = "Настройки устройств будут здесь: микрофон, вывод звука, чувствительность.";
+$("voiceSettings").addEventListener("click", async () => {
+  await loadVoiceDevices();
+  $("voiceDevicePanel").classList.toggle("hidden");
 });
 $("voiceInvite").addEventListener("click", async () => {
-  const url = state.voice.room ? `${location.origin}/?voice=${state.voice.room.id}` : location.origin;
-  await navigator.clipboard?.writeText(url).catch(() => {});
-  $("voiceStatus").textContent = "Ссылка на голосовой вход скопирована.";
+  if (!state.voice.room) return;
+  const url = new URL(location.origin);
+  url.searchParams.set("voice", state.voice.room.id);
+  if (state.voice.room.is_private) {
+    const data = await api("/api/voice/invite", {
+      method: "POST",
+      body: JSON.stringify({ guild_id: 0, room_id: state.voice.room.id }),
+    });
+    url.searchParams.set("voice_invite", data.invite);
+  }
+  await navigator.clipboard?.writeText(url.toString()).catch(() => {});
+  setVoiceStatus(state.voice.room.is_private
+    ? "Приватная ссылка на 10 входов скопирована; она действует 24 часа."
+    : "Ссылка на голосовой вход скопирована.");
+});
+$("voiceInputDevice").addEventListener("change", async (event) => {
+  if (!state.voice.connected) return;
+  await state.voice.livekit.localParticipant.setMicrophoneEnabled(false);
+  await state.voice.livekit.localParticipant.setMicrophoneEnabled(true, { deviceId: event.target.value });
+  state.voice.muted = false;
+  setVoiceControls(true);
+});
+$("voiceOutputDevice").addEventListener("change", async (event) => {
+  if (!state.voice.connected) return;
+  if (state.voice.livekit.switchActiveDevice) {
+    await state.voice.livekit.switchActiveDevice("audiooutput", event.target.value);
+  }
 });
 
 $("lolLinkForm").addEventListener("submit", async (event) => {

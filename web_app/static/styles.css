@@ -727,7 +727,7 @@ p { color: var(--muted); line-height: 1.55; }
 .voice-stage {
   min-width: 0;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto minmax(120px, 1fr) auto auto auto;
   background: #101214;
 }
 
@@ -748,6 +748,63 @@ p { color: var(--muted); line-height: 1.55; }
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 10px;
   overflow: auto;
+}
+
+.voice-media {
+  padding: 0 16px 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  max-height: 52vh;
+  overflow: auto;
+}
+
+.voice-media.hidden,
+.voice-device-panel.hidden { display: none; }
+
+.voice-video {
+  position: relative;
+  min-height: 180px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #070809;
+}
+
+.voice-video video {
+  width: 100%;
+  height: 100%;
+  min-height: 180px;
+  object-fit: contain;
+  display: block;
+}
+
+.voice-video span {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.72);
+  font-size: 12px;
+}
+
+.voice-audio { display: none; }
+
+.voice-device-panel {
+  border-top: 1px solid var(--line);
+  background: #131619;
+  padding: 12px 16px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.voice-device-panel label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .voice-member,
@@ -791,6 +848,8 @@ p { color: var(--muted); line-height: 1.55; }
   color: #100d04;
   border-color: var(--accent-2);
 }
+
+.voice-room-private::after { content: " 🔒"; }
 
 .voice-control.danger {
   background: var(--danger);
