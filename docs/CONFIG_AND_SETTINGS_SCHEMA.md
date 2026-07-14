@@ -131,6 +131,7 @@ Use stable snake_case names:
 - `reminders`
 - `economy`
 - `reputation`
+- `rep_roles`
 - `web_chat`
 
 ## Web/App Contract

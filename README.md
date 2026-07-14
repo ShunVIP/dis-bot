@@ -78,6 +78,20 @@ deploy/systemd/          шаблоны systemd
 - `core/activity_rewards_service.py` — расчёт наград и интеграция с общей экономикой;
 - `fun_slesh/message_and_voice_stats.py` — Discord-команды, события и представление без собственного config-store.
 
+Границы игровых и репутационных ролей:
+
+- `core/heroes_store.py` сохраняет Heroes-сессии и канал `heroes_troll`, а `core/heroes_service.py` распознаёт игры и формирует шутливый текст;
+- `core/rep_roles_store.py` хранит пороги и выданные роли, флаг `rep_roles` находится в `settings_store`;
+- `core/rep_roles_service.py` генерирует название роли из Markov-корпуса без переноса GPT в пародии;
+- Discord cogs больше не создают и не читают собственные config-таблицы этих функций.
+
+Границы игровых и репутационных ролей:
+
+- `core/heroes_store.py` сохраняет Heroes-сессии и канал `heroes_troll`, а `core/heroes_service.py` распознаёт игры и формирует шутливый текст;
+- `core/rep_roles_store.py` хранит пороги и выданные роли, флаг `rep_roles` находится в `settings_store`;
+- `core/rep_roles_service.py` генерирует название роли из Markov-корпуса без переноса GPT в пародии;
+- Discord cogs больше не создают и не читают собственные config-таблицы этих функций.
+
 ## ML/AI вне пародий
 
 ### Токсичность

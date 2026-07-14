@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -52,6 +52,8 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(game_store, "SOCIAL_DB", self.db_path),
             patch.object(activity_store, "SOCIAL_DB", self.db_path),
             patch.object(activity_rewards_store, "SOCIAL_DB", self.db_path),
+            patch.object(heroes_store, "SOCIAL_DB", self.db_path),
+            patch.object(rep_roles_store, "SOCIAL_DB", self.db_path),
             patch.object(conversation_store, "SOCIAL_DB", self.db_path),
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
@@ -69,9 +71,13 @@ class IsolatedDatabaseTest(unittest.TestCase):
         for item in self.patches:
             item.start()
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
+        heroes_store._INITIALIZED_DATABASES.discard(self.db_path)
+        rep_roles_store._INITIALIZED_DATABASES.discard(self.db_path)
 
     def tearDown(self):
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
+        heroes_store._INITIALIZED_DATABASES.discard(self.db_path)
+        rep_roles_store._INITIALIZED_DATABASES.discard(self.db_path)
         for item in reversed(self.patches):
             item.stop()
         self.temp_dir.cleanup()
@@ -303,6 +309,117 @@ class ActivityRewardsLayerTests(IsolatedDatabaseTest):
         disabled = activity_rewards_store.get_activity_reward_config(5)
         self.assertFalse(disabled["msg_enabled"])
         self.assertFalse(disabled["voice_enabled"])
+
+
+class HeroesLayerTests(IsolatedDatabaseTest):
+    def test_legacy_channel_moves_to_settings_without_touching_session_history(self):
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE heroes_troll_config(guild_id INTEGER PRIMARY KEY, channel_id INTEGER);
+                CREATE TABLE heroes_sessions(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, game_name TEXT NOT NULL,
+                    started_at TEXT NOT NULL, ended_at TEXT NOT NULL, seconds INTEGER NOT NULL
+                );
+                INSERT INTO heroes_troll_config VALUES(77, 88);
+                INSERT INTO heroes_sessions(guild_id,user_id,game_name,started_at,ended_at,seconds)
+                VALUES(77,42,'Heroes III','2026-07-01T10:00:00+00:00','2026-07-01T11:00:00+00:00',3600);
+                """
+            )
+        heroes_store.ensure_heroes_storage()
+        self.assertEqual(heroes_store.get_heroes_output_channel_id(77), 88)
+        with db_connection(self.db_path) as conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            sessions = conn.execute("SELECT COUNT(*) FROM heroes_sessions").fetchone()[0]
+            archived = conn.execute(
+                "SELECT source_rows FROM settings_migration_archive WHERE table_name='heroes_troll_config'"
+            ).fetchone()
+        self.assertNotIn("heroes_troll_config", tables)
+        self.assertIn("heroes_troll_config_legacy_backup", tables)
+        self.assertEqual(sessions, 1)
+        self.assertEqual(archived, (1,))
+
+    def test_active_and_finished_session_store_round_trip(self):
+        started = datetime(2026, 7, 1, 10, tzinfo=timezone.utc)
+        ended = started + timedelta(minutes=95)
+        heroes_store.remember_active_session(1, 2, "Heroes III", started)
+        loaded = heroes_store.load_active_sessions()[0]
+        self.assertEqual((loaded["guild_id"], loaded["user_id"], loaded["game_name"]), (1, 2, "Heroes III"))
+        heroes_store.pop_active_session(1, 2)
+        self.assertEqual(heroes_store.load_active_sessions(), [])
+        self.assertEqual(heroes_store.save_finished_session(1, 2, "Heroes III", started, ended), 5700)
+        with db_connection(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT seconds FROM heroes_sessions").fetchone()[0], 5700)
+
+    def test_heroes_admin_switch_is_honored(self):
+        self.assertTrue(heroes_store.heroes_troll_enabled(77))
+        settings_store.set_feature_enabled(77, heroes_store.FEATURE_HEROES_TROLL, False)
+        self.assertFalse(heroes_store.heroes_troll_enabled(77))
+
+    def test_heroes_detection_and_messages_are_pure_service_logic(self):
+        self.assertTrue(heroes_service.is_heroes_name("Heroes of Might & Magic III"))
+        self.assertTrue(heroes_service.is_heroes_name("Olden Era"))
+        self.assertFalse(heroes_service.is_heroes_name("League of Legends"))
+        self.assertEqual(
+            heroes_service.find_started_heroes({"Steam"}, {"Steam", "Heroes III"}),
+            "Heroes III",
+        )
+        self.assertEqual(heroes_service.format_duration(5700), "1ч 35м")
+        message = heroes_service.build_troll_message(2, "Heroes III", "Игрок")
+        self.assertIn("Игрок", message)
+
+
+class RepRolesLayerTests(IsolatedDatabaseTest):
+    def test_legacy_enabled_switch_moves_to_settings_and_data_tables_remain(self):
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE rep_roles_config(guild_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1);
+                CREATE TABLE rep_role_thresholds(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+                    min_rep INTEGER NOT NULL, label TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX idx_rrt_guild_rep ON rep_role_thresholds(guild_id,min_rep);
+                INSERT INTO rep_roles_config VALUES(77,0);
+                INSERT INTO rep_role_thresholds(guild_id,min_rep,label,created_at) VALUES(77,10,'ветеран','now');
+                """
+            )
+        rep_roles_store.ensure_rep_roles_storage()
+        self.assertFalse(rep_roles_store.rep_roles_enabled(77))
+        self.assertEqual(rep_roles_store.list_thresholds(77)[0][1:], (10, "ветеран"))
+        with db_connection(self.db_path) as conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            archived = conn.execute(
+                "SELECT source_rows FROM settings_migration_archive WHERE table_name='rep_roles_config'"
+            ).fetchone()
+        self.assertNotIn("rep_roles_config", tables)
+        self.assertIn("rep_roles_config_legacy_backup", tables)
+        self.assertEqual(archived, (1,))
+
+    def test_threshold_and_active_role_store_round_trip(self):
+        rep_roles_store.upsert_threshold(1, 10, "новичок")
+        rep_roles_store.upsert_threshold(1, 25, "ветеран")
+        thresholds = rep_roles_store.list_thresholds(1)
+        self.assertEqual([row[1] for row in thresholds], [10, 25])
+        self.assertEqual(rep_roles_store.best_threshold(1, 24), (10, "новичок"))
+        self.assertEqual(rep_roles_store.next_threshold(1, 10), (25, "ветеран"))
+
+        expires = datetime(2026, 7, 8, tzinfo=timezone.utc)
+        rep_roles_store.save_active_role(2, 1, 999, 10, expires)
+        self.assertEqual(rep_roles_store.get_active_role(2, 1), (999, 10, False, expires.isoformat()))
+        permanent = rep_roles_store.make_role_permanent(2, 1)
+        self.assertEqual(permanent, (999, False))
+        self.assertTrue(rep_roles_store.get_active_role(2, 1)[2])
+
+        threshold_id = thresholds[0][0]
+        self.assertTrue(rep_roles_store.update_threshold(1, threshold_id, 12, "участник"))
+        self.assertEqual(rep_roles_store.delete_threshold(1, threshold_id), (12, "участник"))
+
+    def test_role_name_service_is_bounded_and_keeps_level_label(self):
+        name = rep_roles_service.generate_role_name(999999, 10, "ветеран")
+        self.assertLessEqual(len(name), 100)
+        self.assertTrue(name.endswith("· ветеран"))
 
 
 class EconomyTests(IsolatedDatabaseTest):

@@ -15,135 +15,41 @@
   /моя_репа_роль       — посмотреть свою текущую роль и когда обновится
 """
 
-import os, sqlite3, random, re
-from collections import Counter
+import random
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-from typing import Optional
 
 import discord
 from discord.ext import commands
 from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-DB_PATH  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+from core.rep_roles_service import generate_role_name as _generate_role_name
+from core.rep_roles_store import (
+    best_threshold as _best_threshold,
+    delete_threshold,
+    ensure_rep_roles_storage,
+    extend_active_role,
+    get_active_role,
+    get_reputation as _get_rep,
+    get_threshold,
+    list_expiring_roles,
+    list_thresholds,
+    make_role_permanent,
+    next_threshold,
+    rep_roles_enabled,
+    save_active_role,
+    set_rep_roles_enabled,
+    update_threshold,
+    upsert_threshold,
+)
+
 UTC      = timezone.utc
-MSK      = ZoneInfo("Europe/Moscow")
 
 ROLE_DURATION_DAYS = 7
 
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
 # ── БД ────────────────────────────────────────────────────────────────────────
-def _ensure_tables():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript("""
-            -- Пороги Размера → роль
-            CREATE TABLE IF NOT EXISTS rep_role_thresholds (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id   INTEGER NOT NULL,
-                min_rep    INTEGER NOT NULL,
-                label      TEXT    NOT NULL DEFAULT '',
-                created_at TEXT    NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_rrt_guild_rep
-                ON rep_role_thresholds(guild_id, min_rep);
-
-            -- Глобальный конфиг системы ролей по гильдии
-            CREATE TABLE IF NOT EXISTS rep_roles_config (
-                guild_id INTEGER PRIMARY KEY,
-                enabled  INTEGER NOT NULL DEFAULT 1
-            );
-
-            -- Активные Размер-роли участников
-            CREATE TABLE IF NOT EXISTS rep_roles_active (
-                user_id    INTEGER NOT NULL,
-                guild_id   INTEGER NOT NULL,
-                role_id    INTEGER NOT NULL,
-                threshold  INTEGER NOT NULL,
-                permanent  INTEGER NOT NULL DEFAULT 0,
-                expires_at TEXT,
-                created_at TEXT    NOT NULL,
-                PRIMARY KEY (user_id, guild_id)
-            );
-        """)
-
-# ── Размер (чистая сумма) ──────────────────────────────────────────────────
-def _get_rep(user_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(delta),0) FROM reputation WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-    return max(0, row[0] if row else 0)
-
-# ── Определить нужный порог ───────────────────────────────────────────────────
-def _best_threshold(guild_id: int, rep: int) -> Optional[tuple[int, str]]:
-    """Возвращает (min_rep, label) наивысшего подходящего порога или None."""
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT min_rep, label FROM rep_role_thresholds"
-            " WHERE guild_id=? AND min_rep<=? ORDER BY min_rep DESC LIMIT 1",
-            (guild_id, rep)
-        ).fetchone()
-    return row  # (min_rep, label) или None
-
-# ── Название роли по корпусу сообщений ────────────────────────────────────────
-def _generate_role_name(user_id: int, threshold: int, label: str) -> str:
-    """Берёт частые содержательные слова пользователя; fallback — шаблоны."""
-    char_words: list[str] = []
-    try:
-        from core.parody_message_store import get_user_messages
-
-        stop_words = {"что", "это", "как", "для", "его", "она", "они", "или", "так", "уже", "ещё", "только"}
-        words = (
-            word
-            for message in get_user_messages(user_id)
-            for word in re.findall(r"[a-zа-яё]{3,}", message.lower())
-            if word not in stop_words
-        )
-        char_words = [word for word, _ in Counter(words).most_common(15)]
-    except Exception:
-        pass
-
-    templates_with_word = [
-        "Легенда {w}",
-        "Властелин {w}",
-        "Гуру {w}",
-        "Бог {w}",
-        "Повелитель {w}",
-        "Мастер {w}",
-        "Адепт {w}",
-        "Хранитель {w}",
-        "Профессор {w}",
-        "Академик {w}",
-        "Маршал {w}",
-        "Барон {w}",
-    ]
-    templates_plain = [
-        "Уважаемый участник",
-        "Почётный резидент",
-        "Заслуженный ветеран",
-        "Известная личность",
-        "Звезда сервера",
-        "Признанный эксперт",
-        "Почтённый старожил",
-        "Человек-легенда",
-    ]
-
-    if char_words:
-        word = random.choice(char_words).capitalize()
-        template = random.choice(templates_with_word)
-        name = template.format(w=word)
-    else:
-        name = random.choice(templates_plain)
-
-    # Добавляем метку порога если есть
-    if label:
-        name = f"{name} · {label}"
-
-    return name[:100]  # Discord лимит
-
 # ── Выдать / обновить роль участнику ─────────────────────────────────────────
 async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
     """
@@ -157,11 +63,7 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
     threshold, label = threshold_row
 
     # Проверяем что система включена
-    with sqlite3.connect(DB_PATH) as conn:
-        cfg = conn.execute(
-            "SELECT enabled FROM rep_roles_config WHERE guild_id=?", (guild_id,)
-        ).fetchone()
-    if cfg and not cfg[0]:
+    if not rep_roles_enabled(guild_id):
         return  # система отключена
 
     guild  = bot.get_guild(guild_id)
@@ -170,12 +72,7 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
         return
 
     # Проверяем текущую роль
-    with sqlite3.connect(DB_PATH) as conn:
-        existing = conn.execute(
-            "SELECT role_id, threshold, permanent FROM rep_roles_active"
-            " WHERE user_id=? AND guild_id=?",
-            (user_id, guild_id)
-        ).fetchone()
+    existing = get_active_role(user_id, guild_id)
 
     # Если постоянная — не трогаем
     if existing and existing[2]:  # permanent=1
@@ -185,11 +82,7 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
     if existing and existing[1] == threshold:
         old_role = guild.get_role(existing[0])
         expires  = datetime.now(UTC) + timedelta(days=ROLE_DURATION_DAYS)
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "UPDATE rep_roles_active SET expires_at=? WHERE user_id=? AND guild_id=?",
-                (expires.isoformat(), user_id, guild_id)
-            )
+        extend_active_role(user_id, guild_id, expires)
         # Если роль почему-то слетела — выдаём заново
         if old_role and old_role not in member.roles:
             await member.add_roles(old_role, reason="Размер-роль продлена")
@@ -220,16 +113,7 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
         return
 
     expires = datetime.now(UTC) + timedelta(days=ROLE_DURATION_DAYS)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO rep_roles_active(user_id,guild_id,role_id,threshold,"
-            "permanent,expires_at,created_at) VALUES(?,?,?,?,0,?,?)"
-            " ON CONFLICT(user_id,guild_id) DO UPDATE SET"
-            " role_id=excluded.role_id, threshold=excluded.threshold,"
-            " permanent=0, expires_at=excluded.expires_at",
-            (user_id, guild_id, new_role.id, threshold,
-             expires.isoformat(), datetime.now(UTC).isoformat())
-        )
+    save_active_role(user_id, guild_id, new_role.id, threshold, expires)
 
     # Уведомляем в ЛС
     try:
@@ -244,13 +128,9 @@ async def assign_rep_role(bot: commands.Bot, guild_id: int, user_id: int):
 # ── Планировщик: обновление ролей каждые 6 часов ─────────────────────────────
 async def _refresh_all_roles(bot: commands.Bot):
     now = datetime.now(UTC)
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT user_id, guild_id, role_id, permanent, expires_at"
-            " FROM rep_roles_active WHERE permanent=0"
-        ).fetchall()
+    rows = list_expiring_roles()
 
-    for user_id, guild_id, role_id, permanent, expires_at in rows:
+    for user_id, guild_id, role_id, expires_at in rows:
         if not expires_at:
             continue
         try:
@@ -269,7 +149,7 @@ async def _refresh_all_roles(bot: commands.Bot):
 class RepRoles(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        _ensure_tables()
+        ensure_rep_roles_storage()
         if not scheduler.running:
             scheduler.start()
         scheduler.add_job(
@@ -281,12 +161,7 @@ class RepRoles(commands.Cog):
     @app_commands.command(name="размер_роли",
                           description="Пороги Размера для получения роли")
     async def репа_роли(self, interaction: discord.Interaction):
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                "SELECT id, min_rep, label FROM rep_role_thresholds"
-                " WHERE guild_id=? ORDER BY min_rep ASC",
-                (interaction.guild.id,)
-            ).fetchall()
+        rows = list_thresholds(interaction.guild.id)
 
         my_rep = _get_rep(interaction.user.id)
         emb = discord.Embed(
@@ -322,19 +197,7 @@ class RepRoles(commands.Cog):
     async def репа_роль_добавить(self, interaction: discord.Interaction,
                                   порог: app_commands.Range[int, 1, 100000],
                                   метка: str = ""):
-        with sqlite3.connect(DB_PATH) as conn:
-            try:
-                conn.execute(
-                    "INSERT INTO rep_role_thresholds(guild_id,min_rep,label,created_at)"
-                    " VALUES(?,?,?,?)",
-                    (interaction.guild.id, порог, метка.strip()[:50],
-                     datetime.now(UTC).isoformat())
-                )
-            except sqlite3.IntegrityError:
-                conn.execute(
-                    "UPDATE rep_role_thresholds SET label=? WHERE guild_id=? AND min_rep=?",
-                    (метка.strip()[:50], interaction.guild.id, порог)
-                )
+        upsert_threshold(interaction.guild.id, порог, метка)
         tag = f" · `{метка}`" if метка else ""
         await interaction.response.send_message(
             f"✅ Порог **{порог}** Размера добавлен{tag}.\n"
@@ -349,16 +212,10 @@ class RepRoles(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def репа_роль_убрать(self, interaction: discord.Interaction,
                                 id: app_commands.Range[int, 1, 999999]):
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT min_rep, label FROM rep_role_thresholds WHERE id=? AND guild_id=?",
-                (id, interaction.guild.id)
-            ).fetchone()
-            if not row:
-                await interaction.response.send_message(
-                    "❌ Порог не найден.", ephemeral=True)
-                return
-            conn.execute("DELETE FROM rep_role_thresholds WHERE id=?", (id,))
+        row = delete_threshold(interaction.guild.id, id)
+        if not row:
+            await interaction.response.send_message("❌ Порог не найден.", ephemeral=True)
+            return
         tag = f" · `{row[1]}`" if row[1] else ""
         await interaction.response.send_message(
             f"✅ Порог **{row[0]}** Размера{tag} удалён.", ephemeral=True)
@@ -370,26 +227,14 @@ class RepRoles(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def репа_роль_постоянная(self, interaction: discord.Interaction,
                                     участник: discord.Member):
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT role_id, permanent FROM rep_roles_active"
-                " WHERE user_id=? AND guild_id=?",
-                (участник.id, interaction.guild.id)
-            ).fetchone()
-            if not row:
-                await interaction.response.send_message(
-                    f"❌ У {участник.display_name} нет активной Размер-роли.",
-                    ephemeral=True)
-                return
-            if row[1]:
-                await interaction.response.send_message(
-                    f"⚠️ Роль уже постоянная.", ephemeral=True)
-                return
-            conn.execute(
-                "UPDATE rep_roles_active SET permanent=1, expires_at=NULL"
-                " WHERE user_id=? AND guild_id=?",
-                (участник.id, interaction.guild.id)
-            )
+        row = make_role_permanent(участник.id, interaction.guild.id)
+        if not row:
+            await interaction.response.send_message(
+                f"❌ У {участник.display_name} нет активной Размер-роли.", ephemeral=True)
+            return
+        if row[1]:
+            await interaction.response.send_message("⚠️ Роль уже постоянная.", ephemeral=True)
+            return
 
         role = interaction.guild.get_role(row[0])
         role_name = role.name if role else f"<роль {row[0]}>"
@@ -412,29 +257,17 @@ class RepRoles(commands.Cog):
                                   id: app_commands.Range[int, 1, 999999],
                                   новый_порог: app_commands.Range[int, 0, 100000] = 0,
                                   новая_метка: str = ""):
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT min_rep, label FROM rep_role_thresholds WHERE id=? AND guild_id=?",
-                (id, interaction.guild.id)
-            ).fetchone()
-            if not row:
-                await interaction.response.send_message(
-                    "❌ Порог не найден.", ephemeral=True)
-                return
-
-            cur_rep, cur_label = row
-            upd_rep   = новый_порог if новый_порог > 0 else cur_rep
-            upd_label = новая_метка.strip()[:50] if новая_метка.strip() else cur_label
-
-            try:
-                conn.execute(
-                    "UPDATE rep_role_thresholds SET min_rep=?, label=? WHERE id=?",
-                    (upd_rep, upd_label, id)
-                )
-            except sqlite3.IntegrityError:
-                await interaction.response.send_message(
-                    f"❌ Порог **{upd_rep}** уже существует.", ephemeral=True)
-                return
+        row = get_threshold(interaction.guild.id, id)
+        if not row:
+            await interaction.response.send_message("❌ Порог не найден.", ephemeral=True)
+            return
+        cur_rep, cur_label = row
+        upd_rep = новый_порог if новый_порог > 0 else cur_rep
+        upd_label = новая_метка.strip()[:50] if новая_метка.strip() else cur_label
+        if not update_threshold(interaction.guild.id, id, upd_rep, upd_label):
+            await interaction.response.send_message(
+                f"❌ Порог **{upd_rep}** уже существует.", ephemeral=True)
+            return
 
         tag = f" · `{upd_label}`" if upd_label else ""
         await interaction.response.send_message(
@@ -446,12 +279,7 @@ class RepRoles(commands.Cog):
     @app_commands.describe(включить="Включить или выключить")
     @app_commands.checks.has_permissions(administrator=True)
     async def репа_роли_вкл(self, interaction: discord.Interaction, включить: bool):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO rep_roles_config(guild_id, enabled) VALUES(?,?)"
-                " ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled",
-                (interaction.guild.id, int(включить))
-            )
+        set_rep_roles_enabled(interaction.guild.id, включить)
         status = "✅ Включена" if включить else "⛔ Выключена"
         note   = "" if включить else "\nСуществующие роли остаются у участников до истечения срока."
         await interaction.response.send_message(
@@ -461,17 +289,8 @@ class RepRoles(commands.Cog):
                           description="Твоя текущая Размер-роль и когда обновится")
     async def моя_репа_роль(self, interaction: discord.Interaction):
         my_rep = _get_rep(interaction.user.id)
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT role_id, threshold, permanent, expires_at FROM rep_roles_active"
-                " WHERE user_id=? AND guild_id=?",
-                (interaction.user.id, interaction.guild.id)
-            ).fetchone()
-            next_t = conn.execute(
-                "SELECT min_rep, label FROM rep_role_thresholds"
-                " WHERE guild_id=? AND min_rep>? ORDER BY min_rep ASC LIMIT 1",
-                (interaction.guild.id, my_rep)
-            ).fetchone()
+        row = get_active_role(interaction.user.id, interaction.guild.id)
+        next_t = next_threshold(interaction.guild.id, my_rep)
 
         emb = discord.Embed(title="🎖️ Твоя Размер-роль", color=discord.Color.gold())
         emb.add_field(name="Размер", value=f"**{my_rep}** ⭐", inline=True)

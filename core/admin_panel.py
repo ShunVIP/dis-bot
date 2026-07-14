@@ -340,6 +340,22 @@ FEATURE_REGISTRY = (
         "settings_help": "Исключённые каналы не участвуют в статистике и пассивных наградах.",
     },
     {
+        "id": "heroes_troll",
+        "title": "Heroes troll",
+        "group": "Игры",
+        "description": "Шутливые сообщения о запуске и завершении Heroes of Might and Magic.",
+        "channel_modes": ("output",),
+        "settings_help": "Канал сообщений; история игровых сессий хранится отдельно от настройки.",
+    },
+    {
+        "id": "rep_roles",
+        "title": "Размер-роли",
+        "group": "Экономика и роли",
+        "description": "Автоматические временные роли по порогам репутации.",
+        "channel_modes": (),
+        "settings_help": "Здесь систему можно отключить; пороги редактируются Discord-командами.",
+    },
+    {
         "id": "parody_training",
         "title": "Пародии и модели",
         "group": "Модели и пародии",

@@ -106,7 +106,7 @@
 - их старые таблицы находятся только в `*_legacy_backup`, активных двойных путей нет;
 - `activity_rewards` и исключения `message_stats` перенесены из `message_and_voice_stats.py` в `core/activity_rewards_store.py`;
 - расчёт пассивных наград отделён в `core/activity_rewards_service.py`, Discord cog отвечает только за события и UI;
-- следующие кандидаты после отдельного prod-аудита: `heroes_troll_config` и `rep_roles_config`.
+- `heroes_troll_config` и `rep_roles_config` также выведены из runtime после prod-аудита; история Heroes, пороги и активные роли сохранены в отдельных data-store таблицах.
 
 ## Следующий порядок работ
 
