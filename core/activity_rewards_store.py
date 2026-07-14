@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from core.db import connection as db_connection
@@ -86,13 +86,6 @@ def ensure_activity_rewards_storage() -> None:
                 minutes INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(user_id, guild_id)
             );
-            CREATE TABLE IF NOT EXISTS reputation (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                given_by INTEGER NOT NULL,
-                delta INTEGER NOT NULL DEFAULT 1,
-                date TEXT NOT NULL
-            );
             """
         )
     migrate_legacy_activity_reward_settings()
@@ -176,15 +169,6 @@ def add_voice_minutes(user_id: int, guild_id: int, minutes: int) -> tuple[int, i
             (int(user_id), int(guild_id), amount),
         )
     return previous, previous + amount
-
-
-def add_activity_reputation(user_id: int, delta: int, day: date | None = None) -> None:
-    ensure_activity_rewards_storage()
-    with db_connection(SOCIAL_DB) as conn:
-        conn.execute(
-            "INSERT INTO reputation(user_id, given_by, delta, date) VALUES(?,?,?,?)",
-            (int(user_id), 0, int(delta), (day or date.today()).isoformat()),
-        )
 
 
 def _archive_legacy_table(table: str, expected_rows: int) -> None:

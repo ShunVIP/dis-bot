@@ -44,13 +44,6 @@ def ensure_rep_roles_storage() -> None:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(user_id, guild_id)
             );
-            CREATE TABLE IF NOT EXISTS reputation (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                given_by INTEGER NOT NULL,
-                delta INTEGER NOT NULL DEFAULT 1,
-                date TEXT NOT NULL
-            );
             """
         )
     migrate_legacy_rep_roles_settings()
@@ -106,15 +99,6 @@ def rep_roles_enabled(guild_id: int) -> bool:
 
 def set_rep_roles_enabled(guild_id: int, enabled: bool) -> None:
     set_feature_enabled(guild_id, FEATURE_REP_ROLES, enabled)
-
-
-def get_reputation(user_id: int) -> int:
-    ensure_rep_roles_storage()
-    with db_connection(SOCIAL_DB) as conn:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(delta),0) FROM reputation WHERE user_id=?", (int(user_id),)
-        ).fetchone()
-    return max(0, int(row[0] if row else 0))
 
 
 def best_threshold(guild_id: int, reputation: int) -> tuple[int, str] | None:

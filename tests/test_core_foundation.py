@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -55,6 +55,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(activity_rewards_store, "SOCIAL_DB", self.db_path),
             patch.object(heroes_store, "SOCIAL_DB", self.db_path),
             patch.object(rep_roles_store, "SOCIAL_DB", self.db_path),
+            patch.object(reputation_store, "SOCIAL_DB", self.db_path),
             patch.object(toxicity_store, "SOCIAL_DB", self.db_path),
             patch.object(conversation_store, "SOCIAL_DB", self.db_path),
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
@@ -75,12 +76,14 @@ class IsolatedDatabaseTest(unittest.TestCase):
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
         heroes_store._INITIALIZED_DATABASES.discard(self.db_path)
         rep_roles_store._INITIALIZED_DATABASES.discard(self.db_path)
+        reputation_store._INITIALIZED_DATABASES.discard(self.db_path)
         toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
 
     def tearDown(self):
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
         heroes_store._INITIALIZED_DATABASES.discard(self.db_path)
         rep_roles_store._INITIALIZED_DATABASES.discard(self.db_path)
+        reputation_store._INITIALIZED_DATABASES.discard(self.db_path)
         toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
         for item in reversed(self.patches):
             item.stop()
@@ -424,6 +427,54 @@ class RepRolesLayerTests(IsolatedDatabaseTest):
         name = rep_roles_service.generate_role_name(999999, 10, "ветеран")
         self.assertLessEqual(len(name), 100)
         self.assertTrue(name.endswith("· ветеран"))
+
+
+class ReputationLayerTests(IsolatedDatabaseTest):
+    def test_legacy_reputation_schema_is_upgraded_without_losing_rows(self):
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE reputation(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,given_by INTEGER,date TEXT);
+                INSERT INTO reputation(user_id,given_by,date) VALUES(42,7,'2026-07-13');
+                CREATE TABLE mood(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,mood INTEGER,date TEXT);
+                INSERT INTO mood(user_id,mood,date) VALUES(42,7,'2026-07-13'),(42,8,'2026-07-13');
+                """
+            )
+        reputation_store.ensure_reputation_storage()
+        self.assertEqual(reputation_store.get_reputation(42), 1)
+        with db_connection(self.db_path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(reputation)")}
+            rows = conn.execute("SELECT COUNT(*) FROM reputation").fetchone()[0]
+            mood_rows = conn.execute("SELECT COUNT(*) FROM mood").fetchone()[0]
+        self.assertIn("delta", columns)
+        self.assertEqual(rows, 1)
+        self.assertEqual(mood_rows, 2)
+
+    def test_daily_votes_system_rewards_and_zero_floor_share_one_store(self):
+        day = date(2026, 7, 14)
+        self.assertTrue(reputation_store.give_daily_reputation(42, 7, day))
+        self.assertFalse(reputation_store.give_daily_reputation(99, 7, day))
+        self.assertEqual(reputation_store.add_system_reputation(42, 2, day), 3)
+        self.assertEqual(reputation_store.take_daily_reputation(42, 8, day), "ok")
+        self.assertEqual(reputation_store.take_daily_reputation(42, 8, day), "already_used")
+        self.assertEqual(reputation_store.get_reputation(42), 2)
+        self.assertEqual(reputation_store.take_daily_reputation(99, 9, day), "already_zero")
+        self.assertEqual(reputation_store.list_reputation_top(), [(42, 2)])
+        self.assertEqual(reputation_store.list_reputation_history(42)[0][0], 8)
+
+    def test_mood_and_game_cooldown_service_are_deterministic(self):
+        day = date(2026, 7, 14)
+        self.assertTrue(reputation_store.save_daily_mood(42, 8, day))
+        self.assertFalse(reputation_store.save_daily_mood(42, 3, day))
+        self.assertEqual(reputation_store.list_daily_moods(day), [(42, 8)])
+        self.assertEqual(reputation_service.mood_emoji(8), "😁")
+        self.assertEqual(reputation_service.average_mood([("a", 8), ("b", 6)]), 7.0)
+        cooldown = reputation_service.GameReputationCooldown(seconds=1800)
+        self.assertTrue(cooldown.allow(42, 7, "game", now=1000))
+        self.assertFalse(cooldown.allow(42, 7, "game", now=2799))
+        self.assertTrue(cooldown.allow(42, 7, "game", now=2800))
+        report = reputation_store.inspect_reputation_storage(self.db_path)
+        self.assertEqual(report["counts"], {"reputation": 0, "mood": 1})
 
 
 class EconomyTests(IsolatedDatabaseTest):

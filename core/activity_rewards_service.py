@@ -3,13 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 from core.activity_rewards_store import (
-    add_activity_reputation,
     add_voice_minutes,
     get_activity_reward_config,
     increment_message_counter,
 )
 from core.economy import add_coins
 from core.economy_profile import can_receive_currency
+from core.reputation_store import add_system_reputation
 
 
 def reward_message(user_id: int, guild_id: int) -> dict[str, int]:
@@ -26,7 +26,7 @@ def reward_message(user_id: int, guild_id: int) -> dict[str, int]:
     if rep_interval and count % rep_interval == 0 and can_receive_currency(user_id):
         reputation = int(config["msg_rep"])
         if reputation:
-            add_activity_reputation(user_id, reputation)
+            add_system_reputation(user_id, reputation)
     return {"count": count, "coins": coins, "reputation": reputation}
 
 

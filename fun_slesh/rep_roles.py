@@ -30,7 +30,6 @@ from core.rep_roles_store import (
     ensure_rep_roles_storage,
     extend_active_role,
     get_active_role,
-    get_reputation as _get_rep,
     get_threshold,
     list_expiring_roles,
     list_thresholds,
@@ -42,6 +41,7 @@ from core.rep_roles_store import (
     update_threshold,
     upsert_threshold,
 )
+from core.reputation_store import get_reputation as _get_rep
 
 UTC      = timezone.utc
 
