@@ -630,6 +630,43 @@ class WebSecurityTests(IsolatedDatabaseTest):
 
         asyncio.run(scenario())
 
+    def test_uploaded_files_require_session_and_reject_traversal(self):
+        web_app_store.upsert_web_user(5, "user")
+        session_id = web_app_store.create_session(5)
+        upload_root = Path(self.temp_dir.name) / "uploads"
+        upload_root.mkdir()
+        filename = "20260714_0123456789abcdef01234567.txt"
+        (upload_root / filename).write_text("private", encoding="utf-8")
+
+        async def scenario():
+            with patch.object(web_server, "UPLOADS_DIR", upload_root):
+                app = web_server.create_app()
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, "127.0.0.1", 0)
+                await site.start()
+                port = site._server.sockets[0].getsockname()[1]
+                base = f"http://127.0.0.1:{port}"
+                async with ClientSession() as session:
+                    async with session.get(f"{base}/uploads/{filename}") as response:
+                        self.assertEqual(response.status, 401)
+                    async with session.get(
+                        f"{base}/uploads/{filename}",
+                        headers={"Cookie": f"vipik_session={session_id}"},
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(await response.text(), "private")
+                    async with session.get(
+                        f"{base}/uploads/not-owned.exe",
+                        headers={"Cookie": f"vipik_session={session_id}"},
+                    ) as response:
+                        self.assertEqual(response.status, 404)
+                await runner.cleanup()
+
+        asyncio.run(scenario())
+        worker = (Path(__file__).resolve().parent.parent / "web_app" / "static" / "service-worker.js").read_text(encoding="utf-8")
+        self.assertIn('url.pathname.startsWith("/uploads/")', worker)
+
 
 class PlatformDmTests(IsolatedDatabaseTest):
     def test_dm_unread_count_and_read_marker_are_member_scoped(self):
@@ -666,6 +703,48 @@ class PlatformDmTests(IsolatedDatabaseTest):
         self.assertFalse(platform_store.delete_platform_message(message_id, 2, can_admin=True))
         self.assertEqual(platform_store.list_platform_messages("dm", first["id"])[0]["content"], "secret")
 
+    def test_dm_http_api_rejects_non_member_and_unowned_attachments(self):
+        for user_id in (1, 2, 3):
+            web_app_store.upsert_web_user(user_id, f"user-{user_id}")
+        thread = platform_store.get_or_create_dm(1, 2)
+        platform_store.add_platform_message("dm", thread["id"], 1, "one", "secret")
+        member_session = web_app_store.create_session(2)
+        outsider_session = web_app_store.create_session(3)
+
+        async def scenario():
+            app = web_server.create_app()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            base = f"http://127.0.0.1:{port}"
+            async with ClientSession() as session:
+                async with session.get(
+                    f"{base}/api/platform/messages?scope=dm&target_id={thread['id']}",
+                    headers={"Cookie": f"vipik_session={outsider_session}"},
+                ) as response:
+                    self.assertEqual(response.status, 403)
+                async with session.get(
+                    f"{base}/api/platform/messages?scope=dm&target_id={thread['id']}",
+                    headers={"Cookie": f"vipik_session={member_session}"},
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual((await response.json())["messages"][0]["content"], "secret")
+                async with session.post(
+                    f"{base}/api/platform/messages",
+                    json={
+                        "scope": "dm", "target_id": thread["id"], "content": "",
+                        "attachments": [{"url": "javascript:alert(1)", "name": "bad.png"}],
+                    },
+                    headers={"Cookie": f"vipik_session={member_session}", "Origin": base},
+                ) as response:
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual((await response.json())["error"], "bad_message")
+            await runner.cleanup()
+
+        asyncio.run(scenario())
+
     def test_legacy_reciprocal_threads_are_merged_with_messages(self):
         platform_store.ensure_platform_tables()
         with db_connection(self.db_path) as conn:
@@ -699,6 +778,111 @@ class PlatformDmTests(IsolatedDatabaseTest):
 
 
 class ChatStorageConsolidationTests(IsolatedDatabaseTest):
+    def test_persistent_rate_limit_and_audit_log_are_bounded(self):
+        for index in range(6):
+            result = platform_store.consume_platform_rate_limit(
+                7, "message", ((6, 10), (30, 60)), now=1000.0 + index / 10
+            )
+            self.assertTrue(result["allowed"])
+        limited = platform_store.consume_platform_rate_limit(
+            7, "message", ((6, 10), (30, 60)), now=1001.0
+        )
+        self.assertFalse(limited["allowed"])
+        self.assertGreaterEqual(limited["retry_after"], 9)
+        self.assertTrue(platform_store.consume_platform_rate_limit(
+            8, "message", ((6, 10),), now=1001.0
+        )["allowed"])
+
+        audit_id = platform_store.record_platform_audit(
+            99, "message.delete_other", "channel", 123, {"author_id": 7}
+        )
+        event = platform_store.list_platform_audit()[0]
+        self.assertEqual(event["id"], audit_id)
+        self.assertEqual(event["metadata"], {"author_id": 7})
+
+    def test_compatibility_chat_ignores_client_discord_route(self):
+        web_app_store.upsert_web_user(7, "seven")
+        session_id = web_app_store.create_session(7)
+        settings_store.set_feature_enabled(77, "web_chat", True)
+        settings_store.set_feature_channel(77, "web_chat", 7700, "output", "test")
+
+        async def scenario():
+            with patch.object(web_server, "ALLOWED_GUILD_IDS", frozenset({77})):
+                app = web_server.create_app()
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, "127.0.0.1", 0)
+                await site.start()
+                port = site._server.sockets[0].getsockname()[1]
+                base = f"http://127.0.0.1:{port}"
+                async with ClientSession() as session:
+                    async with session.post(
+                        f"{base}/api/chat",
+                        json={"content": "safe route", "guild_id": 999, "channel_id": 888},
+                        headers={"Cookie": f"vipik_session={session_id}", "Origin": base},
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                    for index in range(5):
+                        async with session.post(
+                            f"{base}/api/chat",
+                            json={"content": f"allowed-{index}"},
+                            headers={"Cookie": f"vipik_session={session_id}", "Origin": base},
+                        ) as response:
+                            self.assertEqual(response.status, 200)
+                    async with session.post(
+                        f"{base}/api/chat",
+                        json={"content": "too-fast"},
+                        headers={"Cookie": f"vipik_session={session_id}", "Origin": base},
+                    ) as response:
+                        self.assertEqual(response.status, 429)
+                        self.assertGreaterEqual(int(response.headers["Retry-After"]), 1)
+                await runner.cleanup()
+
+        asyncio.run(scenario())
+        queued = platform_store.claim_pending_discord_outbox()
+        self.assertEqual(len(queued), 6)
+        self.assertEqual((queued[0]["guild_id"], queued[0]["channel_id"]), (77, 7700))
+
+    def test_admin_moderation_of_channel_message_is_audited(self):
+        web_app_store.upsert_web_user(7, "seven")
+        web_app_store.upsert_web_user(99, "moderator")
+        community_store.set_user_roles(99, ["admin"], source="test")
+        admin_session = web_app_store.create_session(99)
+        member_session = web_app_store.create_session(7)
+        message_id = platform_store.add_general_chat_message(7, "Seven", "moderate me")
+
+        async def scenario():
+            app = web_server.create_app()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            base = f"http://127.0.0.1:{port}"
+            async with ClientSession() as session:
+                async with session.delete(
+                    f"{base}/api/chat/{message_id}",
+                    headers={"Cookie": f"vipik_session={admin_session}", "Origin": base},
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                async with session.get(
+                    f"{base}/api/platform/audit",
+                    headers={"Cookie": f"vipik_session={member_session}"},
+                ) as response:
+                    self.assertEqual(response.status, 403)
+                async with session.get(
+                    f"{base}/api/platform/audit",
+                    headers={"Cookie": f"vipik_session={admin_session}"},
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual((await response.json())["events"][0]["action"], "message.delete_other")
+            await runner.cleanup()
+
+        asyncio.run(scenario())
+        event = platform_store.list_platform_audit()[0]
+        self.assertEqual(event["action"], "message.delete_other")
+        self.assertEqual((event["actor_id"], event["target_id"]), (99, message_id))
+
     def test_legacy_web_chat_is_migrated_once_and_archived(self):
         with db_connection(self.db_path) as conn:
             conn.executescript(

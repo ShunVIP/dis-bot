@@ -23,6 +23,7 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
   - `/api/platform/messages/stream`
   - `/api/platform/channels`
   - `/api/platform/dms`
+  - `/api/platform/audit` (admin only)
   - `/api/guilds/{guild_id}/features/{feature}`
   - `/api/chat`
   - `/api/chat/stream`
@@ -45,12 +46,13 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
   - SSE live updates for the shared `general` channel and the selected platform channel/DM
   - message reactions, edit/delete, clickable links and image/link previews
   - local file uploads and attachment rendering for images, video, audio and generic files
+  - authenticated upload downloads, owned-upload URL validation and persistent per-user anti-spam limits
   - chat search for the shared `general` channel and selected platform channel/DM
   - PWA install button when the browser exposes the install prompt
   - PWA shell with manifest, service worker and installable app metadata
 - Bot bridge:
   - `fun_slesh/web_bridge.py` polls the canonical `platform_discord_outbox`
-  - if a web message has `guild_id` and `channel_id`, the bot sends it into that Discord channel
+  - web clients cannot choose `guild_id` or `channel_id`; delivery uses only the enabled admin-owned `web_chat.output_channel` policy
   - Discord messages from configured `web_chat` channels are stored in the platform `general` channel
 
 ## Files
@@ -66,7 +68,7 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
 - `core.paths.UPLOADS_DIR`: local upload storage, defaults to `datebase/uploads`.
 - `core/web_app_store.py`: sessions, web users, chat, outbox.
 - `core/community_store.py`: local roles, member cards, badges, statuses and profile cosmetics.
-- `core/platform_store.py`: local servers, text channels, DM threads, platform messages and game activity.
+- `core/platform_store.py`: local servers, text channels, DM threads, platform messages, rate events, moderation audit and game activity.
 - `fun_slesh/web_bridge.py`: Discord bot bridge for web chat outbox.
 
 ## Required env

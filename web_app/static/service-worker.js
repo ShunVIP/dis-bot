@@ -1,4 +1,4 @@
-const CACHE_NAME = "vipik-control-v2";
+const CACHE_NAME = "vipik-control-v3";
 const APP_SHELL = [
   "/",
   "/static/styles.css",
@@ -27,7 +27,12 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
-  if (request.method !== "GET" || url.pathname.startsWith("/api/") || url.pathname.startsWith("/auth/")) {
+  if (
+    request.method !== "GET"
+    || url.pathname.startsWith("/api/")
+    || url.pathname.startsWith("/auth/")
+    || url.pathname.startsWith("/uploads/")
+  ) {
     return;
   }
   event.respondWith(

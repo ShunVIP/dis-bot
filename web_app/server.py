@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import asyncio
+import mimetypes
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -64,6 +65,7 @@ from core.platform_store import (
     add_general_chat_message,
     add_platform_message,
     can_access_platform_target,
+    consume_platform_rate_limit,
     create_text_channel,
     delete_general_chat_message,
     delete_platform_message,
@@ -76,8 +78,10 @@ from core.platform_store import (
     list_activities,
     list_dm_threads,
     list_general_chat_messages,
+    list_platform_audit,
     list_platform_messages,
     mark_dm_read,
+    record_platform_audit,
     list_servers,
     list_text_channels,
     toggle_general_chat_reaction,
@@ -124,6 +128,10 @@ except ValueError:
 ALLOWED_UPLOAD_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".txt", ".pdf", ".zip"}
 LOGIN_WINDOW_SECONDS = 5 * 60
 LOGIN_ATTEMPT_LIMIT = 10
+MESSAGE_RATE_LIMITS = ((6, 10), (30, 60))
+REACTION_RATE_LIMITS = ((20, 10), (80, 60))
+DM_CREATE_RATE_LIMITS = ((5, 60),)
+UPLOAD_RATE_LIMITS = ((10, 60),)
 
 
 def _id_set(value: str) -> frozenset[int]:
@@ -158,6 +166,44 @@ def _json(data, status: int = 200):
         status=status,
         content_type="application/json",
     )
+
+
+def _rate_limit_response(user_id: int, action: str, limits: tuple[tuple[int, int], ...]):
+    decision = consume_platform_rate_limit(user_id, action, limits)
+    if decision["allowed"]:
+        return None
+    retry_after = int(decision["retry_after"])
+    response = _json({"error": "rate_limited", "retry_after": retry_after}, 429)
+    response.headers["Retry-After"] = str(retry_after)
+    return response
+
+
+def _configured_web_chat_route() -> tuple[int, int]:
+    """Only an admin-owned settings_store route may enqueue Discord delivery."""
+    for guild_id in sorted(ALLOWED_GUILD_IDS):
+        policy = get_feature_policy(guild_id, "web_chat")
+        if policy.enabled and policy.output_channel_id:
+            return int(guild_id), int(policy.output_channel_id)
+    return 0, 0
+
+
+def _scope_and_target(scope_value: object, target_value: object) -> tuple[str, int] | None:
+    scope = str(scope_value or "channel")
+    if scope not in {"channel", "dm"}:
+        return None
+    try:
+        target_id = int(target_value or 0)
+    except (TypeError, ValueError):
+        return None
+    return (scope, target_id) if target_id > 0 else None
+
+
+def _positive_int(value: object) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _auth_methods() -> dict[str, bool]:
@@ -214,6 +260,7 @@ async def security_middleware(request: web.Request, handler):
         response = _json({"error": "bad_json"}, 400)
     except web.HTTPException as exc:
         response = exc
+    should_raise = isinstance(response, web.HTTPException)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
@@ -230,6 +277,8 @@ async def security_middleware(request: web.Request, handler):
         response.headers["Cache-Control"] = "no-store"
     if _secure_cookie(request):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if should_raise:
+        raise response
     return response
 
 
@@ -287,6 +336,18 @@ def _livekit_token(identity: str, name: str, room_name: str) -> str:
 def _safe_filename(name: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())[:120].strip("._")
     return clean or "upload.bin"
+
+
+def _owned_upload_path(name: str) -> Path | None:
+    clean = str(name or "")
+    if clean != _safe_filename(clean) or Path(clean).suffix.lower() not in ALLOWED_UPLOAD_SUFFIXES:
+        return None
+    target = (UPLOADS_DIR / clean).resolve()
+    try:
+        target.relative_to(UPLOADS_DIR.resolve())
+    except ValueError:
+        return None
+    return target
 
 
 async def index(request: web.Request):
@@ -599,18 +660,27 @@ async def api_platform_channel_create(request: web.Request):
 async def api_platform_dm_create(request: web.Request):
     user = _require_user(request)
     data = await request.json()
-    peer_id = int(data.get("peer_id") or 0)
+    try:
+        peer_id = int(data.get("peer_id") or 0)
+    except (TypeError, ValueError):
+        return _json({"error": "bad_peer"}, 400)
     if not peer_id or peer_id == user["id"]:
         return _json({"error": "bad_peer"}, 400)
     if not get_web_user(peer_id):
         return _json({"error": "peer_not_registered"}, 404)
+    limited = _rate_limit_response(user["id"], "dm_create", DM_CREATE_RATE_LIMITS)
+    if limited is not None:
+        return limited
     thread = get_or_create_dm(user["id"], peer_id, str(data.get("title") or ""))
     return _json({"ok": True, "thread": thread})
 
 
 async def api_platform_dm_read(request: web.Request):
     user = _require_user(request)
-    thread_id = int(request.match_info["thread_id"])
+    try:
+        thread_id = int(request.match_info["thread_id"])
+    except (TypeError, ValueError):
+        return _json({"error": "bad_thread"}, 400)
     if not mark_dm_read(thread_id, user["id"]):
         return _json({"error": "dm_forbidden"}, 403)
     return _json({"ok": True, "thread_id": thread_id})
@@ -618,10 +688,10 @@ async def api_platform_dm_read(request: web.Request):
 
 async def api_platform_messages(request: web.Request):
     user = _require_user(request)
-    scope = str(request.query.get("scope") or "channel")
-    target_id = int(request.query.get("target_id") or 0)
-    if not target_id:
-        return _json({"messages": []})
+    target = _scope_and_target(request.query.get("scope"), request.query.get("target_id"))
+    if not target:
+        return _json({"error": "bad_target"}, 400)
+    scope, target_id = target
     if not can_access_platform_target(scope, target_id, user["id"], has_admin_access(user["id"])):
         return _json({"error": "target_forbidden"}, 403)
     return _json({"messages": list_platform_messages(scope, target_id)})
@@ -659,10 +729,10 @@ async def _sse_json(request: web.Request, producer):
 
 async def api_platform_messages_stream(request: web.Request):
     user = _require_user(request)
-    scope = str(request.query.get("scope") or "channel")
-    target_id = int(request.query.get("target_id") or 0)
-    if not target_id:
-        return _json({"error": "target_required"}, 400)
+    target = _scope_and_target(request.query.get("scope"), request.query.get("target_id"))
+    if not target:
+        return _json({"error": "bad_target"}, 400)
+    scope, target_id = target
     if not can_access_platform_target(scope, target_id, user["id"], has_admin_access(user["id"])):
         return _json({"error": "target_forbidden"}, 403)
     return await _sse_json(
@@ -674,66 +744,100 @@ async def api_platform_messages_stream(request: web.Request):
 async def api_platform_message_post(request: web.Request):
     user = _require_user(request)
     data = await request.json()
-    scope = str(data.get("scope") or "channel")
-    target_id = int(data.get("target_id") or 0)
+    target = _scope_and_target(data.get("scope"), data.get("target_id"))
+    if not target:
+        return _json({"error": "bad_target"}, 400)
+    scope, target_id = target
     content = str(data.get("content") or "")
     attachments = data.get("attachments") if isinstance(data.get("attachments"), list) else []
-    if not target_id:
-        return _json({"error": "target_required"}, 400)
     if not can_access_platform_target(scope, target_id, user["id"], has_admin_access(user["id"])):
         return _json({"error": "target_forbidden"}, 403)
-    message_id = add_platform_message(
-        scope,
-        target_id,
-        user["id"],
-        user.get("global_name") or user.get("username") or str(user["id"]),
-        content,
-        attachments=attachments,
-    )
+    limited = _rate_limit_response(user["id"], "message", MESSAGE_RATE_LIMITS)
+    if limited is not None:
+        return limited
+    try:
+        message_id = add_platform_message(
+            scope,
+            target_id,
+            user["id"],
+            user.get("global_name") or user.get("username") or str(user["id"]),
+            content,
+            attachments=attachments,
+        )
+    except ValueError as exc:
+        return _json({"error": "bad_message", "detail": str(exc)}, 400)
     return _json({"ok": True, "id": message_id})
 
 
 async def api_platform_message_edit(request: web.Request):
     user = _require_user(request)
-    message_id = int(request.match_info["message_id"])
+    message_id = _positive_int(request.match_info.get("message_id"))
+    if not message_id:
+        return _json({"error": "bad_message_id"}, 400)
     data = await request.json()
     context = get_platform_message_context(message_id)
     if not context or not can_access_platform_target(
         context["scope"], context["target_id"], user["id"], has_admin_access(user["id"])
     ):
         return _json({"error": "message_forbidden"}, 403)
-    ok = edit_platform_message(
-        message_id,
-        user["id"],
-        str(data.get("content") or ""),
-        can_admin=has_admin_access(user["id"]),
-    )
+    try:
+        ok = edit_platform_message(
+            message_id,
+            user["id"],
+            str(data.get("content") or ""),
+            can_admin=has_admin_access(user["id"]),
+        )
+    except ValueError as exc:
+        return _json({"error": "bad_message", "detail": str(exc)}, 400)
+    if ok and int(context["author_id"]) != int(user["id"]):
+        record_platform_audit(
+            user["id"], "message.edit_other", context["scope"], message_id,
+            {"author_id": int(context["author_id"]), "target_id": int(context["target_id"])},
+        )
     return _json({"ok": ok}, 200 if ok else 403)
 
 
 async def api_platform_message_delete(request: web.Request):
     user = _require_user(request)
-    message_id = int(request.match_info["message_id"])
+    message_id = _positive_int(request.match_info.get("message_id"))
+    if not message_id:
+        return _json({"error": "bad_message_id"}, 400)
     context = get_platform_message_context(message_id)
     if not context or not can_access_platform_target(
         context["scope"], context["target_id"], user["id"], has_admin_access(user["id"])
     ):
         return _json({"error": "message_forbidden"}, 403)
     ok = delete_platform_message(message_id, user["id"], can_admin=has_admin_access(user["id"]))
+    if ok and int(context["author_id"]) != int(user["id"]):
+        record_platform_audit(
+            user["id"], "message.delete_other", context["scope"], message_id,
+            {"author_id": int(context["author_id"]), "target_id": int(context["target_id"])},
+        )
     return _json({"ok": ok}, 200 if ok else 403)
 
 
 async def api_platform_message_reaction(request: web.Request):
     user = _require_user(request)
-    message_id = int(request.match_info["message_id"])
+    message_id = _positive_int(request.match_info.get("message_id"))
+    if not message_id:
+        return _json({"error": "bad_message_id"}, 400)
     data = await request.json()
     context = get_platform_message_context(message_id)
     if not context or not can_access_platform_target(
         context["scope"], context["target_id"], user["id"], has_admin_access(user["id"])
     ):
         return _json({"error": "message_forbidden"}, 403)
+    limited = _rate_limit_response(user["id"], "reaction", REACTION_RATE_LIMITS)
+    if limited is not None:
+        return limited
     active = toggle_platform_reaction(message_id, user["id"], str(data.get("emoji") or "+"))
     return _json({"ok": True, "active": active})
+
+
+async def api_platform_audit(request: web.Request):
+    _require_admin(request)
+    limit = _positive_int(request.query.get("limit")) or 100
+    return _json({"events": list_platform_audit(limit)})
 
 
 async def api_settings(request: web.Request):
@@ -812,11 +916,12 @@ async def api_delete_channel(request: web.Request):
 
 async def api_chat_list(request: web.Request):
     _require_user(request)
-    return _json({"messages": list_general_chat_messages(int(request.query.get("limit") or 80))})
+    limit = _positive_int(request.query.get("limit")) or 80
+    return _json({"messages": list_general_chat_messages(limit)})
 
 
 async def api_chat_stream(request: web.Request):
-    limit = int(request.query.get("limit") or 80)
+    limit = _positive_int(request.query.get("limit")) or 80
     return await _sse_json(request, lambda: {"messages": list_general_chat_messages(limit)})
 
 
@@ -824,23 +929,31 @@ async def api_chat_post(request: web.Request):
     user = _require_user(request)
     data = await request.json()
     content = str(data.get("content", "")).strip()
-    guild_id = int(data.get("guild_id") or 0)
-    channel_id = int(data.get("channel_id") or 0)
+    guild_id, channel_id = _configured_web_chat_route()
     attachments = data.get("attachments") if isinstance(data.get("attachments"), list) else []
-    message_id = add_general_chat_message(
-        user["id"],
-        user.get("global_name") or user.get("username") or str(user["id"]),
-        content,
-        guild_id=guild_id,
-        channel_id=channel_id,
-        source="web",
-        attachments=attachments,
-    )
+    limited = _rate_limit_response(user["id"], "message", MESSAGE_RATE_LIMITS)
+    if limited is not None:
+        return limited
+    try:
+        message_id = add_general_chat_message(
+            user["id"],
+            user.get("global_name") or user.get("username") or str(user["id"]),
+            content,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            source="web",
+            attachments=attachments,
+        )
+    except ValueError as exc:
+        return _json({"error": "bad_message", "detail": str(exc)}, 400)
     return _json({"ok": True, "id": message_id})
 
 
 async def api_upload(request: web.Request):
-    _require_user(request)
+    user = _require_user(request)
+    limited = _rate_limit_response(user["id"], "upload", UPLOAD_RATE_LIMITS)
+    if limited is not None:
+        return limited
     reader = await request.multipart()
     uploaded = []
     async for part in reader:
@@ -872,36 +985,68 @@ async def api_upload(request: web.Request):
         uploaded.append({
             "url": f"/uploads/{stored_name}",
             "name": original_name,
-            "content_type": part.headers.get("Content-Type", "application/octet-stream"),
+            "content_type": mimetypes.guess_type(original_name)[0] or "application/octet-stream",
             "size": size,
         })
     return _json({"ok": True, "files": uploaded})
 
 
+async def api_upload_file(request: web.Request):
+    _require_user(request)
+    target = _owned_upload_path(request.match_info.get("filename", ""))
+    if not target or not target.is_file():
+        raise web.HTTPNotFound()
+    return web.FileResponse(target)
+
+
 async def api_chat_edit(request: web.Request):
     user = _require_user(request)
-    message_id = int(request.match_info["message_id"])
+    message_id = _positive_int(request.match_info.get("message_id"))
+    if not message_id:
+        return _json({"error": "bad_message_id"}, 400)
     data = await request.json()
-    ok = edit_general_chat_message(
-        message_id,
-        user["id"],
-        str(data.get("content") or ""),
-        can_admin=has_admin_access(user["id"]),
-    )
+    context = get_platform_message_context(message_id)
+    try:
+        ok = edit_general_chat_message(
+            message_id,
+            user["id"],
+            str(data.get("content") or ""),
+            can_admin=has_admin_access(user["id"]),
+        )
+    except ValueError as exc:
+        return _json({"error": "bad_message", "detail": str(exc)}, 400)
+    if ok and context and int(context["author_id"]) != int(user["id"]):
+        record_platform_audit(
+            user["id"], "message.edit_other", "channel", message_id,
+            {"author_id": int(context["author_id"]), "target_id": int(context["target_id"])},
+        )
     return _json({"ok": ok}, 200 if ok else 403)
 
 
 async def api_chat_delete(request: web.Request):
     user = _require_user(request)
-    message_id = int(request.match_info["message_id"])
+    message_id = _positive_int(request.match_info.get("message_id"))
+    if not message_id:
+        return _json({"error": "bad_message_id"}, 400)
+    context = get_platform_message_context(message_id)
     ok = delete_general_chat_message(message_id, user["id"], can_admin=has_admin_access(user["id"]))
+    if ok and context and int(context["author_id"]) != int(user["id"]):
+        record_platform_audit(
+            user["id"], "message.delete_other", "channel", message_id,
+            {"author_id": int(context["author_id"]), "target_id": int(context["target_id"])},
+        )
     return _json({"ok": ok}, 200 if ok else 403)
 
 
 async def api_chat_reaction(request: web.Request):
     user = _require_user(request)
-    message_id = int(request.match_info["message_id"])
+    message_id = _positive_int(request.match_info.get("message_id"))
+    if not message_id:
+        return _json({"error": "bad_message_id"}, 400)
     data = await request.json()
+    limited = _rate_limit_response(user["id"], "reaction", REACTION_RATE_LIMITS)
+    if limited is not None:
+        return limited
     try:
         active = toggle_general_chat_reaction(message_id, user["id"], str(data.get("emoji") or "+"))
     except ValueError:
@@ -1136,6 +1281,7 @@ def create_app() -> web.Application:
     app.router.add_patch("/api/platform/messages/{message_id}", api_platform_message_edit)
     app.router.add_delete("/api/platform/messages/{message_id}", api_platform_message_delete)
     app.router.add_post("/api/platform/messages/{message_id}/reactions", api_platform_message_reaction)
+    app.router.add_get("/api/platform/audit", api_platform_audit)
     app.router.add_get("/api/settings", api_settings)
     app.router.add_get("/api/ml/status", api_ml_status)
     app.router.add_get("/api/ml/insights", api_ml_insights)
@@ -1158,7 +1304,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/voice/invite", api_voice_invite)
     app.router.add_post("/api/voice/token", api_voice_token)
     app.router.add_post("/api/bot/chat", bot_chat_ingest)
-    app.router.add_static("/uploads", UPLOADS_DIR, append_version=True)
+    app.router.add_get("/uploads/{filename}", api_upload_file)
     app.router.add_static("/static", STATIC_DIR, append_version=True)
     return app
 

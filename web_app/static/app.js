@@ -48,9 +48,26 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `HTTP ${response.status}`);
+    let payload = {};
+    try { payload = JSON.parse(text); } catch {}
+    const error = new Error(payload.detail || payload.error || text || `HTTP ${response.status}`);
+    error.payload = payload;
+    error.status = response.status;
+    error.retryAfter = Number(response.headers.get("Retry-After") || payload.retry_after || 0);
+    throw error;
   }
   return response.json();
+}
+
+function chatErrorText(error) {
+  if (error?.status === 429) {
+    return `Слишком часто. Подожди ${Math.max(1, error.retryAfter || 1)} сек.`;
+  }
+  if (error?.payload?.error === "target_forbidden" || error?.payload?.error === "message_forbidden") {
+    return "Нет доступа к этому каналу или сообщению.";
+  }
+  if (error?.payload?.error === "bad_message") return "Сообщение или вложение не прошло проверку.";
+  return "Не удалось выполнить действие. Обнови страницу и попробуй ещё раз.";
 }
 
 async function uploadFiles(files) {
@@ -229,7 +246,7 @@ function renderAttachments(attachments) {
 }
 
 function renderAttachment(item) {
-  const url = escapeHtml(item.url || "#");
+  const url = escapeHtml(safeAttachmentUrl(item.url));
   const name = escapeHtml(item.name || "file");
   const type = String(item.content_type || "");
   const size = item.size ? ` · ${formatBytes(item.size)}` : "";
@@ -243,6 +260,17 @@ function renderAttachment(item) {
     return `<div class="attachment-card"><audio src="${url}" controls></audio><a href="${url}" target="_blank" rel="noopener noreferrer">${name}${size}</a></div>`;
   }
   return `<a class="attachment-card file-attachment" href="${url}" target="_blank" rel="noopener noreferrer">${name}${size}</a>`;
+}
+
+function safeAttachmentUrl(value) {
+  const raw = String(value || "").trim();
+  if (/^\/uploads\/[A-Za-z0-9._-]+$/.test(raw)) return raw;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "https:" ? parsed.href : "#";
+  } catch {
+    return "#";
+  }
 }
 
 function formatBytes(value) {
@@ -1241,19 +1269,20 @@ $("chatForm").addEventListener("submit", async (event) => {
   const text = $("chatText").value.trim();
   const attachments = state.attachments.chat;
   if (!text && !attachments.length) return;
-  await api("/api/chat", {
-    method: "POST",
-    body: JSON.stringify({
-      content: text,
-      guild_id: Number($("guildId").value || 0),
-      channel_id: Number($("channelId").value || 0),
-      attachments,
-    }),
-  });
-  $("chatText").value = "";
-  state.attachments.chat = [];
-  renderAttachmentTray("chat");
-  await loadChat();
+  $("chatStatus").textContent = "";
+  try {
+    await api("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ content: text, attachments }),
+    });
+    $("chatText").value = "";
+    state.attachments.chat = [];
+    renderAttachmentTray("chat");
+    await loadChat();
+  } catch (error) {
+    console.error(error);
+    $("chatStatus").textContent = chatErrorText(error);
+  }
 });
 
 $("chatMessages").addEventListener("click", (event) => {
@@ -1299,7 +1328,11 @@ $("roleSettingsForm").addEventListener("submit", async (event) => {
 
 $("platformMessageForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  await sendPlatformMessage().catch(console.error);
+  $("platformChatStatus").textContent = "";
+  await sendPlatformMessage().catch((error) => {
+    console.error(error);
+    $("platformChatStatus").textContent = chatErrorText(error);
+  });
 });
 
 $("platformMessages").addEventListener("click", (event) => {
@@ -1320,7 +1353,11 @@ $("channelCreateForm").addEventListener("submit", async (event) => {
 
 $("dmCreateForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  await createPlatformDm().catch(console.error);
+  $("platformChatStatus").textContent = "";
+  await createPlatformDm().catch((error) => {
+    console.error(error);
+    $("platformChatStatus").textContent = chatErrorText(error);
+  });
 });
 
 $("communityProfileForm").addEventListener("submit", async (event) => {

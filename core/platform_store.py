@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import math
+import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -106,6 +109,23 @@ def ensure_platform_tables():
                 image           TEXT NOT NULL DEFAULT '',
                 updated_at      TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS platform_rate_events (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                action     TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS platform_audit_log (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id      INTEGER NOT NULL,
+                action        TEXT NOT NULL,
+                target_type   TEXT NOT NULL,
+                target_id     INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at    TEXT NOT NULL
+            );
             """
         )
         _ensure_column(conn, "platform_messages", "edited_at", "TEXT NOT NULL DEFAULT ''")
@@ -128,6 +148,12 @@ def ensure_platform_tables():
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_platform_outbox_status ON platform_discord_outbox(status, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_platform_rate_user_action ON platform_rate_events(user_id, action, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_platform_audit_created ON platform_audit_log(created_at, id)"
         )
         now = _now()
         conn.execute(
@@ -681,6 +707,8 @@ def _clean_attachments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         url = str(item.get("url") or "").strip()
         if not url:
             continue
+        if not _is_owned_upload_url(url):
+            raise ValueError("attachment must be an uploaded ViPik file")
         clean.append({
             "url": url[:500],
             "name": str(item.get("name") or "file")[:180],
@@ -688,6 +716,112 @@ def _clean_attachments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "size": int(item.get("size") or 0),
         })
     return clean
+
+
+def _is_owned_upload_url(url: str) -> bool:
+    prefix = "/uploads/"
+    if not str(url).startswith(prefix):
+        return False
+    name = str(url)[len(prefix):]
+    return bool(
+        name
+        and "/" not in name
+        and "\\" not in name
+        and ".." not in name
+        and re.fullmatch(r"[A-Za-z0-9._-]{1,180}", name)
+    )
+
+
+def consume_platform_rate_limit(
+    user_id: int,
+    action: str,
+    limits: tuple[tuple[int, int], ...],
+    *,
+    now: float | None = None,
+) -> dict[str, int | bool]:
+    """Atomically consume a persistent per-user action budget."""
+    ensure_platform_tables()
+    moment = float(time.time() if now is None else now)
+    clean_action = str(action).strip()[:40] or "unknown"
+    clean_limits = tuple(
+        (max(1, int(count)), max(1, int(window))) for count, window in limits
+    )
+    if not clean_limits:
+        return {"allowed": True, "retry_after": 0}
+    longest_window = max(window for _, window in clean_limits)
+    with db_connection(SOCIAL_DB) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM platform_rate_events WHERE created_at<?",
+            (moment - max(longest_window, 3600),),
+        )
+        retry_after = 0
+        for count, window in clean_limits:
+            row = conn.execute(
+                """
+                SELECT COUNT(1),MIN(created_at) FROM platform_rate_events
+                WHERE user_id=? AND action=? AND created_at>?
+                """,
+                (int(user_id), clean_action, moment - window),
+            ).fetchone()
+            if int(row[0] or 0) >= count:
+                retry_after = max(
+                    retry_after,
+                    max(1, int(math.ceil(float(row[1]) + window - moment))),
+                )
+        if retry_after:
+            return {"allowed": False, "retry_after": retry_after}
+        conn.execute(
+            "INSERT INTO platform_rate_events(user_id,action,created_at) VALUES(?,?,?)",
+            (int(user_id), clean_action, moment),
+        )
+    return {"allowed": True, "retry_after": 0}
+
+
+def record_platform_audit(
+    actor_id: int,
+    action: str,
+    target_type: str,
+    target_id: int,
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    ensure_platform_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO platform_audit_log(actor_id,action,target_type,target_id,metadata_json,created_at)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (
+                int(actor_id), str(action)[:80], str(target_type)[:40], int(target_id),
+                json.dumps(metadata or {}, ensure_ascii=False)[:2000], _now(),
+            ),
+        )
+    return int(cursor.lastrowid)
+
+
+def list_platform_audit(limit: int = 100) -> list[dict[str, Any]]:
+    ensure_platform_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        rows = conn.execute(
+            """
+            SELECT id,actor_id,action,target_type,target_id,metadata_json,created_at
+            FROM platform_audit_log ORDER BY id DESC LIMIT ?
+            """,
+            (max(1, min(int(limit), 500)),),
+        ).fetchall()
+    result = []
+    for row in rows:
+        try:
+            metadata = json.loads(row[5] or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        result.append({
+            "id": int(row[0]), "actor_id": int(row[1]), "action": row[2],
+            "target_type": row[3], "target_id": int(row[4]),
+            "metadata": metadata if isinstance(metadata, dict) else {}, "created_at": row[6],
+        })
+    return result
 
 
 def list_platform_messages(scope: str, target_id: int, limit: int = 80) -> list[dict[str, Any]]:

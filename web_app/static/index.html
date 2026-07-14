@@ -187,6 +187,7 @@
               <div id="platformAttachmentTray" class="attachment-tray"></div>
               <button class="button primary" type="submit">Отправить</button>
             </form>
+            <p id="platformChatStatus" class="status-line"></p>
           </section>
           <aside class="server-presence">
             <h2>Активность</h2>
@@ -242,7 +243,7 @@
         <div class="band compact">
           <div>
             <h1>Fallback-чат</h1>
-            <p>Сообщения сохраняются в общей базе. Если указать guild/channel, бот отправит их в Discord, когда он онлайн.</p>
+            <p>Сообщения сохраняются в общей базе. Мост в Discord использует только канал, выбранный администратором в настройке web_chat.</p>
           </div>
         </div>
         <section class="panel chat-panel">
@@ -252,8 +253,6 @@
           </div>
           <div id="chatMessages" class="messages"></div>
           <form id="chatForm" class="chat-form">
-            <input id="guildId" inputmode="numeric" placeholder="Guild ID, необязательно">
-            <input id="channelId" inputmode="numeric" placeholder="Channel ID, необязательно">
             <textarea id="chatText" placeholder="Сообщение"></textarea>
             <div class="chat-tools">
               <button id="chatAttachButton" class="button ghost" type="button">Файл</button>
@@ -262,6 +261,7 @@
             <input id="chatFileInput" class="hidden" type="file" multiple>
             <button class="button primary" type="submit">Отправить</button>
           </form>
+          <p id="chatStatus" class="status-line"></p>
         </section>
       </section>
 
