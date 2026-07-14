@@ -61,6 +61,10 @@ def ensure_platform_tables():
                 attachment_json TEXT NOT NULL DEFAULT '[]',
                 edited_at       TEXT NOT NULL DEFAULT '',
                 deleted_at      TEXT NOT NULL DEFAULT '',
+                guild_id        INTEGER NOT NULL DEFAULT 0,
+                channel_id      INTEGER NOT NULL DEFAULT 0,
+                source          TEXT NOT NULL DEFAULT 'platform',
+                status          TEXT NOT NULL DEFAULT 'stored',
                 created_at      TEXT NOT NULL
             );
 
@@ -80,6 +84,20 @@ def ensure_platform_tables():
                 PRIMARY KEY(thread_id, user_id)
             );
 
+            CREATE TABLE IF NOT EXISTS platform_discord_outbox (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id      INTEGER NOT NULL DEFAULT 0,
+                guild_id        INTEGER NOT NULL,
+                channel_id      INTEGER NOT NULL,
+                discord_user_id INTEGER NOT NULL,
+                author_name     TEXT NOT NULL DEFAULT '',
+                content         TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                error           TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                sent_at         TEXT NOT NULL DEFAULT ''
+            );
+
             CREATE TABLE IF NOT EXISTS platform_activities (
                 discord_user_id INTEGER PRIMARY KEY,
                 activity_type   TEXT NOT NULL DEFAULT 'game',
@@ -92,6 +110,10 @@ def ensure_platform_tables():
         )
         _ensure_column(conn, "platform_messages", "edited_at", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "platform_messages", "deleted_at", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "platform_messages", "guild_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "platform_messages", "channel_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "platform_messages", "source", "TEXT NOT NULL DEFAULT 'platform'")
+        _ensure_column(conn, "platform_messages", "status", "TEXT NOT NULL DEFAULT 'stored'")
         _ensure_column(conn, "platform_dm_threads", "member_low", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "platform_dm_threads", "member_high", "INTEGER NOT NULL DEFAULT 0")
         _normalize_dm_threads(conn)
@@ -103,6 +125,9 @@ def ensure_platform_tables():
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_platform_dm_reads_user ON platform_dm_reads(user_id, thread_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_platform_outbox_status ON platform_discord_outbox(status, id)"
         )
         now = _now()
         conn.execute(
@@ -131,6 +156,7 @@ def ensure_platform_tables():
                 """,
                 (category, name, topic, position, now, now, name),
             )
+        _migrate_legacy_web_chat(conn)
         conn.commit()
 
 
@@ -138,6 +164,138 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str):
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     if column not in {row[1] for row in rows}:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone())
+
+
+def _archive_table(conn: sqlite3.Connection, table: str) -> None:
+    if not _table_exists(conn, table):
+        return
+    backup = f"{table}_retired_backup"
+    if _table_exists(conn, backup):
+        raise RuntimeError(f"cannot archive {table}: {backup} already exists")
+    conn.execute(f"ALTER TABLE {table} RENAME TO {backup}")
+
+
+def _migrate_legacy_web_chat(conn: sqlite3.Connection) -> None:
+    """Move the retired fallback chat into the canonical platform channel once."""
+    if _table_exists(conn, "web_chat_messages"):
+        general = conn.execute(
+            "SELECT id FROM platform_text_channels WHERE server_id=0 AND name='general' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if not general:
+            raise RuntimeError("general platform channel is missing")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS platform_web_chat_migration (
+                legacy_message_id   INTEGER PRIMARY KEY,
+                platform_message_id INTEGER NOT NULL UNIQUE,
+                migrated_at         TEXT NOT NULL
+            )
+            """
+        )
+        legacy_rows = conn.execute(
+            """
+            SELECT id, guild_id, channel_id, discord_user_id, author_name,
+                   content, attachment_json, source, status, edited_at, deleted_at, created_at
+            FROM web_chat_messages ORDER BY id
+            """
+        ).fetchall()
+        for row in legacy_rows:
+            if conn.execute(
+                "SELECT 1 FROM platform_web_chat_migration WHERE legacy_message_id=?",
+                (int(row[0]),),
+            ).fetchone():
+                continue
+            cur = conn.execute(
+                """
+                INSERT INTO platform_messages(
+                    scope, target_id, author_id, author_name, content, attachment_json,
+                    edited_at, deleted_at, guild_id, channel_id, source, status, created_at
+                ) VALUES('channel', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (int(general[0]), int(row[3]), row[4], row[5], row[6], row[9], row[10],
+                 int(row[1]), int(row[2]), row[7], row[8], row[11]),
+            )
+            conn.execute(
+                "INSERT INTO platform_web_chat_migration VALUES(?, ?, ?)",
+                (int(row[0]), int(cur.lastrowid), _now()),
+            )
+
+        if _table_exists(conn, "web_chat_reactions"):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO platform_message_reactions(message_id, emoji, author_id, created_at)
+                SELECT m.platform_message_id, r.emoji, r.discord_user_id, r.created_at
+                FROM web_chat_reactions r
+                JOIN platform_web_chat_migration m ON m.legacy_message_id=r.message_id
+                """
+            )
+            missing_reactions = int(conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM web_chat_reactions r
+                JOIN platform_web_chat_migration m ON m.legacy_message_id=r.message_id
+                WHERE NOT EXISTS(
+                    SELECT 1 FROM platform_message_reactions p
+                    WHERE p.message_id=m.platform_message_id
+                      AND p.emoji=r.emoji AND p.author_id=r.discord_user_id
+                )
+                """
+            ).fetchone()[0])
+            if missing_reactions:
+                raise RuntimeError("legacy web chat reaction migration is incomplete")
+        migrated = int(conn.execute("SELECT COUNT(*) FROM platform_web_chat_migration").fetchone()[0])
+        if migrated < len(legacy_rows):
+            raise RuntimeError("legacy web chat migration is incomplete")
+        _archive_table(conn, "web_chat_reactions")
+        _archive_table(conn, "web_chat_messages")
+
+    if _table_exists(conn, "web_bot_outbox"):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS platform_web_outbox_migration (
+                legacy_outbox_id   INTEGER PRIMARY KEY,
+                platform_outbox_id INTEGER NOT NULL UNIQUE,
+                migrated_at        TEXT NOT NULL
+            )
+            """
+        )
+        legacy_rows = conn.execute(
+            """
+            SELECT id, guild_id, channel_id, discord_user_id, author_name,
+                   content, status, error, created_at, sent_at
+            FROM web_bot_outbox ORDER BY id
+            """
+        ).fetchall()
+        for row in legacy_rows:
+            if conn.execute(
+                "SELECT 1 FROM platform_web_outbox_migration WHERE legacy_outbox_id=?",
+                (int(row[0]),),
+            ).fetchone():
+                continue
+            cur = conn.execute(
+                """
+                INSERT INTO platform_discord_outbox(
+                    guild_id, channel_id, discord_user_id, author_name,
+                    content, status, error, created_at, sent_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                row[1:],
+            )
+            conn.execute(
+                "INSERT INTO platform_web_outbox_migration VALUES(?, ?, ?)",
+                (int(row[0]), int(cur.lastrowid), _now()),
+            )
+        migrated = int(conn.execute("SELECT COUNT(*) FROM platform_web_outbox_migration").fetchone()[0])
+        if migrated < len(legacy_rows):
+            raise RuntimeError("legacy Discord outbox migration is incomplete")
+        _archive_table(conn, "web_bot_outbox")
 
 
 def _normalize_dm_threads(conn: sqlite3.Connection) -> None:
@@ -463,6 +621,11 @@ def add_platform_message(
     author_name: str,
     content: str,
     attachments: list[dict[str, Any]] | None = None,
+    *,
+    guild_id: int = 0,
+    channel_id: int = 0,
+    source: str = "platform",
+    queue_discord: bool = False,
 ) -> int:
     ensure_platform_tables()
     clean_scope = "dm" if scope == "dm" else "channel"
@@ -473,8 +636,11 @@ def add_platform_message(
     with db_connection(SOCIAL_DB) as conn:
         cur = conn.execute(
             """
-            INSERT INTO platform_messages(scope, target_id, author_id, author_name, content, attachment_json, created_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO platform_messages(
+                scope, target_id, author_id, author_name, content, attachment_json,
+                guild_id, channel_id, source, status, created_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 clean_scope,
@@ -483,13 +649,28 @@ def add_platform_message(
                 author_name[:120],
                 text,
                 json.dumps(clean_attachments, ensure_ascii=False),
+                int(guild_id),
+                int(channel_id),
+                str(source or "platform")[:32],
+                "pending" if queue_discord and guild_id and channel_id else "stored",
                 _now(),
             ),
         )
+        message_id = int(cur.lastrowid)
+        if queue_discord and guild_id and channel_id:
+            conn.execute(
+                """
+                INSERT INTO platform_discord_outbox(
+                    message_id, guild_id, channel_id, discord_user_id,
+                    author_name, content, status, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (message_id, int(guild_id), int(channel_id), int(author_id), author_name[:120], text, _now()),
+            )
         if clean_scope == "dm":
             conn.execute("UPDATE platform_dm_threads SET updated_at=? WHERE id=?", (_now(), int(target_id)))
         conn.commit()
-        return int(cur.lastrowid)
+        return message_id
 
 
 def _clean_attachments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -515,7 +696,8 @@ def list_platform_messages(scope: str, target_id: int, limit: int = 80) -> list[
     with db_connection(SOCIAL_DB) as conn:
         rows = conn.execute(
             """
-            SELECT id, scope, target_id, author_id, author_name, content, attachment_json, edited_at, deleted_at, created_at
+            SELECT id, scope, target_id, author_id, author_name, content, attachment_json,
+                   edited_at, deleted_at, created_at, guild_id, channel_id, source, status
             FROM platform_messages
             WHERE scope=? AND target_id=?
             ORDER BY id DESC LIMIT ?
@@ -536,6 +718,10 @@ def list_platform_messages(scope: str, target_id: int, limit: int = 80) -> list[
             "edited_at": row[7],
             "deleted_at": row[8],
             "created_at": row[9],
+            "guild_id": row[10],
+            "channel_id": row[11],
+            "source": row[12],
+            "status": row[13],
             "reactions": reactions.get(int(row[0]), []),
         }
         for row in reversed(rows)
@@ -642,6 +828,135 @@ def toggle_platform_reaction(message_id: int, author_id: int, emoji: str) -> boo
             active = True
         conn.commit()
         return active
+
+
+def get_general_channel_id() -> int:
+    ensure_platform_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        row = conn.execute(
+            "SELECT id FROM platform_text_channels WHERE server_id=0 AND name='general' ORDER BY id LIMIT 1"
+        ).fetchone()
+    if not row:
+        raise RuntimeError("general platform channel is missing")
+    return int(row[0])
+
+
+def add_general_chat_message(
+    discord_user_id: int,
+    author_name: str,
+    content: str,
+    guild_id: int = 0,
+    channel_id: int = 0,
+    source: str = "web",
+    attachments: list[dict[str, Any]] | None = None,
+) -> int:
+    return add_platform_message(
+        "channel",
+        get_general_channel_id(),
+        discord_user_id,
+        author_name,
+        content,
+        attachments,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        source=source,
+        queue_discord=source == "web" and bool(guild_id and channel_id),
+    )
+
+
+def list_general_chat_messages(limit: int = 80) -> list[dict[str, Any]]:
+    messages = list_platform_messages("channel", get_general_channel_id(), limit)
+    return [
+        {
+            **message,
+            "discord_user_id": message["author_id"],
+        }
+        for message in messages
+    ]
+
+
+def _is_general_message(message_id: int) -> bool:
+    context = get_platform_message_context(message_id)
+    return bool(
+        context
+        and context["scope"] == "channel"
+        and context["target_id"] == get_general_channel_id()
+    )
+
+
+def edit_general_chat_message(message_id: int, author_id: int, content: str, can_admin: bool = False) -> bool:
+    return _is_general_message(message_id) and edit_platform_message(message_id, author_id, content, can_admin)
+
+
+def delete_general_chat_message(message_id: int, author_id: int, can_admin: bool = False) -> bool:
+    return _is_general_message(message_id) and delete_platform_message(message_id, author_id, can_admin)
+
+
+def toggle_general_chat_reaction(message_id: int, author_id: int, emoji: str) -> bool:
+    if not _is_general_message(message_id):
+        raise ValueError("message is outside the general channel")
+    return toggle_platform_reaction(message_id, author_id, emoji)
+
+
+def claim_pending_discord_outbox(limit: int = 20) -> list[dict[str, Any]]:
+    ensure_platform_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, message_id, guild_id, channel_id, discord_user_id, author_name, content
+            FROM platform_discord_outbox
+            WHERE status='pending'
+            ORDER BY id ASC LIMIT ?
+            """,
+            (max(1, min(int(limit), 100)),),
+        ).fetchall()
+        if rows:
+            conn.executemany(
+                "UPDATE platform_discord_outbox SET status='sending' WHERE id=? AND status='pending'",
+                [(int(row[0]),) for row in rows],
+            )
+    return [
+        {
+            "id": row[0],
+            "message_id": row[1],
+            "guild_id": row[2],
+            "channel_id": row[3],
+            "discord_user_id": row[4],
+            "author_name": row[5],
+            "content": row[6],
+        }
+        for row in rows
+    ]
+
+
+def mark_discord_outbox_sent(item_id: int) -> None:
+    ensure_platform_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        row = conn.execute(
+            "SELECT message_id FROM platform_discord_outbox WHERE id=?",
+            (int(item_id),),
+        ).fetchone()
+        conn.execute(
+            "UPDATE platform_discord_outbox SET status='sent', sent_at=?, error='' WHERE id=?",
+            (_now(), int(item_id)),
+        )
+        if row and int(row[0]):
+            conn.execute("UPDATE platform_messages SET status='sent' WHERE id=?", (int(row[0]),))
+
+
+def mark_discord_outbox_failed(item_id: int, error: str) -> None:
+    ensure_platform_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        row = conn.execute(
+            "SELECT message_id FROM platform_discord_outbox WHERE id=?",
+            (int(item_id),),
+        ).fetchone()
+        conn.execute(
+            "UPDATE platform_discord_outbox SET status='pending', error=? WHERE id=?",
+            (error[:300], int(item_id)),
+        )
+        if row and int(row[0]):
+            conn.execute("UPDATE platform_messages SET status='pending' WHERE id=?", (int(row[0]),))
 
 
 def list_activities() -> list[dict[str, Any]]:

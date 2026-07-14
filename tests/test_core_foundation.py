@@ -381,6 +381,97 @@ class PlatformDmTests(IsolatedDatabaseTest):
         self.assertEqual(archived_target, (message[0], second_id))
 
 
+class ChatStorageConsolidationTests(IsolatedDatabaseTest):
+    def test_legacy_web_chat_is_migrated_once_and_archived(self):
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE web_chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL DEFAULT 0,
+                    channel_id INTEGER NOT NULL DEFAULT 0,
+                    discord_user_id INTEGER NOT NULL,
+                    author_name TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL,
+                    attachment_json TEXT NOT NULL DEFAULT '[]',
+                    source TEXT NOT NULL DEFAULT 'web',
+                    status TEXT NOT NULL DEFAULT 'stored',
+                    edited_at TEXT NOT NULL DEFAULT '',
+                    deleted_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE web_chat_reactions (
+                    message_id INTEGER NOT NULL,
+                    emoji TEXT NOT NULL,
+                    discord_user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(message_id, emoji, discord_user_id)
+                );
+                CREATE TABLE web_bot_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    discord_user_id INTEGER NOT NULL,
+                    author_name TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    sent_at TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO web_chat_messages(
+                    guild_id, channel_id, discord_user_id, author_name, content,
+                    attachment_json, source, status, edited_at, deleted_at, created_at
+                ) VALUES(10, 20, 30, 'Legacy', 'hello', '[]', 'discord', 'stored', '', '', 'now');
+                INSERT INTO web_chat_reactions VALUES(1, '👍', 40, 'now');
+                INSERT INTO web_bot_outbox(
+                    guild_id, channel_id, discord_user_id, author_name, content, status, created_at
+                ) VALUES(10, 20, 30, 'Legacy', 'queued', 'pending', 'now');
+                """
+            )
+
+        platform_store.ensure_platform_tables()
+        platform_store.ensure_platform_tables()
+        messages = platform_store.list_general_chat_messages()
+        outbox = platform_store.claim_pending_discord_outbox()
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], "hello")
+        self.assertEqual(messages[0]["discord_user_id"], 30)
+        self.assertEqual(messages[0]["source"], "discord")
+        self.assertEqual(messages[0]["reactions"], [{"emoji": "👍", "count": 1}])
+        self.assertEqual(len(outbox), 1)
+        with db_connection(self.db_path) as conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            mapping_count = conn.execute("SELECT COUNT(*) FROM platform_web_chat_migration").fetchone()[0]
+        self.assertNotIn("web_chat_messages", tables)
+        self.assertNotIn("web_chat_reactions", tables)
+        self.assertNotIn("web_bot_outbox", tables)
+        self.assertIn("web_chat_messages_retired_backup", tables)
+        self.assertIn("web_chat_reactions_retired_backup", tables)
+        self.assertIn("web_bot_outbox_retired_backup", tables)
+        self.assertEqual(mapping_count, 1)
+
+    def test_general_chat_and_discord_outbox_share_platform_message(self):
+        web_app_store.upsert_web_user(7, "seven")
+        web_app_store.upsert_web_user(8, "eight")
+        message_id = platform_store.add_general_chat_message(
+            7, "Seven", "from app", guild_id=11, channel_id=22, source="web"
+        )
+        queued = platform_store.claim_pending_discord_outbox()
+        self.assertEqual(queued[0]["message_id"], message_id)
+        self.assertEqual(platform_store.list_general_chat_messages()[0]["status"], "pending")
+
+        platform_store.mark_discord_outbox_sent(queued[0]["id"])
+        self.assertEqual(platform_store.list_general_chat_messages()[0]["status"], "sent")
+
+        dm = platform_store.get_or_create_dm(7, 8)
+        dm_message = platform_store.add_platform_message("dm", dm["id"], 7, "Seven", "private")
+        self.assertFalse(platform_store.edit_general_chat_message(dm_message, 7, "leak"))
+        with self.assertRaises(ValueError):
+            platform_store.toggle_general_chat_reaction(dm_message, 7, "👍")
+
+
 class MlArtifactTests(unittest.TestCase):
     def test_empty_manifest_is_materialized_for_observability(self):
         with tempfile.TemporaryDirectory() as temp_dir:

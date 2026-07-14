@@ -5,14 +5,13 @@ from discord.ext import commands, tasks
 from config import APP_BASE_URL
 
 from core.settings_store import get_feature_policy, is_channel_allowed
-from core.web_app_store import (
-    add_chat_message,
-    claim_pending_outbox,
-    issue_login_code,
-    mark_outbox_failed,
-    mark_outbox_sent,
-    upsert_web_user,
+from core.platform_store import (
+    add_general_chat_message,
+    claim_pending_discord_outbox,
+    mark_discord_outbox_failed,
+    mark_discord_outbox_sent,
 )
+from core.web_app_store import issue_login_code, upsert_web_user
 
 
 class WebBridge(commands.Cog):
@@ -25,24 +24,24 @@ class WebBridge(commands.Cog):
 
     @tasks.loop(seconds=5)
     async def flush_web_outbox(self):
-        for item in claim_pending_outbox(20):
+        for item in claim_pending_discord_outbox(20):
             try:
                 guild = self.bot.get_guild(int(item["guild_id"]))
                 if not guild:
-                    mark_outbox_failed(item["id"], "guild not found")
+                    mark_discord_outbox_failed(item["id"], "guild not found")
                     continue
                 channel = guild.get_channel(int(item["channel_id"]))
                 if not isinstance(channel, discord.TextChannel):
-                    mark_outbox_failed(item["id"], "channel not found")
+                    mark_discord_outbox_failed(item["id"], "channel not found")
                     continue
                 content = (
                     f"**{item['author_name']}** через web/app:\n"
                     f"{item['content']}"
                 )
                 await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
-                mark_outbox_sent(item["id"])
+                mark_discord_outbox_sent(item["id"])
             except Exception as exc:
-                mark_outbox_failed(item["id"], str(exc))
+                mark_discord_outbox_failed(item["id"], str(exc))
 
     @flush_web_outbox.before_loop
     async def before_flush_web_outbox(self):
@@ -76,7 +75,7 @@ class WebBridge(commands.Cog):
         ):
             return
         try:
-            add_chat_message(
+            add_general_chat_message(
                 message.author.id,
                 message.author.display_name,
                 message.content or "",

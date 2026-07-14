@@ -38,20 +38,20 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
   - overview with backup email/password setup
   - server screen with text channels, DMs, activity sidebar and member list
   - members screen with local roles, badges, statuses and cosmetics
-  - fallback web chat
+  - compatibility chat view backed by the same `general` platform channel
   - League of Legends game section with Riot ID linking, refresh, unlink and stored profile view
   - Native Discord-like voice shell with rooms, join by link, mute, deafen and disconnect controls
   - settings editor for platform profile, banner preset, role catalog and feature channel policies
-  - SSE live updates for fallback chat and the selected platform channel/DM
+  - SSE live updates for the shared `general` channel and the selected platform channel/DM
   - message reactions, edit/delete, clickable links and image/link previews
   - local file uploads and attachment rendering for images, video, audio and generic files
-  - chat search for fallback chat and selected platform channel/DM
+  - chat search for the shared `general` channel and selected platform channel/DM
   - PWA install button when the browser exposes the install prompt
   - PWA shell with manifest, service worker and installable app metadata
 - Bot bridge:
-  - `fun_slesh/web_bridge.py` polls `web_bot_outbox`
+  - `fun_slesh/web_bridge.py` polls the canonical `platform_discord_outbox`
   - if a web message has `guild_id` and `channel_id`, the bot sends it into that Discord channel
-  - Discord messages from configured `web_chat` channels are stored back into the web chat
+  - Discord messages from configured `web_chat` channels are stored in the platform `general` channel
 
 ## Files
 

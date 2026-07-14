@@ -59,20 +59,26 @@ from core.lol_player_model import classify_lol_player, extract_lol_match_feature
 from core.ml_artifacts import load_artifact_manifest
 from core.ml_insights import build_ml_insights
 from core.platform_store import (
+    add_general_chat_message,
     add_platform_message,
     can_access_platform_target,
     create_text_channel,
+    delete_general_chat_message,
     delete_platform_message,
+    edit_general_chat_message,
     edit_platform_message,
+    ensure_platform_tables,
     get_server,
     get_or_create_dm,
     get_platform_message_context,
     list_activities,
     list_dm_threads,
+    list_general_chat_messages,
     list_platform_messages,
     mark_dm_read,
     list_servers,
     list_text_channels,
+    toggle_general_chat_reaction,
     toggle_platform_reaction,
     update_server,
 )
@@ -87,18 +93,13 @@ from core.settings_store import (
     set_feature_payload,
 )
 from core.web_app_store import (
-    add_chat_message,
     authenticate_local_user,
     consume_login_code,
     create_session,
     delete_session,
-    delete_chat_message,
-    edit_chat_message,
     ensure_web_tables,
     get_session_user,
     get_web_user,
-    list_chat_messages,
-    toggle_chat_reaction,
     upsert_login_profile,
     upsert_web_user,
 )
@@ -734,12 +735,12 @@ async def api_delete_channel(request: web.Request):
 
 async def api_chat_list(request: web.Request):
     _require_user(request)
-    return _json({"messages": list_chat_messages(int(request.query.get("limit") or 80))})
+    return _json({"messages": list_general_chat_messages(int(request.query.get("limit") or 80))})
 
 
 async def api_chat_stream(request: web.Request):
     limit = int(request.query.get("limit") or 80)
-    return await _sse_json(request, lambda: {"messages": list_chat_messages(limit)})
+    return await _sse_json(request, lambda: {"messages": list_general_chat_messages(limit)})
 
 
 async def api_chat_post(request: web.Request):
@@ -749,7 +750,7 @@ async def api_chat_post(request: web.Request):
     guild_id = int(data.get("guild_id") or 0)
     channel_id = int(data.get("channel_id") or 0)
     attachments = data.get("attachments") if isinstance(data.get("attachments"), list) else []
-    message_id = add_chat_message(
+    message_id = add_general_chat_message(
         user["id"],
         user.get("global_name") or user.get("username") or str(user["id"]),
         content,
@@ -804,7 +805,7 @@ async def api_chat_edit(request: web.Request):
     user = _require_user(request)
     message_id = int(request.match_info["message_id"])
     data = await request.json()
-    ok = edit_chat_message(
+    ok = edit_general_chat_message(
         message_id,
         user["id"],
         str(data.get("content") or ""),
@@ -816,7 +817,7 @@ async def api_chat_edit(request: web.Request):
 async def api_chat_delete(request: web.Request):
     user = _require_user(request)
     message_id = int(request.match_info["message_id"])
-    ok = delete_chat_message(message_id, user["id"], can_admin=has_admin_access(user["id"]))
+    ok = delete_general_chat_message(message_id, user["id"], can_admin=has_admin_access(user["id"]))
     return _json({"ok": ok}, 200 if ok else 403)
 
 
@@ -824,7 +825,10 @@ async def api_chat_reaction(request: web.Request):
     user = _require_user(request)
     message_id = int(request.match_info["message_id"])
     data = await request.json()
-    active = toggle_chat_reaction(message_id, user["id"], str(data.get("emoji") or "+"))
+    try:
+        active = toggle_general_chat_reaction(message_id, user["id"], str(data.get("emoji") or "+"))
+    except ValueError:
+        return _json({"error": "message_forbidden"}, 403)
     return _json({"ok": True, "active": active})
 
 
@@ -1009,7 +1013,7 @@ async def bot_chat_ingest(request: web.Request):
     if not _is_bot_authorized(request):
         return _json({"error": "unauthorized"}, 401)
     data = await request.json()
-    message_id = add_chat_message(
+    message_id = add_general_chat_message(
         int(data.get("discord_user_id") or 0),
         str(data.get("author_name") or "Discord"),
         str(data.get("content") or ""),
@@ -1022,6 +1026,7 @@ async def bot_chat_ingest(request: web.Request):
 
 def create_app() -> web.Application:
     ensure_web_tables()
+    ensure_platform_tables()
     app = web.Application(
         client_max_size=MAX_UPLOAD_BYTES + 1024 * 1024,
         middlewares=[security_middleware],
