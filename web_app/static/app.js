@@ -326,6 +326,9 @@ function openPlatformStream(scope, targetId) {
     try {
       const data = JSON.parse(event.data);
       renderPlatformMessages(data.messages || []);
+      if (state.platform.scope === "dm" && state.platform.targetId) {
+        markPlatformDmRead(state.platform.targetId).catch(console.error);
+      }
     } catch (error) {
       console.error(error);
     }
@@ -469,8 +472,22 @@ function renderPlatformBootstrap(data) {
 
   const dmBox = $("dmThreadList");
   dmBox.innerHTML = (data.dms || []).map((thread) => `
-    <button class="channel-button" type="button" data-scope="dm" data-target-id="${thread.id}" data-title="@ ${escapeHtml(thread.title)}">@ ${escapeHtml(thread.title)}</button>
+    <button class="channel-button" type="button" data-scope="dm" data-target-id="${thread.id}" data-title="@ ${escapeHtml(thread.title)}">
+      <span>@ ${escapeHtml(thread.title)}</span>
+      ${thread.unread_count ? `<span class="dm-unread" aria-label="Непрочитанных: ${thread.unread_count}">${thread.unread_count}</span>` : ""}
+    </button>
   `).join("") || `<div class="muted">ЛС пока нет</div>`;
+
+  const dmSelect = $("dmPeerId");
+  if (dmSelect) {
+    const currentUserId = Number(state.me?.user?.id || 0);
+    const peers = (data.members || []).filter((member) => Number(member.id) !== currentUserId);
+    dmSelect.innerHTML = `<option value="">Выбрать участника</option>${peers.map((member) => {
+      const profile = member.profile || {};
+      const name = profile.display_name || member.global_name || member.username || String(member.id);
+      return `<option value="${member.id}">${escapeHtml(name)}</option>`;
+    }).join("")}`;
+  }
 
   document.querySelectorAll(".channel-button").forEach((button) => {
     button.addEventListener("click", () => {
@@ -512,6 +529,7 @@ function renderPresence(members) {
     return;
   }
   box.classList.remove("muted");
+  const currentUserId = Number(state.me?.user?.id || 0);
   box.innerHTML = members.map((member) => {
     const profile = member.profile || {};
     const name = profile.display_name || member.global_name || member.username || String(member.id);
@@ -520,9 +538,15 @@ function renderPresence(members) {
       <div class="presence-item">
         <strong style="color:${escapeHtml(profile.accent_color || "#f4f7f8")}">${escapeHtml(name)}</strong>
         <span>${roles.map((role) => role.name).join(", ") || "участник"}</span>
+        ${Number(member.id) === currentUserId ? "" : `<button type="button" class="presence-dm" data-start-dm="${member.id}">Написать</button>`}
       </div>
     `;
   }).join("");
+  box.querySelectorAll("[data-start-dm]").forEach((button) => {
+    button.addEventListener("click", () => {
+      startDmWithPeer(Number(button.dataset.startDm)).catch(console.error);
+    });
+  });
 }
 
 function renderPlatformMessages(messages) {
@@ -603,7 +627,15 @@ async function selectPlatformTarget(scope, targetId, title) {
   });
   const data = await api(`/api/platform/messages?scope=${encodeURIComponent(scope)}&target_id=${targetId}`);
   renderPlatformMessages(data.messages || []);
+  if (scope === "dm") await markPlatformDmRead(targetId);
   openPlatformStream(scope, targetId);
+}
+
+async function markPlatformDmRead(threadId) {
+  if (!threadId) return;
+  await api(`/api/platform/dms/${threadId}/read`, { method: "POST", body: "{}" });
+  const button = document.querySelector(`.channel-button[data-scope="dm"][data-target-id="${threadId}"]`);
+  button?.querySelector(".dm-unread")?.remove();
 }
 
 async function sendPlatformMessage() {
@@ -639,12 +671,18 @@ async function createPlatformChannel() {
 async function createPlatformDm() {
   const peerId = Number($("dmPeerId").value || 0);
   if (!peerId) return;
+  await startDmWithPeer(peerId);
+  $("dmPeerId").value = "";
+}
+
+async function startDmWithPeer(peerId) {
+  if (!peerId) return;
   const data = await api("/api/platform/dms", {
     method: "POST",
     body: JSON.stringify({ peer_id: peerId }),
   });
-  $("dmPeerId").value = "";
   await loadPlatform();
+  setView("server");
   await selectPlatformTarget("dm", data.thread.id, `@ ${data.thread.title}`);
 }
 

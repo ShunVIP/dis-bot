@@ -315,6 +315,23 @@ class WebSecurityTests(IsolatedDatabaseTest):
 
 
 class PlatformDmTests(IsolatedDatabaseTest):
+    def test_dm_unread_count_and_read_marker_are_member_scoped(self):
+        for user_id in (1, 2, 3):
+            web_app_store.upsert_web_user(user_id, f"user-{user_id}")
+        thread = platform_store.get_or_create_dm(1, 2)
+        platform_store.add_platform_message("dm", thread["id"], 1, "one", "first")
+
+        self.assertEqual(platform_store.list_dm_threads(1)[0]["unread_count"], 0)
+        self.assertEqual(platform_store.list_dm_threads(2)[0]["unread_count"], 1)
+        self.assertFalse(platform_store.mark_dm_read(thread["id"], 3))
+        self.assertTrue(platform_store.mark_dm_read(thread["id"], 2))
+        self.assertEqual(platform_store.list_dm_threads(2)[0]["unread_count"], 0)
+
+        platform_store.add_platform_message("dm", thread["id"], 1, "one", "second")
+        platform_store.add_platform_message("dm", thread["id"], 2, "two", "reply")
+        self.assertEqual(platform_store.list_dm_threads(2)[0]["unread_count"], 1)
+        self.assertEqual(platform_store.list_dm_threads(1)[0]["unread_count"], 1)
+
     def test_dm_pair_uses_one_shared_thread_and_rejects_third_user(self):
         for user_id in (1, 2, 3):
             web_app_store.upsert_web_user(user_id, f"user-{user_id}")

@@ -72,6 +72,14 @@ def ensure_platform_tables():
                 PRIMARY KEY(message_id, emoji, author_id)
             );
 
+            CREATE TABLE IF NOT EXISTS platform_dm_reads (
+                thread_id            INTEGER NOT NULL,
+                user_id              INTEGER NOT NULL,
+                last_read_message_id INTEGER NOT NULL DEFAULT 0,
+                updated_at           TEXT NOT NULL,
+                PRIMARY KEY(thread_id, user_id)
+            );
+
             CREATE TABLE IF NOT EXISTS platform_activities (
                 discord_user_id INTEGER PRIMARY KEY,
                 activity_type   TEXT NOT NULL DEFAULT 'game',
@@ -89,6 +97,12 @@ def ensure_platform_tables():
         _normalize_dm_threads(conn)
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_dm_pair ON platform_dm_threads(member_low, member_high)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_platform_messages_target ON platform_messages(scope, target_id, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_platform_dm_reads_user ON platform_dm_reads(user_id, thread_id)"
         )
         now = _now()
         conn.execute(
@@ -337,13 +351,19 @@ def list_dm_threads(owner_id: int) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT d.id, d.member_low, d.member_high, d.title, d.updated_at,
-                   u.username, u.global_name, u.avatar
+                   u.username, u.global_name, u.avatar,
+                   (
+                       SELECT COUNT(1) FROM platform_messages m
+                       WHERE m.scope='dm' AND m.target_id=d.id AND m.author_id<>?
+                         AND m.deleted_at='' AND m.id>COALESCE(r.last_read_message_id, 0)
+                   ) AS unread_count
             FROM platform_dm_threads d
             LEFT JOIN web_users u ON u.discord_user_id=(CASE WHEN d.member_low=? THEN d.member_high ELSE d.member_low END)
+            LEFT JOIN platform_dm_reads r ON r.thread_id=d.id AND r.user_id=?
             WHERE d.member_low=? OR d.member_high=?
             ORDER BY d.updated_at DESC
             """,
-            (int(owner_id), int(owner_id), int(owner_id)),
+            (int(owner_id), int(owner_id), int(owner_id), int(owner_id), int(owner_id)),
         ).fetchall()
     result = []
     for row in rows:
@@ -355,6 +375,7 @@ def list_dm_threads(owner_id: int) -> list[dict[str, Any]]:
             "title": row[3] or row[6] or row[5] or str(peer_id),
             "updated_at": row[4],
             "peer": {"id": peer_id, "username": row[5], "global_name": row[6], "avatar": row[7]},
+            "unread_count": int(row[8] or 0),
         })
     return result
 
@@ -373,6 +394,40 @@ def get_or_create_dm(owner_id: int, peer_id: int, title: str = "") -> dict[str, 
             (low, high, title.strip()[:80], now, now, low, high),
         )
     return next(item for item in list_dm_threads(owner_id) if item["peer_id"] == int(peer_id))
+
+
+def mark_dm_read(thread_id: int, user_id: int) -> bool:
+    """Mark a DM read only when the caller is one of its two members."""
+    ensure_platform_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        member = conn.execute(
+            """
+            SELECT 1 FROM platform_dm_threads
+            WHERE id=? AND (member_low=? OR member_high=?)
+            """,
+            (int(thread_id), int(user_id), int(user_id)),
+        ).fetchone()
+        if not member:
+            return False
+        row = conn.execute(
+            """
+            SELECT COALESCE(MAX(id), 0) FROM platform_messages
+            WHERE scope='dm' AND target_id=?
+            """,
+            (int(thread_id),),
+        ).fetchone()
+        last_message_id = int(row[0] or 0)
+        conn.execute(
+            """
+            INSERT INTO platform_dm_reads(thread_id,user_id,last_read_message_id,updated_at)
+            VALUES(?,?,?,?)
+            ON CONFLICT(thread_id,user_id) DO UPDATE SET
+                last_read_message_id=MAX(last_read_message_id, excluded.last_read_message_id),
+                updated_at=excluded.updated_at
+            """,
+            (int(thread_id), int(user_id), last_message_id, _now()),
+        )
+    return True
 
 
 def can_access_platform_target(scope: str, target_id: int, user_id: int, can_admin: bool = False) -> bool:

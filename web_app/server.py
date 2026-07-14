@@ -70,6 +70,7 @@ from core.platform_store import (
     list_activities,
     list_dm_threads,
     list_platform_messages,
+    mark_dm_read,
     list_servers,
     list_text_channels,
     toggle_platform_reaction,
@@ -527,6 +528,14 @@ async def api_platform_dm_create(request: web.Request):
         return _json({"error": "peer_not_registered"}, 404)
     thread = get_or_create_dm(user["id"], peer_id, str(data.get("title") or ""))
     return _json({"ok": True, "thread": thread})
+
+
+async def api_platform_dm_read(request: web.Request):
+    user = _require_user(request)
+    thread_id = int(request.match_info["thread_id"])
+    if not mark_dm_read(thread_id, user["id"]):
+        return _json({"error": "dm_forbidden"}, 403)
+    return _json({"ok": True, "thread_id": thread_id})
 
 
 async def api_platform_messages(request: web.Request):
@@ -1037,6 +1046,7 @@ def create_app() -> web.Application:
     app.router.add_patch("/api/platform/server", api_platform_server_update)
     app.router.add_post("/api/platform/channels", api_platform_channel_create)
     app.router.add_post("/api/platform/dms", api_platform_dm_create)
+    app.router.add_post("/api/platform/dms/{thread_id}/read", api_platform_dm_read)
     app.router.add_get("/api/platform/messages", api_platform_messages)
     app.router.add_get("/api/platform/messages/stream", api_platform_messages_stream)
     app.router.add_post("/api/platform/messages", api_platform_message_post)

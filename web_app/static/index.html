@@ -157,7 +157,9 @@
             <div class="server-name small">Личные сообщения</div>
             <div id="dmThreadList" class="channel-list"></div>
             <form id="dmCreateForm" class="compact-form">
-              <input id="dmPeerId" inputmode="numeric" placeholder="Discord ID">
+              <select id="dmPeerId" aria-label="Выбрать участника">
+                <option value="">Выбрать участника</option>
+              </select>
               <button class="button" type="submit">ЛС</button>
             </form>
           </aside>
