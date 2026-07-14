@@ -104,6 +104,20 @@ deploy/systemd/          шаблоны systemd
 - пишет shadow-предсказания в `toxicity_ml_shadow`;
 - получает проверенную разметку из `toxicity_ml_feedback` через админ-панель.
 
+Границы runtime:
+
+- `core/toxicity_store.py` — единственный владелец журналов, weekly-счётчиков, shadow-примеров, feedback и настроек функции;
+- `core/toxicity_service.py` — cooldown и формирование шутливого ответа; пародийная вставка остаётся Markov-only;
+- `fun_slesh/toxicity.py` — Discord-события и slash UI без прямого SQLite;
+- журнал события и weekly-счётчик записываются одной транзакцией, а `scripts/report_toxicity_storage.py` сравнивает production и backup без изменения БД.
+
+Границы runtime:
+
+- `core/toxicity_store.py` — единственный владелец журналов, weekly-счётчиков, shadow-примеров, feedback и настроек функции;
+- `core/toxicity_service.py` — cooldown и формирование шутливого ответа; пародийная вставка остаётся Markov-only;
+- `fun_slesh/toxicity.py` — Discord-события и slash UI без прямого SQLite;
+- журнал события и weekly-счётчик записываются одной транзакцией, а `scripts/report_toxicity_storage.py` сравнивает production и backup без изменения БД.
+
 Обучение:
 
 ```powershell

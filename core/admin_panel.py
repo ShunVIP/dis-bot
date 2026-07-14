@@ -46,6 +46,11 @@ from core.settings_store import (
     set_feature_payload,
 )
 from core.paths import BIRTHDAYS_DB, SOCIAL_DB
+from core.toxicity_store import (
+    count_toxicity_feedback,
+    list_pending_shadow_samples,
+    save_toxicity_feedback,
+)
 
 
 DISCORD_API = "https://discord.com/api/v10"
@@ -1039,19 +1044,9 @@ def _render_database_panel(bot, guild_id: int) -> str:
 
 def _render_toxicity_ml_panel() -> str:
     try:
-        with sqlite3.connect(SOCIAL_DB) as conn:
-            rows = conn.execute(
-                """
-                SELECT s.message_id,s.rule_level,s.ml_level,s.ml_confidence,s.model_version,s.msg_snippet
-                FROM toxicity_ml_shadow s
-                LEFT JOIN toxicity_ml_feedback f ON f.message_id=s.message_id
-                WHERE f.message_id IS NULL
-                ORDER BY (s.rule_level != s.ml_level) DESC, s.ml_confidence DESC, s.logged_at DESC
-                LIMIT 20
-                """
-            ).fetchall()
-            reviewed = conn.execute("SELECT COUNT(*) FROM toxicity_ml_feedback").fetchone()[0]
-    except sqlite3.Error:
+        rows = list_pending_shadow_samples(limit=20)
+        reviewed = count_toxicity_feedback()
+    except Exception:
         rows, reviewed = [], 0
     body = []
     for message_id, rule_level, ml_level, confidence, version, snippet in rows:
@@ -1608,22 +1603,8 @@ async def _toxicity_ml_feedback(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Invalid toxicity feedback")
     session = _current_admin_session(request)
     reviewer_id = int((session or {}).get("discord_user_id") or 0)
-    with sqlite3.connect(SOCIAL_DB) as conn:
-        row = conn.execute(
-            "SELECT msg_snippet FROM toxicity_ml_shadow WHERE message_id=?",
-            (int(message_raw),),
-        ).fetchone()
-        if not row:
-            raise web.HTTPNotFound(text="Shadow sample not found")
-        conn.execute(
-            """
-            INSERT INTO toxicity_ml_feedback(message_id,msg_snippet,corrected_level,reviewer_id,reviewed_at)
-            VALUES(?,?,?,?,?)
-            ON CONFLICT(message_id) DO UPDATE SET corrected_level=excluded.corrected_level,
-                reviewer_id=excluded.reviewer_id,reviewed_at=excluded.reviewed_at
-            """,
-            (int(message_raw), str(row[0]), int(level_raw), reviewer_id, datetime.utcnow().isoformat()),
-        )
+    if not save_toxicity_feedback(int(message_raw), int(level_raw), reviewer_id):
+        raise web.HTTPNotFound(text="Shadow sample not found")
     message = f"Пример {message_raw} размечен уровнем {level_raw}."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
 

@@ -107,6 +107,7 @@
 - `activity_rewards` и исключения `message_stats` перенесены из `message_and_voice_stats.py` в `core/activity_rewards_store.py`;
 - расчёт пассивных наград отделён в `core/activity_rewards_service.py`, Discord cog отвечает только за события и UI;
 - `heroes_troll_config` и `rep_roles_config` также выведены из runtime после prod-аудита; история Heroes, пороги и активные роли сохранены в отдельных data-store таблицах.
+- toxicity-журналы, weekly-счётчики, shadow-выборка и ручная разметка принадлежат `core/toxicity_store.py`; Discord cog и admin panel больше не выполняют SQL к этим таблицам.
 
 ## Следующий порядок работ
 

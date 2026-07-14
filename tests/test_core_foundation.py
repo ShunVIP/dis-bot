@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import random
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -14,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -54,6 +55,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(activity_rewards_store, "SOCIAL_DB", self.db_path),
             patch.object(heroes_store, "SOCIAL_DB", self.db_path),
             patch.object(rep_roles_store, "SOCIAL_DB", self.db_path),
+            patch.object(toxicity_store, "SOCIAL_DB", self.db_path),
             patch.object(conversation_store, "SOCIAL_DB", self.db_path),
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
@@ -73,11 +75,13 @@ class IsolatedDatabaseTest(unittest.TestCase):
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
         heroes_store._INITIALIZED_DATABASES.discard(self.db_path)
         rep_roles_store._INITIALIZED_DATABASES.discard(self.db_path)
+        toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
 
     def tearDown(self):
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
         heroes_store._INITIALIZED_DATABASES.discard(self.db_path)
         rep_roles_store._INITIALIZED_DATABASES.discard(self.db_path)
+        toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
         for item in reversed(self.patches):
             item.stop()
         self.temp_dir.cleanup()
@@ -1292,6 +1296,51 @@ class ToxicityMlTests(unittest.TestCase):
         self.assertTrue(version.startswith("tox-nb-"))
         prediction = toxicity_model_service.detect_toxicity("обычная спокойная беседа")
         self.assertEqual(prediction["effective_level"], prediction["rule_level"])
+
+
+class ToxicityLayerTests(IsolatedDatabaseTest):
+    def test_event_counter_and_tops_are_written_atomically(self):
+        first = datetime(2026, 7, 14, 10, tzinfo=timezone.utc)
+        self.assertEqual(toxicity_store.record_toxic_event(7, 42, 9, 2, "тест", logged_at=first), 1)
+        self.assertEqual(toxicity_store.record_toxic_event(7, 42, 9, 2, "тест 2", logged_at=first), 2)
+        self.assertEqual(toxicity_store.get_toxicity_top(7, "all"), [(42, 2)])
+        self.assertEqual(
+            toxicity_store.toxicity_storage_counts(),
+            {"toxicity_log": 2, "toxicity_weekly": 1, "toxicity_ml_shadow": 0, "toxicity_ml_feedback": 0},
+        )
+        self.assertEqual(toxicity_store.inspect_toxicity_storage(self.db_path)["counts"]["toxicity_log"], 2)
+
+    def test_shadow_feedback_round_trip_preserves_rules_only_boundary(self):
+        prediction = {
+            "rule_level": 1, "ml_level": 2, "ml_confidence": 0.91,
+            "model_version": "tox-nb-test", "effective_level": 1,
+        }
+        self.assertTrue(toxicity_store.save_shadow_prediction(
+            message_id=100, guild_id=7, channel_id=9, user_id=42,
+            text="пример сообщения", prediction=prediction,
+        ))
+        self.assertEqual(toxicity_store.list_pending_shadow_samples()[0][:3], (100, 1, 2))
+        self.assertTrue(toxicity_store.save_toxicity_feedback(100, 1, 55))
+        self.assertEqual(toxicity_store.count_toxicity_feedback(), 1)
+        self.assertEqual(toxicity_store.list_pending_shadow_samples(), [])
+        self.assertFalse(toxicity_store.save_toxicity_feedback(999, 0, 55))
+
+    def test_settings_and_service_cooldown_remain_configurable(self):
+        toxicity_store.set_toxicity_threshold(7, 3)
+        toxicity_store.set_toxicity_allow_channels(7, {10, 11})
+        toxicity_store.exclude_toxicity_channel(7, 12, "rules")
+        enabled, threshold, allowed, excluded = toxicity_store.get_toxicity_config(7)
+        self.assertTrue(enabled)
+        self.assertEqual((threshold, allowed, excluded), (3, {10, 11}, {12}))
+
+        cooldowns = toxicity_service.ToxicityCooldowns(seconds=60)
+        now = datetime(2026, 7, 14, 10, tzinfo=timezone.utc)
+        self.assertTrue(cooldowns.allow(7, 42, now))
+        self.assertFalse(cooldowns.allow(7, 42, now + timedelta(seconds=59)))
+        self.assertTrue(cooldowns.allow(7, 42, now + timedelta(seconds=60)))
+        response = toxicity_service.build_troll_response("@user", 2, 1, "марков", rng=random.Random(1))
+        self.assertIn("@user", response)
+        self.assertIn("марков", response)
 
 
 class MlInsightsTests(IsolatedDatabaseTest):

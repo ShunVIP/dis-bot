@@ -13,234 +13,23 @@
   /токсичность_канал — (Админ) ограничить работу определёнными каналами
 """
 
-import sqlite3, random
-from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo
-
 import discord
 from discord.ext import commands
 from discord import app_commands
-from core.paths import SOCIAL_DB
-from core.toxicity_model_service import detect_rule_level, detect_toxicity
-from core.settings_store import (
-    clear_feature_channel,
-    clear_feature_channels,
-    get_feature_payload,
-    get_feature_policy,
-    has_feature_setting,
-    set_feature_channel,
-    set_feature_enabled,
-    set_feature_payload,
+from core.toxicity_model_service import detect_toxicity
+from core.toxicity_service import ToxicityCooldowns, build_troll_response, generate_markov_troll
+from core.toxicity_store import (
+    ensure_toxicity_storage,
+    exclude_toxicity_channel,
+    get_toxicity_config,
+    get_toxicity_top,
+    include_toxicity_channel,
+    record_toxic_event,
+    save_shadow_prediction,
+    set_toxicity_allow_channels,
+    set_toxicity_enabled,
+    set_toxicity_threshold,
 )
-
-DB_PATH  = SOCIAL_DB
-UTC      = timezone.utc
-MSK      = ZoneInfo("Europe/Moscow")
-FEATURE_TOXICITY = "toxicity"
-
-# Шаблоны ответов по уровням (публичный позор)
-SHAME_TEMPLATES = {
-    1: [
-        "👀 {mention} опять начинает, это уже **{count}**-й раз на этой неделе",
-        "📊 {mention} набирает статистику: **{count}** токсичных сообщений за неделю",
-        "🤔 {mention} не может без этого, счётчик: **{count}**",
-    ],
-    2: [
-        "🚨 {mention} жарит — уже **{count}** раз за неделю, серьёзно?",
-        "📈 {mention} бьёт рекорды: **{count}** раз за неделю",
-        "🏆 {mention} лидирует в номинации «токсик недели»: **{count}** очков",
-    ],
-    3: [
-        "🔥 {mention} совсем поехал — **{count}** раз за неделю, ты в порядке?",
-        "💀 {mention} финалит: **{count}** токсичных за неделю, может хватит?",
-        "🎖️ {mention} получает медаль «Главный токсик»: **{count}** раз за неделю",
-    ],
-}
-
-
-def _ensure_tables():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS toxicity_log (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id   INTEGER NOT NULL,
-                user_id    INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                level      INTEGER NOT NULL,
-                msg_snippet TEXT   NOT NULL DEFAULT '',
-                logged_at  TEXT    NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS toxicity_weekly (
-                user_id   INTEGER NOT NULL,
-                guild_id  INTEGER NOT NULL,
-                week      TEXT    NOT NULL,
-                count     INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (user_id, guild_id, week)
-            );
-
-            CREATE TABLE IF NOT EXISTS toxicity_ml_shadow (
-                message_id    INTEGER PRIMARY KEY,
-                guild_id      INTEGER NOT NULL,
-                channel_id    INTEGER NOT NULL,
-                user_id       INTEGER NOT NULL,
-                rule_level    INTEGER NOT NULL,
-                ml_level      INTEGER NOT NULL,
-                ml_confidence REAL NOT NULL,
-                model_version TEXT NOT NULL DEFAULT '',
-                msg_snippet   TEXT NOT NULL DEFAULT '',
-                logged_at     TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS toxicity_ml_feedback (
-                message_id      INTEGER PRIMARY KEY,
-                msg_snippet     TEXT NOT NULL,
-                corrected_level INTEGER NOT NULL CHECK(corrected_level BETWEEN 0 AND 3),
-                reviewer_id     INTEGER NOT NULL,
-                reviewed_at     TEXT NOT NULL
-            );
-
-        """)
-
-
-def _get_config(guild_id: int) -> tuple[bool, int, set[int], set[int]]:
-    """Возвращает (enabled, threshold_lvl, allowed_channel_ids, excluded_channel_ids)."""
-    policy = get_feature_policy(guild_id, FEATURE_TOXICITY)
-    payload = get_feature_payload(guild_id, FEATURE_TOXICITY)
-    enabled = policy.enabled
-    try:
-        threshold = int(payload.get("threshold") or 1)
-    except (TypeError, ValueError):
-        threshold = 1
-    allowed = set(policy.allowed_channel_ids)
-    excluded = set(policy.excluded_channel_ids)
-    return enabled, max(1, min(threshold, 3)), allowed, excluded
-
-
-def _toxicity_excluded_channel_ids(guild_id: int) -> set[int]:
-    return _get_config(guild_id)[3]
-
-
-def _is_toxicity_channel_excluded(guild_id: int, channel_id: int) -> bool:
-    return int(channel_id) in _toxicity_excluded_channel_ids(guild_id)
-
-
-def _save_toxicity_enabled(guild_id: int, enabled: bool):
-    set_feature_enabled(guild_id, FEATURE_TOXICITY, enabled)
-
-
-def _save_toxicity_threshold(guild_id: int, threshold: int):
-    threshold = max(1, min(int(threshold), 3))
-    payload = get_feature_payload(guild_id, FEATURE_TOXICITY)
-    payload["threshold"] = threshold
-    set_feature_payload(guild_id, FEATURE_TOXICITY, payload)
-
-
-def _save_toxicity_allow_channels(guild_id: int, channel_ids: set[int]):
-    clear_feature_channels(guild_id, FEATURE_TOXICITY, "allow")
-    for channel_id in sorted(channel_ids):
-        set_feature_channel(guild_id, FEATURE_TOXICITY, channel_id, "allow", "Discord admin command")
-
-
-def _save_toxicity_excluded_channel(guild_id: int, channel_id: int, reason: str = ""):
-    set_feature_channel(guild_id, FEATURE_TOXICITY, channel_id, "exclude", reason or "Discord admin command")
-
-
-def _clear_toxicity_excluded_channel(guild_id: int, channel_id: int) -> int:
-    return clear_feature_channel(guild_id, FEATURE_TOXICITY, channel_id, "exclude")
-
-
-def _detect_level(text: str) -> int:
-    """Возвращает уровень токсичности (0 = нет)."""
-    return detect_rule_level(text)
-
-
-def _save_shadow_prediction(message: discord.Message, prediction: dict):
-    if not prediction.get("model_version"):
-        return
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO toxicity_ml_shadow(
-                message_id,guild_id,channel_id,user_id,rule_level,ml_level,
-                ml_confidence,model_version,msg_snippet,logged_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                message.id,
-                message.guild.id,
-                message.channel.id,
-                message.author.id,
-                prediction["rule_level"],
-                prediction["ml_level"],
-                prediction["ml_confidence"],
-                prediction["model_version"],
-                message.content[:160],
-                datetime.now(UTC).isoformat(),
-            ),
-        )
-
-
-def _current_week() -> str:
-    return datetime.now(MSK).strftime("%Y-W%W")
-
-
-def _inc_counter(guild_id: int, user_id: int) -> int:
-    week = _current_week()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO toxicity_weekly(user_id, guild_id, week, count)"
-            " VALUES(?,?,?,1)"
-            " ON CONFLICT(user_id, guild_id, week)"
-            " DO UPDATE SET count = count + 1",
-            (user_id, guild_id, week)
-        )
-        row = conn.execute(
-            "SELECT count FROM toxicity_weekly"
-            " WHERE user_id=? AND guild_id=? AND week=?",
-            (user_id, guild_id, week)
-        ).fetchone()
-    return row[0] if row else 1
-
-
-# ── Генерация троллинг-ответа ─────────────────────────────────────────────────
-def _markov_troll(user_id: int) -> str | None:
-    """Генерирует фразу через актуальные модели пародии пользователя."""
-    try:
-        from fun_slesh.parody_engine import generate_phrase, model_exists
-
-        # Для токсичности лучше сначала брать более внятную модель,
-        # а уже потом абсурдную.
-        if model_exists(user_id, "разум"):
-            sentence = generate_phrase(user_id, "разум")
-            if sentence:
-                return sentence
-
-        if model_exists(user_id, "мем"):
-            sentence = generate_phrase(user_id, "мем")
-            if sentence:
-                return sentence
-    except Exception:
-        pass
-    return None
-
-
-def _build_troll_response(mention: str, count: int, level: int,
-                           parody: str | None = None) -> str:
-    shame = random.choice(SHAME_TEMPLATES.get(level, SHAME_TEMPLATES[1]))
-    base  = shame.format(mention=mention, count=count)
-
-    if parody:
-        # Пародия на их же стиль
-        connectors = [
-            f"\n\nА вот как это звучит на твоём языке: *«{parody}»*",
-            f"\n\nПереводим на твой: *«{parody}»*",
-            f"\n\nТвоя же модель говорит: *«{parody}»*",
-        ]
-        base += random.choice(connectors)
-
-    return base
-
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class Toxicity(commands.Cog):
@@ -251,19 +40,12 @@ class Toxicity(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        _ensure_tables()
-        # Небольшой кулдаун на ответы чтобы не спамить
-        self._cooldowns: dict[tuple[int, int], datetime] = {}
+        ensure_toxicity_storage()
+        self._cooldowns = ToxicityCooldowns(seconds=24 * 3600)
 
     def _check_cooldown(self, guild_id: int, user_id: int) -> bool:
         """True = можно отвечать."""
-        key = (guild_id, user_id)
-        last = self._cooldowns.get(key)
-        now  = datetime.now(UTC)
-        if last and (now - last).total_seconds() < 24 * 3600:
-            return False
-        self._cooldowns[key] = now
-        return True
+        return self._cooldowns.allow(guild_id, user_id)
 
     async def _send_troll_reply(self, message: discord.Message, response: str):
         try:
@@ -281,7 +63,7 @@ class Toxicity(commands.Cog):
         guild_id = message.guild.id
         user_id  = message.author.id
 
-        enabled, threshold, ch_filter, excluded_channels = _get_config(guild_id)
+        enabled, threshold, ch_filter, excluded_channels = get_toxicity_config(guild_id)
         if not enabled:
             return
         if message.channel.id in excluded_channels:
@@ -293,7 +75,14 @@ class Toxicity(commands.Cog):
 
         # Детектируем
         prediction = detect_toxicity(message.content)
-        _save_shadow_prediction(message, prediction)
+        save_shadow_prediction(
+            message_id=message.id,
+            guild_id=message.guild.id,
+            channel_id=message.channel.id,
+            user_id=message.author.id,
+            text=message.content,
+            prediction=prediction,
+        )
         level = prediction["effective_level"]
         if level < threshold:
             return
@@ -302,23 +91,14 @@ class Toxicity(commands.Cog):
         if not self._check_cooldown(guild_id, user_id):
             return
 
-        # Логируем
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO toxicity_log(guild_id,user_id,channel_id,level,msg_snippet,logged_at)"
-                " VALUES(?,?,?,?,?,?)",
-                (guild_id, user_id, message.channel.id, level,
-                 message.content[:100], datetime.now(UTC).isoformat())
-            )
-
-        count  = _inc_counter(guild_id, user_id)
+        count = record_toxic_event(guild_id, user_id, message.channel.id, level, message.content)
         parody = None
 
         # Пытаемся сгенерировать пародию (не блокируем основной поток)
-        markov = _markov_troll(user_id)
+        markov = generate_markov_troll(user_id)
         if markov:
             parody = markov
-        response = _build_troll_response(
+        response = build_troll_response(
             mention=message.author.mention,
             count=count,
             level=level,
@@ -341,23 +121,8 @@ class Toxicity(commands.Cog):
                        период: str = "week"):
         guild_id = interaction.guild.id
 
-        with sqlite3.connect(DB_PATH) as conn:
-            if период == "week":
-                week = _current_week()
-                rows = conn.execute(
-                    "SELECT user_id, count FROM toxicity_weekly"
-                    " WHERE guild_id=? AND week=?"
-                    " ORDER BY count DESC LIMIT 10",
-                    (guild_id, week)
-                ).fetchall()
-                title = "☢️ Топ токсиков этой недели"
-            else:
-                rows = conn.execute(
-                    "SELECT user_id, SUM(count) as total FROM toxicity_weekly"
-                    " WHERE guild_id=? GROUP BY user_id ORDER BY total DESC LIMIT 10",
-                    (guild_id,)
-                ).fetchall()
-                title = "☢️ Топ токсиков за всё время"
+        rows = get_toxicity_top(guild_id, период)
+        title = "☢️ Топ токсиков этой недели" if период == "week" else "☢️ Топ токсиков за всё время"
 
         if not rows:
             await interaction.response.send_message(
@@ -383,7 +148,7 @@ class Toxicity(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def токсичность_вкл(self, interaction: discord.Interaction,
                                 включить: bool):
-        _save_toxicity_enabled(interaction.guild.id, включить)
+        set_toxicity_enabled(interaction.guild.id, включить)
         status = "✅ Включён" if включить else "⛔ Выключен"
         await interaction.response.send_message(
             f"{status} детектор токсичности. Настройка сохранена в admin feature settings.", ephemeral=True)
@@ -400,7 +165,7 @@ class Toxicity(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def токсичность_порог(self, interaction: discord.Interaction,
                                  уровень: int):
-        _save_toxicity_threshold(interaction.guild.id, уровень)
+        set_toxicity_threshold(interaction.guild.id, уровень)
         labels = {1: "любая грубость", 2: "оскорбления", 3: "только жёсткое"}
         await interaction.response.send_message(
             f"✅ Порог установлен: **уровень {уровень}** ({labels[уровень]}). Настройка сохранена в admin feature settings.",
@@ -423,7 +188,7 @@ class Toxicity(commands.Cog):
                                  действие: str,
                                  канал: discord.TextChannel | None = None):
         guild_id = interaction.guild.id
-        current = set(_get_config(guild_id)[2])
+        current = set(get_toxicity_config(guild_id)[2])
 
         if действие == "reset":
             current = set()
@@ -433,7 +198,7 @@ class Toxicity(commands.Cog):
             else:
                 current.discard(канал.id)
 
-        _save_toxicity_allow_channels(guild_id, current)
+        set_toxicity_allow_channels(guild_id, current)
 
         if not current:
             msg = "✅ Мониторинг ведётся во **всех каналах**."
@@ -450,7 +215,7 @@ class Toxicity(commands.Cog):
         канал: discord.TextChannel,
         причина: str = "",
     ):
-        _save_toxicity_excluded_channel(interaction.guild.id, канал.id, причина)
+        exclude_toxicity_channel(interaction.guild.id, канал.id, причина)
         await interaction.response.send_message(
             f"✅ {канал.mention} исключён из детектора токсичности. Настройка сохранена в admin feature settings.", ephemeral=True
         )
@@ -458,14 +223,14 @@ class Toxicity(commands.Cog):
     @toxicity_group.command(name="вернуть", description="(Админ) Вернуть канал в детектор токсичности")
     @app_commands.checks.has_permissions(administrator=True)
     async def toxicity_include_channel(self, interaction: discord.Interaction, канал: discord.TextChannel):
-        deleted = _clear_toxicity_excluded_channel(interaction.guild.id, канал.id)
+        deleted = include_toxicity_channel(interaction.guild.id, канал.id)
         text = f"✅ {канал.mention} снова участвует в детекторе токсичности." if deleted else "ℹ️ Этого канала не было в исключениях."
         await interaction.response.send_message(text, ephemeral=True)
 
     @toxicity_group.command(name="исключения", description="(Админ) Показать каналы, исключённые из токсичности")
     @app_commands.checks.has_permissions(administrator=True)
     async def toxicity_excluded_channels(self, interaction: discord.Interaction):
-        ids = _toxicity_excluded_channel_ids(interaction.guild.id)
+        ids = get_toxicity_config(interaction.guild.id)[3]
         text = ", ".join(f"<#{cid}>" for cid in sorted(ids)) if ids else "Исключений нет."
         await interaction.response.send_message(f"Каналы вне детектора токсичности: {text}", ephemeral=True)
 
