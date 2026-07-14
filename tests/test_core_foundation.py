@@ -278,6 +278,20 @@ class WebSecurityTests(IsolatedDatabaseTest):
         self.assertEqual(web_app_store.consume_login_code(code)["id"], 6)
         self.assertIsNone(web_app_store.consume_login_code(code))
 
+    def test_oauth_method_is_fail_closed_without_complete_configuration(self):
+        with patch.object(web_server, "DISCORD_CLIENT_ID", "client"), patch.object(
+            web_server, "DISCORD_CLIENT_SECRET", ""
+        ), patch.object(web_server, "DISCORD_REDIRECT_URI", "https://example.test/callback"), patch.object(
+            web_server, "ALLOWED_GUILD_IDS", frozenset({123})
+        ):
+            self.assertFalse(web_server._auth_methods()["discord_oauth"])
+        with patch.object(web_server, "DISCORD_CLIENT_ID", "client"), patch.object(
+            web_server, "DISCORD_CLIENT_SECRET", "secret"
+        ), patch.object(web_server, "DISCORD_REDIRECT_URI", "https://example.test/callback"), patch.object(
+            web_server, "ALLOWED_GUILD_IDS", frozenset({123})
+        ):
+            self.assertTrue(web_server._auth_methods()["discord_oauth"])
+
     def test_security_middleware_blocks_cross_origin_writes_and_sets_headers(self):
         async def scenario():
             app = web.Application(middlewares=[security_middleware])

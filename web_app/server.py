@@ -160,6 +160,17 @@ def _json(data, status: int = 200):
     )
 
 
+def _auth_methods() -> dict[str, bool]:
+    return {
+        "discord_oauth": bool(
+            DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET
+            and DISCORD_REDIRECT_URI and ALLOWED_GUILD_IDS
+        ),
+        "discord_code": bool(ALLOWED_GUILD_IDS),
+        "local": True,
+    }
+
+
 def _session_id(request: web.Request) -> str:
     return request.cookies.get("vipik_session", "")
 
@@ -287,8 +298,8 @@ async def health(request: web.Request):
 
 
 async def auth_login(request: web.Request):
-    if not DISCORD_CLIENT_ID or not DISCORD_REDIRECT_URI:
-        return _json({"error": "Discord OAuth is not configured"}, 500)
+    if not _auth_methods()["discord_oauth"]:
+        return _json({"error": "discord_oauth_unavailable"}, 503)
     state = secrets.token_urlsafe(24)
     response = web.HTTPFound(
         "https://discord.com/oauth2/authorize?"
@@ -389,9 +400,9 @@ async def auth_callback(request: web.Request):
 
 async def auth_logout(request: web.Request):
     delete_session(_session_id(request))
-    response = web.HTTPFound("/")
+    response = _json({"ok": True})
     response.del_cookie("vipik_session")
-    raise response
+    return response
 
 
 async def auth_local_login(request: web.Request):
@@ -441,7 +452,7 @@ async def auth_code_login(request: web.Request):
 async def api_me(request: web.Request):
     user = _current_user(request)
     if not user:
-        return _json({"authenticated": False})
+        return _json({"authenticated": False, "auth_methods": _auth_methods()})
     riot_connections = [
         item for item in user.get("connections", [])
         if item.get("type") in {"riotgames", "leagueoflegends"}
@@ -452,6 +463,7 @@ async def api_me(request: web.Request):
         "riot_connections": riot_connections,
         "roles": get_user_roles(user["id"]),
         "is_admin": has_admin_access(user["id"]),
+        "auth_methods": _auth_methods(),
     })
 
 
@@ -1094,7 +1106,7 @@ def create_app() -> web.Application:
     app.router.add_get("/health", health)
     app.router.add_get("/auth/discord", auth_login)
     app.router.add_get("/auth/discord/callback", auth_callback)
-    app.router.add_get("/auth/logout", auth_logout)
+    app.router.add_post("/auth/logout", auth_logout)
     app.router.add_post("/auth/local", auth_local_login)
     app.router.add_post("/auth/code", auth_code_login)
     app.router.add_get("/api/me", api_me)

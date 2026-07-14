@@ -141,7 +141,8 @@ async function applyInitialView() {
 function renderMe(data) {
   state.me = data;
   const signed = Boolean(data.authenticated);
-  $("loginLink").classList.toggle("hidden", signed);
+  const oauthAvailable = Boolean(data.auth_methods?.discord_oauth);
+  $("loginLink").classList.toggle("hidden", signed || !oauthAvailable);
   $("logoutLink").classList.toggle("hidden", !signed);
   $("localLoginForm").classList.toggle("hidden", signed);
   $("discordCodeForm").classList.toggle("hidden", signed);
@@ -152,7 +153,9 @@ function renderMe(data) {
   });
   if (!signed) {
     $("hello").textContent = "Кабинет ViPik";
-    $("authState").textContent = "Войди через Discord, чтобы открыть профиль, чат и настройки.";
+    $("authState").textContent = oauthAvailable
+      ? "Войди через Discord, чтобы открыть профиль, чат и настройки."
+      : "Получи одноразовый код командой /приложение на сервере Discord.";
     $("riotStatus").textContent = "нет входа";
     $("connectionsList").textContent = "Вход не выполнен";
     $("loginProfileStatus").textContent = "Первый раз зайди через Discord, потом задай email и пароль для резервного входа.";
@@ -1202,6 +1205,11 @@ $("installApp").addEventListener("click", async () => {
   await state.deferredInstallPrompt.userChoice.catch(() => {});
   state.deferredInstallPrompt = null;
   $("installApp").classList.add("hidden");
+});
+
+$("logoutLink").addEventListener("click", async () => {
+  await api("/auth/logout", { method: "POST", body: "{}" });
+  location.reload();
 });
 
 $("chatSearch").addEventListener("input", () => renderChat(state.messages.chat));
