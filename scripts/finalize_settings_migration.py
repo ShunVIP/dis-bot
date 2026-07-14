@@ -46,12 +46,17 @@ def _archive_tables(database: str, tables: tuple[str, ...], *, apply: bool) -> l
             backup = f"{table}{BACKUP_SUFFIX}"
             if not _table_exists(conn, table):
                 continue
-            if _table_exists(conn, backup):
-                raise RuntimeError(f"backup table already exists: {backup}")
             rows = int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-            actions.append({"table": table, "backup": backup, "rows": rows})
+            backup_exists = _table_exists(conn, backup)
+            if backup_exists and rows:
+                raise RuntimeError(f"active table has rows while backup already exists: {table}")
+            action = "drop_empty_recreated" if backup_exists else "archive"
+            actions.append({"table": table, "backup": backup, "rows": rows, "action": action})
             if apply:
-                conn.execute(f'ALTER TABLE "{table}" RENAME TO "{backup}"')
+                if backup_exists:
+                    conn.execute(f'DROP TABLE "{table}"')
+                else:
+                    conn.execute(f'ALTER TABLE "{table}" RENAME TO "{backup}"')
         if apply and actions and database == SOCIAL_DB:
             conn.execute(
                 """
@@ -68,6 +73,10 @@ def _archive_tables(database: str, tables: tuple[str, ...], *, apply: bool) -> l
                 """
                 INSERT INTO settings_migration_archive(table_name, backup_table, source_rows, archived_at)
                 VALUES(?, ?, ?, ?)
+                ON CONFLICT(table_name) DO UPDATE SET
+                    backup_table=excluded.backup_table,
+                    source_rows=MAX(settings_migration_archive.source_rows, excluded.source_rows),
+                    archived_at=excluded.archived_at
                 """,
                 [(item["table"], item["backup"], item["rows"], now) for item in actions],
             )

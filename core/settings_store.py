@@ -242,6 +242,24 @@ def get_feature_channel_ids(guild_id: int, feature: str, mode: str) -> set[int]:
     return {int(row[0]) for row in rows}
 
 
+def list_feature_channels(guild_id: int, feature: str, mode: str) -> list[dict[str, Any]]:
+    ensure_settings_tables()
+    with db_connection(SOCIAL_DB) as conn:
+        rows = conn.execute(
+            """
+            SELECT channel_id, reason, updated_at
+            FROM feature_channels
+            WHERE guild_id=? AND feature=? AND mode=?
+            ORDER BY channel_id
+            """,
+            (guild_id, feature, mode),
+        ).fetchall()
+    return [
+        {"channel_id": int(row[0]), "reason": str(row[1] or ""), "updated_at": row[2]}
+        for row in rows
+    ]
+
+
 def get_feature_policy(guild_id: int, feature: str) -> FeatureChannelPolicy:
     payload = get_feature_payload(guild_id, feature)
     output_ids = get_feature_channel_ids(guild_id, feature, "output")

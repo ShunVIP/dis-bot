@@ -72,6 +72,12 @@ deploy/systemd/          шаблоны systemd
 - `fun_slesh/parody_engine.py` — только Discord UI/orchestration;
 - `core/ml_artifacts.py` — SHA256, версия и переносимость артефактов.
 
+Границы статистики и пассивных наград:
+
+- `core/activity_rewards_store.py` — канонические настройки `activity_rewards`, исключения `message_stats`, счётчики и безопасная legacy-миграция;
+- `core/activity_rewards_service.py` — расчёт наград и интеграция с общей экономикой;
+- `fun_slesh/message_and_voice_stats.py` — Discord-команды, события и представление без собственного config-store.
+
 ## ML/AI вне пародий
 
 ### Токсичность
@@ -193,4 +199,4 @@ scripts/smoke_livekit.sh
 
 Приватный web/app и signaling LiveKit публикуются через Tailscale Serve после однократного включения Serve владельцем tailnet. Media-порты разрешены только через `tailscale0`; публичное размещение без отдельного security review запрещено.
 
-Production-миграция feature-настроек завершена: рабочие модули читают только `core.settings_store`, а проверенные старые config-таблицы выведены из runtime-пути в архивные таблицы `*_legacy_backup`.
+Production-миграция основного набора feature-настроек завершена: проверенные старые config-таблицы выведены из runtime-пути в `*_legacy_backup`. Пассивные награды и исключения статистики также мигрируют в `core.settings_store`; оставшиеся модульные конфигурации переносятся поэтапно после отдельного prod-аудита.

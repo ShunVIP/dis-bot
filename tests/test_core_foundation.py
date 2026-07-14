@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -51,6 +51,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(game_profiles, "SOCIAL_DB", self.db_path),
             patch.object(game_store, "SOCIAL_DB", self.db_path),
             patch.object(activity_store, "SOCIAL_DB", self.db_path),
+            patch.object(activity_rewards_store, "SOCIAL_DB", self.db_path),
             patch.object(conversation_store, "SOCIAL_DB", self.db_path),
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
@@ -67,8 +68,10 @@ class IsolatedDatabaseTest(unittest.TestCase):
         ]
         for item in self.patches:
             item.start()
+        activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
 
     def tearDown(self):
+        activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
         for item in reversed(self.patches):
             item.stop()
         self.temp_dir.cleanup()
@@ -96,6 +99,13 @@ class SettingsStoreTests(IsolatedDatabaseTest):
         self.assertEqual(
             settings_store.get_feature_payload(7, "daily_summary"),
             {"theme": "neon", "limit": 5},
+        )
+
+    def test_feature_channel_entries_preserve_reason(self):
+        settings_store.set_feature_channel(7, "message_stats", 55, "exclude", "off-topic")
+        self.assertEqual(
+            settings_store.list_feature_channels(7, "message_stats", "exclude")[0]["reason"],
+            "off-topic",
         )
 
     def test_runtime_state_is_separate_from_user_configuration(self):
@@ -151,6 +161,29 @@ class SettingsStoreTests(IsolatedDatabaseTest):
                 (1,),
             )
 
+    def test_empty_legacy_table_is_finalized_and_recreated_duplicate_is_removed(self):
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                "CREATE TABLE daily_summary_config(guild_id INTEGER PRIMARY KEY, channel_id INTEGER, enabled INTEGER)"
+            )
+        preview = finalize_settings_migration.finalize(apply=False)
+        self.assertTrue(preview["coverage"]["safe_to_finalize"])
+        self.assertEqual(preview["actions"]["social"][0]["action"], "archive")
+        finalize_settings_migration.finalize(apply=True)
+
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                "CREATE TABLE daily_summary_config(guild_id INTEGER PRIMARY KEY, channel_id INTEGER, enabled INTEGER)"
+            )
+        preview = finalize_settings_migration.finalize(apply=False)
+        action = next(item for item in preview["actions"]["social"] if item["table"] == "daily_summary_config")
+        self.assertEqual(action["action"], "drop_empty_recreated")
+        finalize_settings_migration.finalize(apply=True)
+        with db_connection(self.db_path) as conn:
+            names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertNotIn("daily_summary_config", names)
+        self.assertIn("daily_summary_config_legacy_backup", names)
+
     def test_activity_tracker_migrates_with_exact_coverage_and_archives(self):
         with db_connection(self.db_path) as conn:
             conn.execute(
@@ -190,6 +223,86 @@ class SettingsStoreTests(IsolatedDatabaseTest):
             }
         self.assertNotIn("activity_tracker_config", tables)
         self.assertIn("activity_tracker_config_legacy_backup", tables)
+
+
+class ActivityRewardsLayerTests(IsolatedDatabaseTest):
+    def test_legacy_reward_settings_and_exclusions_migrate_and_archive(self):
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE activity_rewards_config (
+                    guild_id INTEGER PRIMARY KEY,
+                    msg_enabled INTEGER NOT NULL DEFAULT 0,
+                    msg_per_n INTEGER NOT NULL DEFAULT 10,
+                    msg_coins INTEGER NOT NULL DEFAULT 2,
+                    msg_rep_per_n INTEGER NOT NULL DEFAULT 50,
+                    msg_rep INTEGER NOT NULL DEFAULT 1,
+                    voice_enabled INTEGER NOT NULL DEFAULT 0,
+                    voice_per_min INTEGER NOT NULL DEFAULT 5,
+                    voice_coins INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE activity_excluded_channels (
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(guild_id, channel_id)
+                );
+                INSERT INTO activity_rewards_config VALUES(77,1,3,4,9,2,1,6,5);
+                INSERT INTO activity_excluded_channels VALUES(77,88,'off-topic');
+                """
+            )
+
+        activity_rewards_store.ensure_activity_rewards_storage()
+        config = activity_rewards_store.get_activity_reward_config(77)
+        exclusions = activity_rewards_store.list_activity_channel_exclusions(77)
+        self.assertEqual(config["msg_per_n"], 3)
+        self.assertEqual(config["voice_coins"], 5)
+        self.assertEqual(exclusions[0]["reason"], "off-topic")
+        with db_connection(self.db_path) as conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            archived = conn.execute(
+                "SELECT table_name, source_rows FROM settings_migration_archive "
+                "WHERE table_name LIKE 'activity_%' ORDER BY table_name"
+            ).fetchall()
+        self.assertNotIn("activity_rewards_config", tables)
+        self.assertNotIn("activity_excluded_channels", tables)
+        self.assertIn("activity_rewards_config_legacy_backup", tables)
+        self.assertIn("activity_excluded_channels_legacy_backup", tables)
+        self.assertEqual(archived, [("activity_excluded_channels", 1), ("activity_rewards_config", 1)])
+
+    def test_reward_service_uses_canonical_settings_and_shared_economy(self):
+        economy_profile.set_economy_profile(42, economy_profile.GENDER_MALE, True)
+        activity_rewards_store.update_activity_reward_config(7, {
+            "msg_enabled": True,
+            "msg_per_n": 2,
+            "msg_coins": 3,
+            "msg_rep_per_n": 2,
+            "msg_rep": 1,
+            "voice_enabled": True,
+            "voice_per_min": 5,
+            "voice_coins": 2,
+        })
+        self.assertEqual(activity_rewards_service.reward_message(42, 7)["coins"], 0)
+        self.assertEqual(activity_rewards_service.reward_message(42, 7), {
+            "count": 2, "coins": 3, "reputation": 1,
+        })
+        self.assertEqual(activity_rewards_service.reward_voice(42, 7, 4 * 60)["coins"], 0)
+        self.assertEqual(activity_rewards_service.reward_voice(42, 7, 60)["coins"], 2)
+        self.assertEqual(economy.get_balance(42), 5)
+        with db_connection(self.db_path) as conn:
+            reputation = conn.execute("SELECT SUM(delta) FROM reputation WHERE user_id=42").fetchone()[0]
+        self.assertEqual(reputation, 1)
+
+    def test_partial_reward_update_preserves_existing_values(self):
+        activity_rewards_store.update_activity_reward_config(5, {"msg_enabled": True, "msg_per_n": 25})
+        updated = activity_rewards_store.update_activity_reward_config(5, {"voice_enabled": True, "msg_per_n": None})
+        self.assertTrue(updated["msg_enabled"])
+        self.assertTrue(updated["voice_enabled"])
+        self.assertEqual(updated["msg_per_n"], 25)
+        settings_store.set_feature_enabled(5, "activity_rewards", False)
+        disabled = activity_rewards_store.get_activity_reward_config(5)
+        self.assertFalse(disabled["msg_enabled"])
+        self.assertFalse(disabled["voice_enabled"])
 
 
 class EconomyTests(IsolatedDatabaseTest):

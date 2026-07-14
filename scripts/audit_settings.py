@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.paths import BIRTHDAYS_DB, SOCIAL_DB
 from core.db import connection
+from core.settings_store import ensure_settings_tables
 
 
 SOCIAL_LEGACY_TABLES = {
@@ -43,7 +44,18 @@ def _rows(conn: sqlite3.Connection, queries: dict[str, str]) -> dict[str, list[l
     }
 
 
+def _table_state(conn: sqlite3.Connection, tables: tuple[str, ...]) -> dict[str, dict[str, bool]]:
+    return {
+        table: {
+            "active": _table_exists(conn, table),
+            "backup": _table_exists(conn, f"{table}_legacy_backup"),
+        }
+        for table in tables
+    }
+
+
 def build_report() -> dict[str, Any]:
+    ensure_settings_tables()
     with connection(SOCIAL_DB) as conn:
         current_settings = [
             {
@@ -69,13 +81,16 @@ def build_report() -> dict[str, Any]:
             )
         ]
         social_legacy = _rows(conn, SOCIAL_LEGACY_TABLES)
+        social_tables = _table_state(conn, tuple(SOCIAL_LEGACY_TABLES))
 
     with connection(BIRTHDAYS_DB) as conn:
         birthdays_legacy = _rows(conn, {"birthday_config": "SELECT guild_id, channel_id FROM birthday_config"})
+        birthday_tables = _table_state(conn, ("birthday_config",))
 
     report = {
         "current": {"settings": current_settings, "channels": current_channels},
         "legacy": {**social_legacy, **birthdays_legacy},
+        "tables": {**social_tables, **birthday_tables},
     }
     report["coverage"] = analyze_coverage(report)
     return report
@@ -210,10 +225,15 @@ def analyze_coverage(report: dict[str, Any]) -> dict[str, Any]:
                 issues.append(f"enabled mismatch activity_tracker guild {guild_id}")
 
     legacy_rows = sum(len(rows) for rows in legacy.values())
+    tables = report.get("tables", {})
+    active_tables = sorted(table for table, state in tables.items() if state.get("active"))
+    backup_tables = sorted(table for table, state in tables.items() if state.get("backup"))
     return {
         "legacy_rows": legacy_rows,
+        "active_tables": active_tables,
+        "backup_tables": backup_tables,
         "issues": issues,
-        "safe_to_finalize": legacy_rows > 0 and not issues,
+        "safe_to_finalize": bool(active_tables) and not issues,
     }
 
 

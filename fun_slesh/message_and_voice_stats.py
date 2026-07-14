@@ -19,7 +19,6 @@ Cog: message_and_voice_stats (fixed)
 ⚠ Требуется intents.message_content=True для слов/эмодзи.
 """
 
-import os
 import re
 import sqlite3
 import asyncio
@@ -30,11 +29,20 @@ from typing import Optional
 import discord
 from discord.ext import commands
 from discord import app_commands
-from core.economy import add_coins, get_balance
-from core.economy_profile import can_receive_currency
+from core.activity_rewards_service import reward_message, reward_voice, update_reward_settings
+from core.activity_rewards_store import (
+    ensure_activity_rewards_storage,
+    exclude_activity_channel,
+    get_activity_reward_config,
+    has_activity_reward_config,
+    include_activity_channel,
+    is_activity_channel_excluded as _is_activity_channel_excluded,
+    list_activity_channel_exclusions,
+)
+from core.paths import SOCIAL_DB
 
 # === Путь к общей БД проекта ===
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+DB_PATH = SOCIAL_DB
 UTC = timezone.utc
 MSK = ZoneInfo("Europe/Moscow")
 
@@ -136,74 +144,20 @@ SCHEMA_SQL = [
         PRIMARY KEY (user_id, guild_id, date)
     )
     """,
-    # Настройки пассивных наград за активность
-    """
-    CREATE TABLE IF NOT EXISTS activity_rewards_config (
-        guild_id          INTEGER PRIMARY KEY,
-        msg_enabled       INTEGER NOT NULL DEFAULT 0,
-        msg_per_n         INTEGER NOT NULL DEFAULT 10,
-        msg_coins         INTEGER NOT NULL DEFAULT 2,
-        msg_rep_per_n     INTEGER NOT NULL DEFAULT 50,
-        msg_rep           INTEGER NOT NULL DEFAULT 1,
-        voice_enabled     INTEGER NOT NULL DEFAULT 0,
-        voice_per_min     INTEGER NOT NULL DEFAULT 5,
-        voice_coins       INTEGER NOT NULL DEFAULT 1
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS activity_excluded_channels (
-        guild_id   INTEGER NOT NULL,
-        channel_id INTEGER NOT NULL,
-        reason     TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY (guild_id, channel_id)
-    )
-    """,
-    # Счётчик сообщений для пассивных наград (сбрасывается при начислении)
-    """
-    CREATE TABLE IF NOT EXISTS activity_msg_counter (
-        user_id   INTEGER NOT NULL,
-        guild_id  INTEGER NOT NULL,
-        count     INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (user_id, guild_id)
-    )
-    """,
-    # Накопленные минуты голоса для наград
-    """
-    CREATE TABLE IF NOT EXISTS activity_voice_counter (
-        user_id   INTEGER NOT NULL,
-        guild_id  INTEGER NOT NULL,
-        minutes   INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (user_id, guild_id)
-    )
-    """,
 ]
 
 
 def _ensure_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
         for sql in SCHEMA_SQL:
             cur.execute(sql)
         conn.commit()
-
-
-def _is_activity_channel_excluded(guild_id: int, channel_id: int) -> bool:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT 1 FROM activity_excluded_channels WHERE guild_id=? AND channel_id=?",
-            (guild_id, channel_id),
-        ).fetchone()
-    return bool(row)
+    ensure_activity_rewards_storage()
 
 
 def _excluded_channel_ids(guild_id: int) -> list[int]:
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT channel_id FROM activity_excluded_channels WHERE guild_id=?",
-            (guild_id,),
-        ).fetchall()
-    return [int(row[0]) for row in rows]
+    return [int(row["channel_id"]) for row in list_activity_channel_exclusions(guild_id)]
 
 # -------------------------
 # Text utils
@@ -579,43 +533,26 @@ class MessageAndVoiceStats(commands.Cog):
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def стат_исключить(self, interaction: discord.Interaction, канал: discord.TextChannel, причина: str = ""):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO activity_excluded_channels(guild_id, channel_id, reason)
-                VALUES(?,?,?)
-                ON CONFLICT(guild_id, channel_id) DO UPDATE SET reason=excluded.reason
-                """,
-                (interaction.guild.id, канал.id, причина.strip()[:120]),
-            )
-            conn.commit()
+        exclude_activity_channel(interaction.guild.id, канал.id, причина)
         await interaction.response.send_message(f"✅ {канал.mention} исключен из статистики и пассивных наград.", ephemeral=True)
 
     @app_commands.command(name="стат_вернуть", description="(Админ) Вернуть канал в статистику и пассивные награды")
     @app_commands.describe(канал="Канал, который снова нужно учитывать")
     @app_commands.checks.has_permissions(administrator=True)
     async def стат_вернуть(self, interaction: discord.Interaction, канал: discord.TextChannel):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "DELETE FROM activity_excluded_channels WHERE guild_id=? AND channel_id=?",
-                (interaction.guild.id, канал.id),
-            )
-            conn.commit()
+        include_activity_channel(interaction.guild.id, канал.id)
         await interaction.response.send_message(f"✅ {канал.mention} снова учитывается.", ephemeral=True)
 
     @app_commands.command(name="стат_исключения", description="(Админ) Показать исключенные из статистики каналы")
     @app_commands.checks.has_permissions(administrator=True)
     async def стат_исключения(self, interaction: discord.Interaction):
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                "SELECT channel_id, reason FROM activity_excluded_channels WHERE guild_id=? ORDER BY channel_id",
-                (interaction.guild.id,),
-            ).fetchall()
+        rows = list_activity_channel_exclusions(interaction.guild.id)
         if not rows:
             await interaction.response.send_message("✅ Исключенных каналов нет.", ephemeral=True)
             return
         lines = []
-        for channel_id, reason in rows:
+        for row in rows:
+            channel_id, reason = row["channel_id"], row["reason"]
             note = f" — {reason}" if reason else ""
             lines.append(f"<#{channel_id}>{note}")
         await interaction.response.send_message("Исключенные каналы:\n" + "\n".join(lines), ephemeral=True)
@@ -636,39 +573,7 @@ class MessageAndVoiceStats(commands.Cog):
             _accumulate_message_stats(cur, message, guild_id, channel_id)
             conn.commit()
 
-        with sqlite3.connect(DB_PATH) as conn:
-            cfg = conn.execute(
-                "SELECT msg_enabled, msg_per_n, msg_coins, msg_rep_per_n, msg_rep"
-                " FROM activity_rewards_config WHERE guild_id=?", (guild_id,)
-            ).fetchone()
-            if not cfg or not cfg[0]:
-                return
-            _, per_n, coins, rep_per_n, rep = cfg
-
-            # Обновляем счётчик
-            conn.execute(
-                "INSERT INTO activity_msg_counter(user_id, guild_id, count) VALUES(?,?,1)"
-                " ON CONFLICT(user_id, guild_id) DO UPDATE SET count = count + 1",
-                (user_id, guild_id)
-            )
-            row = conn.execute(
-                "SELECT count FROM activity_msg_counter WHERE user_id=? AND guild_id=?",
-                (user_id, guild_id)
-            ).fetchone()
-            count = row[0] if row else 0
-
-            # Сиськи за каждые per_n сообщений
-            if count % per_n == 0:
-                add_coins(user_id, coins, "msg_activity",
-                          {"guild": guild_id, "count": count})
-
-            # Размер за каждые rep_per_n сообщений
-            if rep_per_n > 0 and count % rep_per_n == 0 and can_receive_currency(user_id):
-                today = datetime.now(UTC).date().isoformat()
-                conn.execute(
-                    "INSERT INTO reputation(user_id, given_by, delta, date) VALUES(?,?,?,?)",
-                    (user_id, 0, rep, today)
-                )
+        reward_message(user_id, guild_id)
 
     # ========= ВОЙС: онлайн‑трекер =========
     @commands.Cog.listener()
@@ -760,37 +665,7 @@ class MessageAndVoiceStats(commands.Cog):
 
     async def _award_voice(self, user_id: int, guild_id: int, seconds: int):
         """Начисляет Сиськи за голос."""
-        with sqlite3.connect(DB_PATH) as conn:
-            cfg = conn.execute(
-                "SELECT voice_enabled, voice_per_min, voice_coins"
-                " FROM activity_rewards_config WHERE guild_id=?", (guild_id,)
-            ).fetchone()
-            if not cfg or not cfg[0]:
-                return
-            _, per_min, coins = cfg
-
-            minutes = seconds // 60
-            if minutes < 1:
-                return
-
-            conn.execute(
-                "INSERT INTO activity_voice_counter(user_id, guild_id, minutes) VALUES(?,?,?)"
-                " ON CONFLICT(user_id, guild_id) DO UPDATE SET minutes = minutes + ?",
-                (user_id, guild_id, minutes, minutes)
-            )
-            row = conn.execute(
-                "SELECT minutes FROM activity_voice_counter WHERE user_id=? AND guild_id=?",
-                (user_id, guild_id)
-            ).fetchone()
-            total_min = row[0] if row else 0
-
-            # Начисляем за каждые per_min минут
-            earned = (total_min // per_min) * coins
-            already = ((total_min - minutes) // per_min) * coins
-            delta = earned - already
-            if delta > 0:
-                add_coins(user_id, delta, "voice_activity",
-                          {"guild": guild_id, "minutes": total_min})
+        reward_voice(user_id, guild_id, seconds)
 
     # ── /награды_настроить ────────────────────────────────────────────────────
     @app_commands.command(name="награды_настроить",
@@ -818,40 +693,20 @@ class MessageAndVoiceStats(commands.Cog):
         голос_каждые_мин: app_commands.Range[int, 1, 120] = None,
     ):
         guild_id = interaction.guild.id
-        with sqlite3.connect(DB_PATH) as conn:
-            # Гарантируем строку
-            conn.execute(
-                "INSERT OR IGNORE INTO activity_rewards_config(guild_id) VALUES(?)",
-                (guild_id,)
-            )
-            updates = []
-            vals    = []
-            mapping = {
-                "msg_enabled":   монеты_за_сообщения,
-                "msg_coins":     монет_за_n_сообщений,
-                "msg_per_n":     каждые_n_сообщений,
-                "msg_rep":       репа_за_сообщения,
-                "msg_rep_per_n": репа_каждые_n,
-                "voice_enabled": монеты_за_голос,
-                "voice_coins":   монет_за_минут,
-                "voice_per_min": голос_каждые_мин,
-            }
-            for col, val in mapping.items():
-                if val is not None:
-                    updates.append(f"{col}=?")
-                    vals.append(int(val) if isinstance(val, bool) else val)
-            if updates:
-                conn.execute(
-                    f"UPDATE activity_rewards_config SET {', '.join(updates)} WHERE guild_id=?",
-                    vals + [guild_id]
-                )
-            cfg = conn.execute(
-                "SELECT msg_enabled,msg_per_n,msg_coins,msg_rep_per_n,msg_rep,"
-                "voice_enabled,voice_per_min,voice_coins"
-                " FROM activity_rewards_config WHERE guild_id=?", (guild_id,)
-            ).fetchone()
-
-        me, mp, mc, mrp, mr, ve, vp, vc = cfg
+        cfg = update_reward_settings(guild_id, {
+            "msg_enabled": монеты_за_сообщения,
+            "msg_coins": монет_за_n_сообщений,
+            "msg_per_n": каждые_n_сообщений,
+            "msg_rep": репа_за_сообщения,
+            "msg_rep_per_n": репа_каждые_n,
+            "voice_enabled": монеты_за_голос,
+            "voice_coins": монет_за_минут,
+            "voice_per_min": голос_каждые_мин,
+        })
+        me, mp, mc, mrp, mr, ve, vp, vc = (
+            cfg["msg_enabled"], cfg["msg_per_n"], cfg["msg_coins"], cfg["msg_rep_per_n"],
+            cfg["msg_rep"], cfg["voice_enabled"], cfg["voice_per_min"], cfg["voice_coins"],
+        )
         emb = discord.Embed(title="⚙️ Пассивные награды", color=discord.Color.teal())
         msg_st   = "✅ Включены" if me else "⛔ Выключены"
         rep_line = f"+{mr} Размер каждые {mrp} сообщений" if mrp else "Размер: выключена"
@@ -872,17 +727,17 @@ class MessageAndVoiceStats(commands.Cog):
                           description="Текущие настройки пассивных наград")
     async def награды_статус(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id
-        with sqlite3.connect(DB_PATH) as conn:
-            cfg = conn.execute(
-                "SELECT msg_enabled,msg_per_n,msg_coins,msg_rep_per_n,msg_rep,"
-                "voice_enabled,voice_per_min,voice_coins"
-                " FROM activity_rewards_config WHERE guild_id=?", (guild_id,)
-            ).fetchone()
-        if not cfg:
+        if not has_activity_reward_config(guild_id):
             await interaction.response.send_message(
                 "⚙️ Пассивные награды не настроены. Используй `/награды_настроить`.",
                 ephemeral=True)
             return
+        cfg_data = get_activity_reward_config(guild_id)
+        cfg = (
+            cfg_data["msg_enabled"], cfg_data["msg_per_n"], cfg_data["msg_coins"],
+            cfg_data["msg_rep_per_n"], cfg_data["msg_rep"], cfg_data["voice_enabled"],
+            cfg_data["voice_per_min"], cfg_data["voice_coins"],
+        )
         me, mp, mc, mrp, mr, ve, vp, vc = cfg
         emb = discord.Embed(title="⚙️ Пассивные награды", color=discord.Color.teal())
         msg_v = ("✅" if me else "⛔") + f"\n+{mc} Сисек / {mp} сообщений"

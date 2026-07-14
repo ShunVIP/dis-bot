@@ -100,61 +100,13 @@
 
 > Статус на 2026-07-13: миграция завершена. Описанные ниже fallback и dual-write были переходным состоянием. Production coverage-аудит подтвердил 4/4 legacy-строки без расхождений; исходные config-таблицы переименованы в `*_legacy_backup`, а runtime использует только `core.settings_store`.
 
-Первый подключенный модуль: `fun_slesh/daily_summary.py`.
+Текущее состояние после production-аудита:
 
-- Автопостинг итогов дня/недели/месяца теперь читает `daily_summary` policy из `core.settings_store`.
-- Старый `daily_summary_config` оставлен как fallback, чтобы не ломать существующие серверные настройки.
-- Discord-admin команды `/итоги канал` и `/итоги вкл` теперь пишут и в новый `settings_store`, и в старую таблицу совместимости.
-- `core/admin_panel.py` пишет feature settings в реальный guild id первого сервера бота, а не в абстрактный `0`.
-
-Второй подключенный модуль: `fun_slesh/toxicity.py`.
-
-- Детектор токсичности теперь читает `toxicity` policy из `core.settings_store`.
-- Поддержаны `enabled`, JSON payload `threshold`, `allow` каналы и `exclude` каналы.
-- Старые `toxicity_config` и `toxicity_excluded_channels` оставлены как fallback.
-- Discord-admin команды токсичности пишут и в новый `settings_store`, и в старые таблицы совместимости.
-
-Третий подключенный модуль: `fun_slesh/social_chat.py`.
-
-- Болтовня бота теперь читает `social_chat` policy из `core.settings_store`.
-- Поддержаны `enabled`, JSON payload `chance_percent` и `mention_only`, `allow` каналы и `exclude` каналы.
-- Старые `social_chat_config` и `social_chat_excluded_channels` оставлены как fallback.
-- Discord-admin команды `/болтовня ...` пишут и в новый `settings_store`, и в старые таблицы совместимости.
-
-Четвертый подключенный модуль: `fun_slesh/voice_roles.py`.
-
-- Авто-роли голосовых каналов теперь читают `voice_roles` policy из `core.settings_store`.
-- Поддержаны `enabled` и `exclude` каналы.
-- Старые `voice_roles_config` и `voice_roles_excluded_channels` оставлены как fallback.
-- Discord-admin команды `/войс_роли ...` пишут и в новый `settings_store`, и в старые таблицы совместимости.
-
-Пятый подключенный блок: дни рождения.
-
-- `fun_slesh/birthday.py` и `scheduled/hourly_task.py` теперь читают `birthday.output` из `core.settings_store`.
-- Старый `birthday_config` оставлен как fallback.
-- Команда `/др_канал` пишет и в новый `settings_store`, и в старую таблицу совместимости.
-
-Шестой подключенный блок: `fun_slesh/wwm_guild.py`.
-
-- WWM welcome channel теперь читает `wwm_guild.output`.
-- Reception channel, auto nickname и nickname template читаются из JSON payload.
-- Старый `wwm_config` оставлен как fallback.
-- Команды `/wwm канал`, `/wwm приемная`, `/wwm ники` синхронизируют новый `settings_store`.
-
-Седьмой подключенный блок: `fun_slesh/steam.py`.
-
-- Steam release/discount notifications теперь читают `steam.output`.
-- Минимальная скидка читается из JSON payload `discount_min_pct`.
-- Старый `steam_config` оставлен как fallback.
-- Команда `/релизы канал` пишет и в новый `settings_store`, и в старую таблицу совместимости.
-
-Восьмой подключенный блок: налог экономики в `fun_slesh/daily.py`.
-
-- Scheduler налога читает JSON payload `tax_enabled`, `tax_rate_pct`, `tax_interval_h` из `economy`.
-- Старый `tax_config` оставлен как fallback и хранит `last_run`.
-- Команда `/налог_настроить` пишет и в новый `settings_store`, и в старую таблицу совместимости.
-
-Следующие хорошие кандидаты на перенос: role shop settings, birthday text/style, Steam auto prompts, WWM KB search/indexing, reminders.
+- `daily_summary`, `toxicity`, `social_chat`, `voice_roles`, `birthday`, `wwm_guild`, `steam`, `economy` и `activity_tracker` читают и изменяют только `core.settings_store`;
+- их старые таблицы находятся только в `*_legacy_backup`, активных двойных путей нет;
+- `activity_rewards` и исключения `message_stats` перенесены из `message_and_voice_stats.py` в `core/activity_rewards_store.py`;
+- расчёт пассивных наград отделён в `core/activity_rewards_service.py`, Discord cog отвечает только за события и UI;
+- следующие кандидаты после отдельного prod-аудита: `heroes_troll_config` и `rep_roles_config`.
 
 ## Следующий порядок работ
 
