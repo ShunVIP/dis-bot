@@ -109,6 +109,7 @@
 - `heroes_troll_config` и `rep_roles_config` также выведены из runtime после prod-аудита; история Heroes, пороги и активные роли сохранены в отдельных data-store таблицах.
 - toxicity-журналы, weekly-счётчики, shadow-выборка и ручная разметка принадлежат `core/toxicity_store.py`; Discord cog и admin panel больше не выполняют SQL к этим таблицам.
 - `reputation` и `mood` имеют одного записывающего владельца — `core/reputation_store.py`; activity rewards и Размер-роли больше не создают собственную копию схемы.
+- разговорная LLM получает gamer archetypes из derived `gamer_profiles`; память и QLoRA dataset требуют пользовательского opt-in, а dataset дополнительно требует self-👍 на конкретный ответ.
 
 ## Следующий порядок работ
 

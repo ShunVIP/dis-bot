@@ -114,7 +114,13 @@
                 </select>
               </label>
               <label class="check-line"><input id="unifiedAgeConfirmed" type="checkbox"> Подтверждаю 18+</label>
+              <label class="wide">Игровые интересы для ViPik
+                <input id="unifiedGamerTags" maxlength="160" placeholder="MMO, Souls-like, шутеры, MOBA">
+              </label>
+              <label class="check-line"><input id="unifiedAiMemory" type="checkbox"> Разрешить персональную память диалогов</label>
+              <label class="check-line"><input id="unifiedAiTraining" type="checkbox"> Разрешить локальное обучение на моих ответах с 👍</label>
               <button class="button primary wide" type="submit">Сохранить профиль</button>
+              <button id="unifiedAiForget" class="button ghost wide" type="button">Удалить диалоги и AI-профиль</button>
             </form>
             <p id="unifiedProfileMessage" class="status-line"></p>
           </section>
@@ -140,6 +146,11 @@
               <span class="connection-kicker">Where Winds Meet</span>
               <strong id="unifiedWwm">Не привязан</strong>
               <p id="unifiedWwmMeta" class="muted">Игровой ник не указан</p>
+            </article>
+            <article class="panel connection-card">
+              <span class="connection-kicker">ViPik AI</span>
+              <strong id="unifiedAiProfile">Без персонализации</strong>
+              <p id="unifiedAiMeta" class="muted">Память и обучение управляются тобой</p>
             </article>
           </section>
         </div>

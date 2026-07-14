@@ -4,6 +4,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 
@@ -20,6 +21,8 @@ TABLES = (
     "activity_game_habits_retired_backup",
     "conversation_turns",
     "conversation_feedback",
+    "conversation_preferences",
+    "gamer_profiles",
     "toxicity_log",
     "toxicity_ml_shadow",
     "toxicity_ml_feedback",
@@ -27,7 +30,7 @@ TABLES = (
 
 
 def build_report(path: str = SOCIAL_DB) -> dict:
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         names = {
             str(row[0])
             for row in conn.execute(
@@ -60,14 +63,29 @@ def build_report(path: str = SOCIAL_DB) -> dict:
             if "conversation_feedback" in names
             else {}
         )
+        consent = {"memory_users": 0, "training_users": 0, "approved_examples": 0}
+        if "conversation_preferences" in names:
+            consent["memory_users"], consent["training_users"] = map(int, conn.execute(
+                "SELECT COALESCE(SUM(memory_opt_in),0),COALESCE(SUM(training_opt_in),0) FROM conversation_preferences"
+            ).fetchone())
+        if {"conversation_turns", "conversation_feedback", "conversation_preferences"}.issubset(names):
+            consent["approved_examples"] = int(conn.execute(
+                """
+                SELECT COUNT(1) FROM conversation_turns t
+                JOIN conversation_preferences p ON p.user_id=t.user_id AND p.training_opt_in=1
+                JOIN conversation_feedback f ON f.bot_message_id=t.bot_message_id
+                    AND f.reviewer_user_id=t.user_id AND f.score=1
+                """
+            ).fetchone()[0])
     return {
         "database": str(Path(path).resolve()),
         "rows": rows,
         "toxicity_feedback_levels": toxicity_levels,
         "conversation_feedback_scores": conversation_scores,
+        "conversation_consent": consent,
         "toxicity_enforcement_ready": rows["toxicity_ml_feedback"] >= 500
         and all(int(toxicity_levels.get(str(level), 0)) >= 50 for level in range(4)),
-        "conversation_finetune_ready": rows["conversation_feedback"] >= 1000,
+        "conversation_finetune_ready": consent["approved_examples"] >= 50,
     }
 
 

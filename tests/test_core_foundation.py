@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -33,6 +33,7 @@ from web_app import server as web_server
 from web_app.server import security_middleware
 from scripts.build_ml_manifest import build_manifest
 from scripts import audit_settings, finalize_settings_migration
+from scripts.report_learning_readiness import build_report as build_learning_readiness_report
 from scripts.train_toxicity_model import train_model
 from fun_slesh import social_chat
 
@@ -58,6 +59,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(reputation_store, "SOCIAL_DB", self.db_path),
             patch.object(toxicity_store, "SOCIAL_DB", self.db_path),
             patch.object(conversation_store, "SOCIAL_DB", self.db_path),
+            patch.object(gamer_profile_store, "SOCIAL_DB", self.db_path),
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
             patch.object(platform_store, "SOCIAL_DB", self.db_path),
@@ -530,6 +532,7 @@ class UnifiedProfileTests(IsolatedDatabaseTest):
                 "community": {"display_name": "Fox", "status_text": "В игре", "accent_color": "#123456"},
                 "birthday": "12.07",
                 "economy": {"gender": "male", "age_confirmed": True},
+                "ai": {"memory_opt_in": True, "training_opt_in": True, "gamer_tags": "MMO, souls-like"},
             },
         )
         self.assertEqual(profile["community"]["display_name"], "Fox")
@@ -537,9 +540,16 @@ class UnifiedProfileTests(IsolatedDatabaseTest):
         self.assertTrue(profile["economy"]["profile"]["age_confirmed"])
         self.assertEqual(profile["games"]["steam"]["cached_games"], 1)
         self.assertEqual(profile["games"]["wwm"]["game_nick"], "WindFox")
+        self.assertTrue(profile["ai"]["conversation"]["memory_opt_in"])
+        self.assertEqual(profile["ai"]["conversation"]["gamer_tags"], ["mmo", "souls"])
 
 
 class WebSecurityTests(IsolatedDatabaseTest):
+    def test_profile_exposes_explicit_ai_forget_endpoint(self):
+        app = web_server.create_app()
+        routes = {(route.method, route.resource.canonical) for route in app.router.routes()}
+        self.assertIn(("POST", "/api/profile/forget-ai"), routes)
+
     def test_oauth_tokens_are_scrubbed_and_sessions_are_hashed(self):
         web_app_store.ensure_web_tables()
         web_app_store.upsert_web_user(5, "user", access_token="secret-a", refresh_token="secret-r")
@@ -1295,6 +1305,97 @@ class ConversationLayerTests(IsolatedDatabaseTest):
                 ).fetchone(),
                 (1,),
             )
+
+    def test_gamer_archetypes_merge_activity_and_steam_signals(self):
+        with db_connection(self.db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE activity_sessions(
+                    id INTEGER PRIMARY KEY,guild_id INTEGER,user_id INTEGER,activity_name TEXT,
+                    activity_type TEXT,started_at TEXT,ended_at TEXT,seconds INTEGER
+                );
+                CREATE TABLE steam_owned_games_cache(
+                    user_id INTEGER,appid INTEGER,name TEXT,released INTEGER,discount INTEGER,
+                    price_rub INTEGER,playtime_forever INTEGER,playtime_2weeks INTEGER,last_played INTEGER,
+                    checked_at TEXT
+                );
+                INSERT INTO activity_sessions VALUES
+                    (1,7,101,'Elden Ring','game','a','b',7200),
+                    (2,7,101,'Counter-Strike 2','game','a','b',3600);
+                INSERT INTO steam_owned_games_cache VALUES
+                    (101,1,'Final Fantasy XIV',1,0,0,600,0,0,'now');
+                """
+            )
+        profile = gamer_profile_store.refresh_gamer_profile(7, 101)
+        tags = [item["tag"] for item in profile["archetypes"]]
+        self.assertEqual(set(tags), {"mmo", "souls", "shooter"})
+        context = gamer_profile_service.build_gamer_context(profile, ["strategy"])
+        self.assertIn("Стратегии", context)
+        self.assertIn("Souls-like", context)
+        _, private_context = conversation_service.personalization_context(7, 101)
+        self.assertEqual(private_context, "")
+        conversation_store.set_conversation_preferences(101, memory_opt_in=True)
+        _, allowed_context = conversation_service.personalization_context(7, 101)
+        self.assertIn("Souls-like", allowed_context)
+        self.assertEqual(gamer_profile_store.delete_gamer_profile(101, 7), 1)
+
+    def test_training_dataset_requires_opt_in_and_users_own_positive_feedback(self):
+        conversation_store.set_conversation_preferences(
+            101, memory_opt_in=True, training_opt_in=True, gamer_tags=["mmo"]
+        )
+        conversation_store.record_turn(
+            bot_message_id=901, source_message_id=801, guild_id=7, channel_id=70, user_id=101,
+            user_text="Випик <@123456789012345678>, посоветуй MMO https://example.com",
+            bot_text="Попробуй Final Fantasy XIV.", provider="ollama", model="qwen3:8b",
+        )
+        self.assertTrue(conversation_store.record_feedback(901, 999, 1))
+        self.assertEqual(conversation_store.list_training_examples(self.db_path), [])
+        self.assertTrue(conversation_store.record_feedback(901, 101, 1))
+        examples = conversation_store.list_training_examples(self.db_path)
+        self.assertEqual(len(examples), 1)
+        self.assertEqual(examples[0]["gamer_profile"], {})
+        records = conversation_training.build_sft_records(examples, "system")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["cohorts"], ["mmo"])
+        self.assertEqual(conversation_training.dataset_metadata(records, source_database=self.db_path)["cohorts"], {"mmo": 1})
+        user_text = records[0]["messages"][-2]["content"]
+        self.assertIn("@user", user_text)
+        self.assertIn("URL", user_text)
+        self.assertNotIn("123456789012345678", user_text)
+
+    def test_learning_readiness_counts_only_consented_self_approved_answers(self):
+        conversation_store.set_conversation_preferences(101, training_opt_in=True)
+        conversation_store.record_turn(
+            bot_message_id=903, source_message_id=803, guild_id=7, channel_id=70, user_id=101,
+            user_text="посоветуй игру", bot_text="Попробуй MMO.", provider="ollama",
+        )
+        conversation_store.record_turn(
+            bot_message_id=904, source_message_id=804, guild_id=7, channel_id=70, user_id=202,
+            user_text="что по шутерам", bot_text="Можно начать с CS2.", provider="ollama",
+        )
+        self.assertTrue(conversation_store.record_feedback(903, 999, 1))
+        self.assertTrue(conversation_store.record_feedback(903, 101, 1))
+        self.assertTrue(conversation_store.record_feedback(904, 202, 1))
+
+        report = build_learning_readiness_report(self.db_path)
+        self.assertEqual(
+            report["conversation_consent"],
+            {"memory_users": 0, "training_users": 1, "approved_examples": 1},
+        )
+        self.assertFalse(report["conversation_finetune_ready"])
+
+    def test_user_can_delete_conversation_memory_and_preferences(self):
+        conversation_store.set_conversation_preferences(101, memory_opt_in=True, training_opt_in=True)
+        conversation_store.record_turn(
+            bot_message_id=902, source_message_id=802, guild_id=7, channel_id=70, user_id=101,
+            user_text="запомни", bot_text="запомнил", provider="templates",
+        )
+        gamer_profile_store.refresh_gamer_profile(7, 101)
+        removed = profile_service.forget_ai_personalization(101)
+        self.assertEqual(removed["turns"], 1)
+        self.assertEqual(removed["gamer_profiles"], 1)
+        self.assertEqual(conversation_store.get_conversation_preferences(101)["memory_opt_in"], False)
+        self.assertEqual(conversation_store.recent_context(7, 70, 101), [])
 
 
 class DataCatalogTests(IsolatedDatabaseTest):

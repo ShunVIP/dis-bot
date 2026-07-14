@@ -1,0 +1,8 @@
+# Optional, main-PC-only QLoRA dependencies. Install a CUDA-compatible PyTorch
+# build first, then install this file. Never install this set on the VPS.
+transformers
+accelerate
+bitsandbytes
+datasets
+peft
+trl

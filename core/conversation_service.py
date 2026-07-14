@@ -7,7 +7,9 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from core.conversation_store import recent_context
+from core.conversation_store import get_conversation_preferences, recent_context
+from core.gamer_profile_service import build_gamer_context
+from core.gamer_profile_store import refresh_gamer_profile
 
 
 SYSTEM_PROMPT = """Ты ViPik, общительный участник русскоязычного Discord-сервера.
@@ -44,6 +46,19 @@ def local_model_available() -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def personalization_context(guild_id: int, user_id: int) -> tuple[dict[str, object], str]:
+    preferences = get_conversation_preferences(user_id)
+    tags = preferences.get("gamer_tags") or []
+    profile: dict[str, object] = {}
+    if preferences.get("memory_opt_in"):
+        try:
+            profile = refresh_gamer_profile(guild_id, user_id)
+        except Exception:
+            profile = {}
+    context = build_gamer_context(profile, tags)
+    return preferences, context
+
+
 async def generate_reply(
     *,
     guild_id: int,
@@ -56,8 +71,18 @@ async def generate_reply(
     if not local_model_available():
         return None
 
+    preferences, gamer_context = personalization_context(guild_id, user_id)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(recent_context(guild_id, channel_id, user_id, limit=5))
+    if gamer_context:
+        messages.append({
+            "role": "system",
+            "content": (
+                "Добровольно разрешённый контекст интересов собеседника: " + gamer_context
+                + ". Используй это только когда уместно; не притворяйся, что знаешь человека полностью."
+            ),
+        })
+    if preferences.get("memory_opt_in"):
+        messages.extend(recent_context(guild_id, channel_id, user_id, limit=5))
     messages.append(
         {
             "role": "user",

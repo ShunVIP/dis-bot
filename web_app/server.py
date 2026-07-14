@@ -56,7 +56,7 @@ from core.community_store import (
     upsert_profile,
     upsert_role,
 )
-from core.profile_service import get_unified_profile, update_unified_profile
+from core.profile_service import forget_ai_personalization, get_unified_profile, update_unified_profile
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
 from core.ml_artifacts import load_artifact_manifest
 from core.ml_insights import build_ml_insights
@@ -506,6 +506,12 @@ async def api_profile_update(request: web.Request):
     except ValueError as exc:
         return _json({"error": str(exc)}, 400)
     return _json({"ok": True, "profile": profile})
+
+
+async def api_profile_forget_ai(request: web.Request):
+    user = _require_user(request)
+    removed = forget_ai_personalization(user["id"])
+    return _json({"ok": True, "removed": removed, "profile": get_unified_profile(user["id"])})
 
 
 async def api_community_me_update(request: web.Request):
@@ -1114,6 +1120,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/community/me", api_community_me)
     app.router.add_get("/api/profile", api_profile)
     app.router.add_patch("/api/profile", api_profile_update)
+    app.router.add_post("/api/profile/forget-ai", api_profile_forget_ai)
     app.router.add_patch("/api/community/me", api_community_me_update)
     app.router.add_get("/api/community/members", api_community_members)
     app.router.add_post("/api/community/roles", api_community_role_upsert)

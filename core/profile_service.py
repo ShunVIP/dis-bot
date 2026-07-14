@@ -5,6 +5,11 @@ from typing import Any
 
 from core.birthday_store import get_birthday, set_birthday, validate_birthday
 from core.community_store import get_profile, get_user_roles, upsert_profile
+from core.conversation_store import (
+    delete_user_conversation_data,
+    get_conversation_preferences,
+    set_conversation_preferences,
+)
 from core.db import connection as db_connection
 from core.economy import get_balance
 from core.economy_profile import get_economy_profile, set_economy_profile
@@ -15,6 +20,8 @@ from core.game_profiles import (
     get_player_model_profile,
 )
 from core.paths import SOCIAL_DB
+from core.gamer_profile_service import normalize_requested_tags
+from core.gamer_profile_store import delete_gamer_profile, refresh_gamer_profile
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -71,6 +78,12 @@ def _wwm_profile(user_id: int) -> dict[str, Any] | None:
 
 def get_unified_profile(user_id: int) -> dict[str, Any]:
     riot = get_game_account(user_id, GAME_LOL)
+    preferences = get_conversation_preferences(user_id)
+    gamer_profile = (
+        refresh_gamer_profile(0, user_id)
+        if preferences.get("memory_opt_in")
+        else {"archetypes": [], "top_games": []}
+    )
     return {
         "user_id": int(user_id),
         "community": get_profile(user_id),
@@ -88,6 +101,10 @@ def get_unified_profile(user_id: int) -> dict[str, Any]:
                 "snapshot": get_latest_lol_snapshot(user_id) if riot else None,
                 "model": get_player_model_profile(user_id, GAME_LOL) if riot else None,
             },
+        },
+        "ai": {
+            "conversation": preferences,
+            "gamer_profile": gamer_profile,
         },
     }
 
@@ -121,4 +138,20 @@ def update_unified_profile(user_id: int, data: dict[str, Any]) -> dict[str, Any]
             str(economy_data["gender"]),
             bool(economy_data.get("age_confirmed")),
         )
+
+    ai_data = data.get("ai")
+    if isinstance(ai_data, dict):
+        tags = normalize_requested_tags(ai_data.get("gamer_tags") or []) if "gamer_tags" in ai_data else None
+        set_conversation_preferences(
+            user_id,
+            memory_opt_in=bool(ai_data["memory_opt_in"]) if "memory_opt_in" in ai_data else None,
+            training_opt_in=bool(ai_data["training_opt_in"]) if "training_opt_in" in ai_data else None,
+            gamer_tags=tags,
+        )
     return get_unified_profile(user_id)
+
+
+def forget_ai_personalization(user_id: int) -> dict[str, int]:
+    removed = delete_user_conversation_data(user_id)
+    removed["gamer_profiles"] = delete_gamer_profile(user_id)
+    return removed

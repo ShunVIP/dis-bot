@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import random
 import re
-import sqlite3
 import asyncio
 import io
 from datetime import datetime, timezone, timedelta
@@ -25,8 +24,15 @@ from discord import app_commands
 from discord.ext import commands
 
 from core.conversation_service import ConversationReply, generate_reply
-from core.conversation_store import record_feedback, record_turn
-from core.paths import SOCIAL_DB
+from core.conversation_store import (
+    get_conversation_preferences,
+    record_feedback,
+    record_turn,
+    set_conversation_preferences,
+)
+from core.gamer_profile_service import ARCHETYPES, build_gamer_context, normalize_requested_tags
+from core.gamer_profile_store import refresh_gamer_profile
+from core.profile_service import forget_ai_personalization
 from core.settings_store import (
     clear_feature_channel,
     clear_feature_channels,
@@ -45,7 +51,6 @@ except Exception:
     ImageFont = None
     ImageOps = None
 
-DB_PATH = SOCIAL_DB
 FEATURE_SOCIAL_CHAT = "social_chat"
 UTC = timezone.utc
 MSK = ZoneInfo("Europe/Moscow")
@@ -574,6 +579,71 @@ class SocialChat(commands.Cog):
         embed.add_field(name="Каналы", value=channels, inline=False)
         embed.add_field(name="Исключения", value=excluded, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @chat_group.command(name="персонализация", description="Разрешить личную память и примеры для локального обучения")
+    async def personalization_preferences(
+        self,
+        interaction: discord.Interaction,
+        память: bool,
+        обучение: bool = False,
+    ):
+        preferences = set_conversation_preferences(
+            interaction.user.id,
+            memory_opt_in=память,
+            training_opt_in=обучение,
+        )
+        await interaction.response.send_message(
+            "✅ Персонализация обновлена. "
+            f"Память: **{'включена' if preferences['memory_opt_in'] else 'выключена'}**. "
+            f"Локальное обучение: **{'разрешено' if preferences['training_opt_in'] else 'запрещено'}**.\n"
+            "В обучение попадут только твои диалоги с ботом, которым ты сам поставил 👍. Данные не уходят во внешние API.",
+            ephemeral=True,
+        )
+
+    @chat_group.command(name="жанры", description="Указать игровые интересы для персонализации ответов")
+    async def gamer_tags(self, interaction: discord.Interaction, список: str):
+        tags = normalize_requested_tags(список)
+        if not tags:
+            allowed = ", ".join(label for label, _ in ARCHETYPES.values())
+            await interaction.response.send_message(
+                f"❌ Не распознал жанры. Доступны: {allowed}.", ephemeral=True
+            )
+            return
+        preferences = set_conversation_preferences(interaction.user.id, gamer_tags=tags)
+        labels = ", ".join(ARCHETYPES[tag][0] for tag in preferences["gamer_tags"])
+        await interaction.response.send_message(
+            f"✅ Игровые интересы сохранены: **{labels}**.", ephemeral=True
+        )
+
+    @chat_group.command(name="мой_игровой_профиль", description="Показать контекст, который бот использует для общения")
+    async def my_gamer_profile(self, interaction: discord.Interaction):
+        preferences = get_conversation_preferences(interaction.user.id)
+        guild_id = interaction.guild.id if interaction.guild else 0
+        profile = (
+            refresh_gamer_profile(guild_id, interaction.user.id)
+            if preferences.get("memory_opt_in")
+            else {"archetypes": [], "top_games": []}
+        )
+        context = build_gamer_context(profile, preferences.get("gamer_tags") or [])
+        await interaction.response.send_message(
+            "🎮 **Игровой контекст:** " + (context or "пока недостаточно игровых данных") + "\n"
+            f"Память: **{'да' if preferences['memory_opt_in'] else 'нет'}**, "
+            f"обучение: **{'да' if preferences['training_opt_in'] else 'нет'}**."
+            + ("\nАвтоматический профиль активности появится только после включения памяти."
+               if not preferences["memory_opt_in"] else ""),
+            ephemeral=True,
+        )
+
+    @chat_group.command(name="забыть_меня", description="Удалить диалоги, согласия и игровой профиль из памяти бота")
+    async def forget_me(self, interaction: discord.Interaction, подтвердить: bool):
+        if not подтвердить:
+            await interaction.response.send_message("Удаление отменено.", ephemeral=True)
+            return
+        removed = forget_ai_personalization(interaction.user.id)
+        await interaction.response.send_message(
+            f"🗑️ Удалено диалогов: {removed['turns']}; профилей: {removed['gamer_profiles']}. Согласия сброшены.",
+            ephemeral=True,
+        )
 
     @chat_group.command(name="вкл", description="(Админ) Включить или выключить разговорчивость")
     @app_commands.checks.has_permissions(administrator=True)

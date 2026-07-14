@@ -769,6 +769,9 @@ function renderUnifiedProfile(payload) {
   const lol = games.lol || {};
   const wwm = games.wwm;
   const birthday = profile.birthday || {};
+  const ai = profile.ai || {};
+  const aiConversation = ai.conversation || {};
+  const gamerProfile = ai.gamer_profile || {};
   const displayName = community.display_name || state.me?.user?.global_name || state.me?.user?.username || "Мой профиль";
 
   $("unifiedProfileName").textContent = displayName;
@@ -785,6 +788,9 @@ function renderUnifiedProfile(payload) {
   $("unifiedAccent").value = /^#[0-9a-f]{6}$/i.test(community.accent_color || "") ? community.accent_color : "#4fc3b1";
   $("unifiedGender").value = economyProfile.gender || "";
   $("unifiedAgeConfirmed").checked = Boolean(economyProfile.age_confirmed);
+  $("unifiedGamerTags").value = (aiConversation.gamer_tags || []).join(", ");
+  $("unifiedAiMemory").checked = Boolean(aiConversation.memory_opt_in);
+  $("unifiedAiTraining").checked = Boolean(aiConversation.training_opt_in);
 
   $("unifiedBalance").textContent = String(economy.balance || 0);
   $("unifiedEconomyState").textContent = economyProfile.age_confirmed ? "Экономический профиль активен" : "Заполни профиль и подтверди 18+";
@@ -795,6 +801,9 @@ function renderUnifiedProfile(payload) {
   $("unifiedLolMeta").textContent = lolLabel || (lol.account ? "Профиль связан, обнови игровую модель" : "Riot ID и модель игрока");
   $("unifiedWwm").textContent = wwm?.game_nick || "Не привязан";
   $("unifiedWwmMeta").textContent = wwm ? (wwm.nick_synced ? "Ник синхронизирован с Discord" : "Ник сохранён") : "Игровой ник не указан";
+  const archetypes = (gamerProfile.archetypes || []).slice(0, 3).map((item) => item.label).filter(Boolean);
+  $("unifiedAiProfile").textContent = archetypes.join(", ") || "Без игрового профиля";
+  $("unifiedAiMeta").textContent = `Память: ${aiConversation.memory_opt_in ? "да" : "нет"} · обучение: ${aiConversation.training_opt_in ? "да" : "нет"}`;
 }
 
 async function loadUnifiedProfile() {
@@ -819,10 +828,22 @@ async function saveUnifiedProfile() {
         gender,
         age_confirmed: $("unifiedAgeConfirmed").checked,
       } : null,
+      ai: {
+        memory_opt_in: $("unifiedAiMemory").checked,
+        training_opt_in: $("unifiedAiTraining").checked,
+        gamer_tags: $("unifiedGamerTags").value.trim(),
+      },
     }),
   });
   renderUnifiedProfile(data.profile);
   $("unifiedProfileMessage").textContent = "Профиль сохранён и доступен боту, админке и приложению.";
+}
+
+async function forgetAiProfile() {
+  if (!window.confirm("Удалить сохранённые диалоги, согласия и игровой AI-профиль?")) return;
+  const data = await api("/api/profile/forget-ai", { method: "POST" });
+  renderUnifiedProfile(data.profile);
+  $("unifiedProfileMessage").textContent = "Диалоги, согласия и AI-профиль удалены.";
 }
 
 async function saveCommunityProfile() {
@@ -1319,6 +1340,7 @@ $("unifiedProfileForm").addEventListener("submit", async (event) => {
 });
 
 $("reloadProfile").addEventListener("click", () => loadUnifiedProfile().catch(console.error));
+$("unifiedAiForget").addEventListener("click", () => forgetAiProfile().catch(console.error));
 document.querySelectorAll(".profile-jump").forEach((button) => {
   button.addEventListener("click", async () => {
     setView(button.dataset.targetView);

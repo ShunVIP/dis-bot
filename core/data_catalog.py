@@ -136,12 +136,16 @@ def ml_data_manifest(audit: dict[str, Any]) -> dict[str, Any]:
             },
             "conversation_feedback": {
                 "database": "social",
-                "tables": ["conversation_turns", "conversation_feedback"],
+                "tables": ["conversation_turns", "conversation_feedback", "conversation_preferences", "gamer_profiles"],
                 "rows": table_index.get(("social", "conversation_turns"), 0),
                 "rated_rows": table_index.get(("social", "conversation_feedback"), 0),
                 "training_location": "local_pc",
                 "inference_location": "local_pc_via_tailscale",
                 "collection_policy": "explicit_bot_conversations_only",
+                "training_policy": "user_training_opt_in + self_positive_feedback",
+                "personalization_policy": "user_memory_opt_in",
+                "base_model": "Qwen/Qwen3-8B",
+                "adaptation": "local_pc_qlora",
             },
         },
     }
