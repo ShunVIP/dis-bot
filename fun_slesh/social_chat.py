@@ -33,14 +33,17 @@ from core.conversation_store import (
 from core.gamer_profile_service import ARCHETYPES, build_gamer_context, normalize_requested_tags
 from core.gamer_profile_store import refresh_gamer_profile
 from core.profile_service import forget_ai_personalization
+from core.social_chat_service import (
+    FEATURE_SOCIAL_CHAT,
+    get_social_chat_policy,
+    migrate_social_chat_consent_policy,
+    update_social_chat_policy,
+)
 from core.settings_store import (
     clear_feature_channel,
     clear_feature_channels,
-    get_feature_policy,
-    has_feature_setting,
     set_feature_channel,
     set_feature_enabled,
-    set_feature_payload,
 )
 
 try:
@@ -51,7 +54,6 @@ except Exception:
     ImageFont = None
     ImageOps = None
 
-FEATURE_SOCIAL_CHAT = "social_chat"
 UTC = timezone.utc
 MSK = ZoneInfo("Europe/Moscow")
 
@@ -144,21 +146,11 @@ CARD_COLORS = [
 
 
 def _get_config(guild_id: int) -> tuple[bool, int, bool, bool, set[int], set[int]]:
-    policy = get_feature_policy(guild_id, FEATURE_SOCIAL_CHAT)
-    payload = policy.extra or {}
-    enabled = policy.enabled
-    try:
-        chance_percent = int(payload.get("chance_percent", 0))
-    except (TypeError, ValueError):
-        chance_percent = 0
-    chance_percent = max(0, min(100, chance_percent))
-    ambient_opt_in = bool(payload.get("ambient_opt_in", False))
-    mention_only = bool(payload.get("mention_only", True)) or not ambient_opt_in
-    if not ambient_opt_in:
-        chance_percent = 0
-    allowed_channel_ids = set(policy.allowed_channel_ids)
-    excluded_channel_ids = set(policy.excluded_channel_ids)
-    return enabled, chance_percent, mention_only, ambient_opt_in, allowed_channel_ids, excluded_channel_ids
+    policy = get_social_chat_policy(guild_id)
+    return (
+        policy.enabled, policy.chance_percent, policy.mention_only, policy.ambient_opt_in,
+        set(policy.allowed_channel_ids), set(policy.excluded_channel_ids),
+    )
 
 
 def _normalize_text(text: str) -> str:
@@ -657,22 +649,21 @@ class SocialChat(commands.Cog):
     @chat_group.command(name="шанс", description="(Админ) Шанс ответа в добровольно включённых чат-каналах")
     @app_commands.checks.has_permissions(administrator=True)
     async def шанс(self, interaction: discord.Interaction, процент: app_commands.Range[int, 0, 100]):
-        set_feature_payload(interaction.guild.id, FEATURE_SOCIAL_CHAT, {"chance_percent": int(процент)})
+        policy = update_social_chat_policy(interaction.guild.id, chance_percent=int(процент))
         await interaction.response.send_message(
-            f"✅ Новый шанс случайного ответа: **{процент}%**.",
+            (
+                f"✅ Новый шанс случайного ответа: **{policy.chance_percent}%**."
+                if policy.ambient_opt_in
+                else "ℹ️ Авточат выключен, поэтому эффективный шанс остаётся 0%. Сначала включи /болтовня режим."
+            ),
             ephemeral=True,
         )
 
     @chat_group.command(name="режим", description="(Админ) Разрешить автоответы только в выбранных чат-каналах")
     @app_commands.checks.has_permissions(administrator=True)
     async def режим(self, interaction: discord.Interaction, только_по_обращению: bool):
-        set_feature_payload(
-            interaction.guild.id,
-            FEATURE_SOCIAL_CHAT,
-            {
-                "mention_only": bool(только_по_обращению),
-                "ambient_opt_in": not bool(только_по_обращению),
-            },
+        update_social_chat_policy(
+            interaction.guild.id, ambient_opt_in=not bool(только_по_обращению)
         )
         await interaction.response.send_message(
             "✅ Режим обновлён: "
@@ -733,4 +724,5 @@ class SocialChat(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    migrate_social_chat_consent_policy()
     await bot.add_cog(SocialChat(bot))

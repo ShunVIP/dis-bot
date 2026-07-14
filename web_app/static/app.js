@@ -1176,8 +1176,33 @@ async function loadSettings() {
     api("/api/community/members"),
   ]);
   $("settingsOutput").textContent = JSON.stringify(settingsData, null, 2);
+  $("settingsGuild").value = String(settingsData.guild_id || "");
+  const social = settingsData.features?.social_chat?.extra || {};
+  $("socialChatAmbient").checked = Boolean(social.ambient_opt_in);
+  $("socialChatChance").value = String(social.ambient_opt_in ? Number(social.chance_percent || 0) : 0);
+  $("socialChatSettingsStatus").textContent = social.ambient_opt_in
+    ? `авточат ${Number(social.chance_percent || 0)}%`
+    : "только по обращению";
   renderServerSettings(serverData.server);
   renderRoles(memberData.roles || [], "settingsRoleCatalog");
+}
+
+async function saveSocialChatSettings() {
+  const guild = Number($("settingsGuild").value || 0);
+  const ambient = $("socialChatAmbient").checked;
+  const chance = Math.max(0, Math.min(100, Number($("socialChatChance").value || 0)));
+  $("socialChatSettingsStatus").textContent = "сохраняем...";
+  await api(`/api/guilds/${guild}/features/social_chat`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      payload: {
+        ambient_opt_in: ambient,
+        mention_only: !ambient,
+        chance_percent: ambient ? chance : 0,
+      },
+    }),
+  });
+  await loadSettings();
 }
 
 async function saveServerSettings() {
@@ -1308,6 +1333,14 @@ $("settingsForm").addEventListener("submit", async (event) => {
     body: JSON.stringify({ reason: "web panel" }),
   });
   await loadSettings();
+});
+
+$("socialChatSettingsForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await saveSocialChatSettings().catch((error) => {
+    console.error(error);
+    $("socialChatSettingsStatus").textContent = "ошибка сохранения";
+  });
 });
 
 $("serverSettingsForm").addEventListener("submit", async (event) => {

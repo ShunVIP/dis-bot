@@ -387,6 +387,19 @@
           </section>
 
           <section class="panel settings-wide">
+            <div class="section-head">
+              <h2>Разговорчивость ViPik</h2>
+              <span id="socialChatSettingsStatus" class="muted">без автоответов по умолчанию</span>
+            </div>
+            <form id="socialChatSettingsForm" class="settings-form">
+              <label class="check-line"><input id="socialChatAmbient" type="checkbox"> Разрешить редкие автоответы только в allow-каналах</label>
+              <label>Шанс автоответа, %<input id="socialChatChance" inputmode="numeric" value="0"></label>
+              <button class="button primary" type="submit">Сохранить разговорчивость</button>
+            </form>
+            <p class="muted">Без явного включения эффективный шанс всегда 0%. Если allow-каналы не заданы, бот всё равно отвечает только по обращению.</p>
+          </section>
+
+          <section class="panel settings-wide">
             <h2>Каналы функций бота</h2>
             <form id="settingsForm" class="settings-form">
               <input id="settingsGuild" inputmode="numeric" placeholder="Guild ID">

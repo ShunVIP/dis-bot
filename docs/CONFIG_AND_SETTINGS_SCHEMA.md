@@ -134,6 +134,22 @@ Use stable snake_case names:
 - `rep_roles`
 - `web_chat`
 
+### `social_chat` payload v2
+
+```json
+{
+  "policy_version": 2,
+  "ambient_opt_in": false,
+  "mention_only": true,
+  "chance_percent": 0
+}
+```
+
+`ambient_opt_in=false` всегда нормализуется в `mention_only=true` и
+`chance_percent=0`. Даже при opt-in случайные ответы разрешены только при наличии
+хотя бы одного `feature_channels.mode=allow`. Старые канонические payload без
+`ambient_opt_in` мигрируются скриптом `python -m scripts.migrate_social_chat_policy --apply`.
+
 ## Web/App Contract
 
 The future backend should not edit random module-specific tables directly unless there is no unified setting yet.

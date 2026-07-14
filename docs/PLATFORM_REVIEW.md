@@ -110,6 +110,7 @@
 - toxicity-журналы, weekly-счётчики, shadow-выборка и ручная разметка принадлежат `core/toxicity_store.py`; Discord cog и admin panel больше не выполняют SQL к этим таблицам.
 - `reputation` и `mood` имеют одного записывающего владельца — `core/reputation_store.py`; activity rewards и Размер-роли больше не создают собственную копию схемы.
 - разговорная LLM получает gamer archetypes из derived `gamer_profiles`; память и QLoRA dataset требуют пользовательского opt-in, а dataset дополнительно требует self-👍 на конкретный ответ.
+- production-аудит 2026-07-14 подтвердил отсутствие активных legacy config-таблиц; сохранённый pre-consent `social_chat` payload переводится в policy v2 с эффективным шансом 0%, а обе admin-поверхности используют одинаковую нормализацию.
 
 ## Следующий порядок работ
 

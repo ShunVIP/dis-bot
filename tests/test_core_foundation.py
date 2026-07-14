@@ -15,12 +15,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
     FEATURES_BY_ID,
     _member_has_admin_access,
+    _render_social_chat_controls,
 )
 from core.summary_service import (
     DEFAULT_SUMMARY_TEXTS,
@@ -667,6 +668,47 @@ class WebSecurityTests(IsolatedDatabaseTest):
         worker = (Path(__file__).resolve().parent.parent / "web_app" / "static" / "service-worker.js").read_text(encoding="utf-8")
         self.assertIn('url.pathname.startsWith("/uploads/")', worker)
 
+    def test_admin_api_normalizes_social_chat_and_uses_configured_guild(self):
+        web_app_store.upsert_web_user(99, "admin")
+        community_store.set_user_roles(99, ["admin"], source="test")
+        session_id = web_app_store.create_session(99)
+
+        async def scenario():
+            with patch.object(web_server, "ALLOWED_GUILD_IDS", frozenset({7})):
+                app = web_server.create_app()
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, "127.0.0.1", 0)
+                await site.start()
+                port = site._server.sockets[0].getsockname()[1]
+                base = f"http://127.0.0.1:{port}"
+                headers = {"Cookie": f"vipik_session={session_id}", "Origin": base}
+                async with ClientSession() as session:
+                    async with session.patch(
+                        f"{base}/api/guilds/0/features/social_chat",
+                        json={"payload": {"chance_percent": 55, "mention_only": False}},
+                        headers=headers,
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        settings = (await response.json())["settings"]
+                        self.assertEqual(settings["chance_percent"], 0)
+                        self.assertTrue(settings["mention_only"])
+                        self.assertFalse(settings["ambient_opt_in"])
+                    async with session.patch(
+                        f"{base}/api/guilds/0/features/social_chat",
+                        json={"payload": {"ambient_opt_in": True, "mention_only": False, "chance_percent": 20}},
+                        headers=headers,
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        settings = (await response.json())["settings"]
+                        self.assertEqual(settings["chance_percent"], 20)
+                        self.assertTrue(settings["ambient_opt_in"])
+                await runner.cleanup()
+
+        asyncio.run(scenario())
+        self.assertTrue(settings_store.has_feature_setting(7, "social_chat"))
+        self.assertFalse(settings_store.has_feature_setting(0, "social_chat"))
+
 
 class PlatformDmTests(IsolatedDatabaseTest):
     def test_dm_unread_count_and_read_marker_are_member_scoped(self):
@@ -1112,6 +1154,9 @@ class PermissionTests(IsolatedDatabaseTest):
             self.assertTrue(web_server._has_allowed_guild([{"id": "123"}, {"id": "999"}]))
             self.assertFalse(web_server._has_allowed_guild([{"id": "999"}]))
             self.assertFalse(web_server._has_allowed_guild({"id": "123"}))
+        with patch.object(web_server, "ALLOWED_GUILD_IDS", frozenset({456})):
+            self.assertEqual(web_server._settings_guild_id(0), 456)
+            self.assertEqual(web_server._settings_guild_id("123"), 123)
 
     def test_discord_admin_panel_accepts_only_admin_or_manage_guild(self):
         regular = SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False, manage_guild=False))
@@ -1478,6 +1523,44 @@ class ConversationLayerTests(IsolatedDatabaseTest):
         self.assertFalse(ambient_opt_in)
         self.assertEqual(allowed, set())
         self.assertEqual(excluded, set())
+
+        migration = social_chat_service.migrate_social_chat_consent_policy()
+        self.assertEqual(migration, {"inspected": 1, "migrated": 1})
+        stored = settings_store.get_feature_payload(7, "social_chat")
+        self.assertEqual(
+            {key: stored[key] for key in ("chance_percent", "mention_only", "ambient_opt_in", "policy_version")},
+            {"chance_percent": 0, "mention_only": True, "ambient_opt_in": False, "policy_version": 2},
+        )
+        self.assertEqual(
+            social_chat_service.migrate_social_chat_consent_policy(),
+            {"inspected": 1, "migrated": 0},
+        )
+
+    def test_social_chat_ambient_mode_requires_explicit_opt_in_and_allow_channels(self):
+        settings_store.set_feature_channel(7, "social_chat", 70, "allow", "test")
+        policy = social_chat_service.update_social_chat_policy(
+            7, ambient_opt_in=True, chance_percent=25
+        )
+        self.assertTrue(policy.ambient_opt_in)
+        self.assertFalse(policy.mention_only)
+        self.assertEqual(policy.chance_percent, 25)
+        self.assertEqual(policy.allowed_channel_ids, frozenset({70}))
+
+        safe = social_chat_service.update_social_chat_policy(7, ambient_opt_in=False)
+        self.assertFalse(safe.ambient_opt_in)
+        self.assertTrue(safe.mention_only)
+        self.assertEqual(safe.chance_percent, 0)
+        rows = settings_store.list_feature_settings("social_chat")
+        self.assertEqual([(row["guild_id"], row["feature"]) for row in rows], [(7, "social_chat")])
+
+    def test_admin_panel_renders_safe_social_chat_controls(self):
+        html = _render_social_chat_controls(
+            {"chance_percent": 12, "mention_only": False}, ()
+        )
+        self.assertIn("Разговорчивость без спама", html)
+        self.assertIn('value="0"', html)
+        self.assertNotIn('name="ambient_opt_in" value="1" checked', html)
+        self.assertIn("Allow-каналы не выбраны", html)
 
     def test_explicit_turn_context_and_reaction_feedback_share_one_store(self):
         conversation_store.record_turn(

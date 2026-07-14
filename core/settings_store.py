@@ -174,6 +174,26 @@ def has_feature_setting(guild_id: int, feature: str) -> bool:
     return bool(row)
 
 
+def list_feature_settings(feature: str | None = None) -> list[dict[str, Any]]:
+    """Return canonical settings rows without exposing SQL to feature services."""
+    ensure_settings_tables()
+    query = "SELECT guild_id,feature,enabled,payload,updated_at FROM feature_settings"
+    params: tuple[Any, ...] = ()
+    if feature is not None:
+        query += " WHERE feature=?"
+        params = (str(feature),)
+    query += " ORDER BY guild_id,feature"
+    with db_connection(SOCIAL_DB) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "guild_id": int(row[0]), "feature": str(row[1]), "enabled": bool(row[2]),
+            "payload": _loads(row[3]), "updated_at": row[4],
+        }
+        for row in rows
+    ]
+
+
 def set_feature_channel(
     guild_id: int,
     feature: str,

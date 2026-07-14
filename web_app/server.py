@@ -98,6 +98,7 @@ from core.settings_store import (
     set_feature_enabled,
     set_feature_payload,
 )
+from core.social_chat_service import normalize_social_chat_payload
 from core.web_app_store import (
     authenticate_local_user,
     consume_login_code,
@@ -204,6 +205,13 @@ def _positive_int(value: object) -> int:
     except (TypeError, ValueError):
         return 0
     return parsed if parsed > 0 else 0
+
+
+def _settings_guild_id(value: object) -> int:
+    explicit = _positive_int(value)
+    if explicit:
+        return explicit
+    return min(ALLOWED_GUILD_IDS) if ALLOWED_GUILD_IDS else 0
 
 
 def _auth_methods() -> dict[str, bool]:
@@ -842,8 +850,10 @@ async def api_platform_audit(request: web.Request):
 
 async def api_settings(request: web.Request):
     _require_admin(request)
-    guild_id = int(request.query.get("guild_id") or 0)
-    features = request.query.get("features", "birthday,wwm_guild,steam,daily_summary,parody_training,lol_profile").split(",")
+    guild_id = _settings_guild_id(request.query.get("guild_id"))
+    features = request.query.get(
+        "features", "birthday,wwm_guild,steam,daily_summary,social_chat,parody_training,lol_profile"
+    ).split(",")
     result = {}
     for feature in [item.strip() for item in features if item.strip()]:
         policy = get_feature_policy(guild_id, feature)
@@ -883,19 +893,24 @@ async def api_ml_insights(request: web.Request):
 
 async def api_patch_feature(request: web.Request):
     _require_admin(request)
-    guild_id = int(request.match_info["guild_id"])
+    guild_id = _settings_guild_id(request.match_info["guild_id"])
     feature = request.match_info["feature"]
     data = await request.json()
     if "enabled" in data:
         set_feature_enabled(guild_id, feature, bool(data["enabled"]))
     if isinstance(data.get("payload"), dict):
-        set_feature_payload(guild_id, feature, data["payload"])
+        payload = data["payload"]
+        if feature == "social_chat":
+            merged = get_feature_payload(guild_id, feature)
+            merged.update(payload)
+            payload = normalize_social_chat_payload(merged)
+        set_feature_payload(guild_id, feature, payload)
     return _json({"ok": True, "feature": feature, "settings": get_feature_payload(guild_id, feature)})
 
 
 async def api_put_channel(request: web.Request):
     _require_admin(request)
-    guild_id = int(request.match_info["guild_id"])
+    guild_id = _settings_guild_id(request.match_info["guild_id"])
     feature = request.match_info["feature"]
     mode = request.match_info["mode"]
     channel_id = int(request.match_info["channel_id"])
@@ -906,7 +921,7 @@ async def api_put_channel(request: web.Request):
 
 async def api_delete_channel(request: web.Request):
     _require_admin(request)
-    guild_id = int(request.match_info["guild_id"])
+    guild_id = _settings_guild_id(request.match_info["guild_id"])
     feature = request.match_info["feature"]
     mode = request.match_info["mode"]
     channel_id = int(request.match_info["channel_id"])

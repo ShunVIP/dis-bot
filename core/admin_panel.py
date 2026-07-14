@@ -45,6 +45,7 @@ from core.settings_store import (
     set_feature_enabled,
     set_feature_payload,
 )
+from core.social_chat_service import normalize_social_chat_payload, update_social_chat_policy
 from core.paths import BIRTHDAYS_DB, SOCIAL_DB
 from core.toxicity_store import (
     count_toxicity_feedback,
@@ -817,6 +818,34 @@ def _render_daily_summary_text_form(payload: dict) -> str:
     """
 
 
+def _render_social_chat_controls(payload: dict, allowed_channel_ids: tuple[int, ...]) -> str:
+    policy = normalize_social_chat_payload(payload)
+    ambient = bool(policy["ambient_opt_in"])
+    chance = int(policy["chance_percent"])
+    channel_note = (
+        f"Авточат ограничен выбранными allow-каналами: {len(allowed_channel_ids)}."
+        if allowed_channel_ids
+        else "Allow-каналы не выбраны: даже при включении бот не будет сам вмешиваться в беседу."
+    )
+    return f"""
+      <details class="friendly-settings" open>
+        <summary>Разговорчивость без спама</summary>
+        <form method="post" action="/features/social_chat/settings" class="text-settings-form">
+          <label class="check-setting">
+            <input type="checkbox" name="ambient_opt_in" value="1" {'checked' if ambient else ''}>
+            <span>Разрешить редкие автоответы только в явно выбранных allow-каналах</span>
+          </label>
+          <label class="text-setting">
+            <span>Шанс автоответа, %</span>
+            <input name="chance_percent" value="{chance}" inputmode="numeric">
+            <small>Без включённого режима эффективный шанс всегда 0%. {escape(channel_note)}</small>
+          </label>
+          <button type="submit">Сохранить разговорчивость</button>
+        </form>
+      </details>
+    """
+
+
 def _render_feature_registry(bot, guild_id: int = 0) -> str:
     cards = []
     for feature in FEATURE_REGISTRY:
@@ -838,6 +867,10 @@ def _render_feature_registry(bot, guild_id: int = 0) -> str:
         )
         if feature_id == "daily_summary":
             friendly_settings = _render_daily_summary_text_form(policy.extra or {})
+        elif feature_id == "social_chat":
+            friendly_settings = _render_social_chat_controls(
+                policy.extra or {}, policy.allowed_channel_ids
+            )
         else:
             friendly_settings = ""
         cards.append(
@@ -1534,6 +1567,10 @@ async def _feature_payload(request: web.Request) -> web.Response:
     else:
         payload = {}
     guild_id = _admin_guild_id(request.app["bot"])
+    if feature_id == "social_chat":
+        merged = dict(get_feature_policy(guild_id, feature_id).extra or {})
+        merged.update(payload)
+        payload = normalize_social_chat_payload(merged)
     set_feature_payload(guild_id, feature_id, payload)
     _mark_restart_required(request, feature, "payload")
     message = f"Дополнительные параметры для {feature['title']} сохранены."
@@ -1569,6 +1606,33 @@ async def _daily_summary_text(request: web.Request) -> web.Response:
     set_feature_payload(guild_id, "daily_summary", payload)
     message = "Текст итогов сервера сохранен."
     return web.Response(text=_render_page(request.app["bot"], request=request, message=message), content_type="text/html")
+
+
+async def _social_chat_settings(request: web.Request) -> web.Response:
+    _assert_ip_allowed(request)
+    if not _is_authorized(request):
+        raise web.HTTPUnauthorized(text="Admin token required")
+    data = await request.post()
+    ambient_opt_in = str(data.get("ambient_opt_in") or "").strip().lower() in {
+        "1", "true", "on", "yes",
+    }
+    try:
+        chance_percent = int(str(data.get("chance_percent") or "0").strip())
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="Шанс автоответа должен быть числом от 0 до 100") from exc
+    guild_id = _admin_guild_id(request.app["bot"])
+    policy = update_social_chat_policy(
+        guild_id, ambient_opt_in=ambient_opt_in, chance_percent=chance_percent
+    )
+    message = (
+        f"Болтовня: добровольный авточат включён, шанс {policy.chance_percent}%."
+        if policy.ambient_opt_in
+        else "Болтовня: только ответы по явному обращению, автоответы выключены."
+    )
+    return web.Response(
+        text=_render_page(request.app["bot"], request=request, message=message),
+        content_type="text/html",
+    )
 
 
 async def _birthday_save(request: web.Request) -> web.Response:
@@ -1660,6 +1724,7 @@ async def start_admin_panel(bot, log) -> None:
     app.router.add_post("/features/{feature}/channel/delete", _feature_channel_delete)
     app.router.add_post("/features/{feature}/payload", _feature_payload)
     app.router.add_post("/features/daily_summary/text", _daily_summary_text)
+    app.router.add_post("/features/social_chat/settings", _social_chat_settings)
     app.router.add_post("/user-data/birthdays", _birthday_save)
     app.router.add_post("/user-data/birthdays/delete", _birthday_delete)
     app.router.add_post("/toxicity-ml/feedback", _toxicity_ml_feedback)

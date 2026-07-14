@@ -158,6 +158,16 @@ python scripts/train_toxicity_model.py --max-clean 2000
 - в SFT/QLoRA dataset попадают только диалоги пользователя с `training_opt_in`, которым этот же пользователь поставил 👍; Discord ID, mentions и URL редактируются;
 - пародийные сообщения не входят в LLM dataset и остаются Markov-only.
 
+Разговорчивость также требует явного админского согласия: `social_chat` policy v2 хранит
+`ambient_opt_in`, `mention_only` и эффективный `chance_percent` в `settings_store`.
+Без opt-in шанс принудительно равен `0`, а после opt-in автоответы всё равно работают
+только в явно выбранных allow-каналах. Настройка доступна в обеих web/admin поверхностях.
+
+Разговорчивость также требует явного админского согласия: `social_chat` policy v2 хранит
+`ambient_opt_in`, `mention_only` и эффективный `chance_percent` в `settings_store`.
+Без opt-in шанс принудительно равен `0`, а после opt-in автоответы всё равно работают
+только в явно выбранных allow-каналах. Настройка доступна в обеих web/admin поверхностях.
+
 Рекомендуемая модель для ПК с 16 ГБ VRAM — `qwen3:8b`. Настройки:
 
 ```env
