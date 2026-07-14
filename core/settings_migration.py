@@ -256,6 +256,29 @@ def _migrate_economy_tax(guild_ids: list[int] | tuple[int, ...] | None = None) -
     return count
 
 
+def _migrate_activity_tracker() -> int:
+    with db_connection(SOCIAL_DB) as conn:
+        if not _table_exists(conn, "activity_tracker_config"):
+            return 0
+        rows = conn.execute(
+            """
+            SELECT guild_id, channel_id, enabled, notify_starts, notify_ends, article_lookup
+            FROM activity_tracker_config
+            """
+        ).fetchall()
+    count = 0
+    for guild_id, _channel_id, enabled, _notify_starts, _notify_ends, _article_lookup in rows:
+        guild_id = int(guild_id)
+        if _feature_configured(guild_id, "activity_tracker"):
+            continue
+        # Proactive activity posts and habit reminders were retired. Preserve
+        # only the silent-tracking switch; obsolete delivery settings stay in
+        # the archived legacy table for auditability.
+        set_feature_enabled(guild_id, "activity_tracker", bool(enabled))
+        count += 1
+    return count
+
+
 def seed_admin_settings_from_legacy(log=None, guild_ids: list[int] | tuple[int, ...] | None = None) -> dict[str, int]:
     results = {
         "daily_summary": _migrate_daily_summary(),
@@ -266,6 +289,7 @@ def seed_admin_settings_from_legacy(log=None, guild_ids: list[int] | tuple[int, 
         "steam": _migrate_steam(),
         "wwm_guild": _migrate_wwm_guild(),
         "economy": _migrate_economy_tax(guild_ids),
+        "activity_tracker": _migrate_activity_tracker(),
     }
     migrated = sum(results.values())
     if log:

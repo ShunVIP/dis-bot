@@ -84,21 +84,9 @@ def _activity_insights(conn: sqlite3.Connection, tables: set[str], guild_id: int
                 "shared_games": sorted(shared, key=lambda game: first_vector[game] + second_vector[game], reverse=True)[:5],
             })
     pairs.sort(key=lambda item: item["score"], reverse=True)
-    habits = []
-    if "activity_game_habits" in tables:
-        habit_params: tuple[Any, ...] = ()
-        habit_where = ""
-        if guild_id:
-            habit_where = "WHERE guild_id=?"
-            habit_params = (int(guild_id),)
-        habits = [
-            {"user_id": int(user_id), "activity": str(activity), "expected_minute_msk": int(minute), "sample_days": int(days)}
-            for user_id, activity, minute, days in conn.execute(
-                f"SELECT user_id,activity_name,expected_minute,sample_days FROM activity_game_habits {habit_where} ORDER BY sample_days DESC LIMIT 30",
-                habit_params,
-            )
-        ]
-    return {"compatible_players": pairs[:20], "habits": habits}
+    # Habit reminders were retired because they were noisy. Keep the key for
+    # API compatibility without exposing stale rows from old installations.
+    return {"compatible_players": pairs[:20], "habits": []}
 
 
 def _quality_insights(conn: sqlite3.Connection, tables: set[str]) -> dict[str, Any]:

@@ -8,16 +8,19 @@ import hmac
 import json
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import birthday_store, community_store, economy, economy_profile, game_profiles, game_service, game_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
+from core import activity_service, activity_store, birthday_store, community_store, conversation_store, economy, economy_profile, game_profiles, game_service, game_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, settings_migration, settings_store, summary_stats_store, summary_store, toxicity_model_service, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
-from core.admin_panel import _member_has_admin_access
+from core.admin_panel import (
+    FEATURES_BY_ID,
+    _member_has_admin_access,
+)
 from core.summary_service import (
     DEFAULT_SUMMARY_TEXTS,
     block_enabled,
@@ -30,6 +33,7 @@ from web_app.server import security_middleware
 from scripts.build_ml_manifest import build_manifest
 from scripts import audit_settings, finalize_settings_migration
 from scripts.train_toxicity_model import train_model
+from fun_slesh import social_chat
 
 
 class IsolatedDatabaseTest(unittest.TestCase):
@@ -46,6 +50,8 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(birthday_store, "BIRTHDAYS_DB", self.db_path),
             patch.object(game_profiles, "SOCIAL_DB", self.db_path),
             patch.object(game_store, "SOCIAL_DB", self.db_path),
+            patch.object(activity_store, "SOCIAL_DB", self.db_path),
+            patch.object(conversation_store, "SOCIAL_DB", self.db_path),
             patch.object(profile_service, "SOCIAL_DB", self.db_path),
             patch.object(web_app_store, "SOCIAL_DB", self.db_path),
             patch.object(platform_store, "SOCIAL_DB", self.db_path),
@@ -144,6 +150,46 @@ class SettingsStoreTests(IsolatedDatabaseTest):
                 conn.execute("SELECT source_rows FROM settings_migration_archive WHERE table_name='daily_summary_config'").fetchone(),
                 (1,),
             )
+
+    def test_activity_tracker_migrates_with_exact_coverage_and_archives(self):
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE activity_tracker_config(
+                    guild_id INTEGER PRIMARY KEY,
+                    channel_id INTEGER,
+                    enabled INTEGER NOT NULL,
+                    notify_starts INTEGER NOT NULL,
+                    notify_ends INTEGER NOT NULL,
+                    article_lookup INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO activity_tracker_config VALUES(77, 88, 0, 1, 0, 1)"
+            )
+
+        migrated = settings_migration.seed_admin_settings_from_legacy()
+        self.assertEqual(migrated["activity_tracker"], 1)
+        self.assertEqual(
+            activity_service.is_activity_enabled(77),
+            False,
+        )
+        report = audit_settings.build_report()
+        self.assertEqual(report["coverage"]["issues"], [])
+        self.assertTrue(report["coverage"]["safe_to_finalize"])
+
+        finalized = finalize_settings_migration.finalize(apply=True)
+        self.assertTrue(finalized["applied"])
+        with db_connection(self.db_path) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        self.assertNotIn("activity_tracker_config", tables)
+        self.assertIn("activity_tracker_config_legacy_backup", tables)
 
 
 class EconomyTests(IsolatedDatabaseTest):
@@ -699,6 +745,132 @@ class GameLayerTests(IsolatedDatabaseTest):
                 "SELECT status FROM hangman_games WHERE id=?", (first["id"],)
             ).fetchone()[0]
         self.assertEqual(old_status, "cancelled")
+
+
+class ActivityLayerTests(IsolatedDatabaseTest):
+    def test_legacy_habits_are_retired_without_deleting_audit_data(self):
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                "CREATE TABLE activity_game_habits(guild_id INTEGER, user_id INTEGER)"
+            )
+            conn.execute("INSERT INTO activity_game_habits VALUES(7, 101)")
+        activity_store.ensure_activity_tables()
+        with db_connection(self.db_path) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertNotIn("activity_game_habits", tables)
+            self.assertIn("activity_game_habits_retired_backup", tables)
+            self.assertEqual(
+                conn.execute(
+                    "SELECT guild_id,user_id FROM activity_game_habits_retired_backup"
+                ).fetchall(),
+                [(7, 101)],
+            )
+
+    def test_admin_panel_exposes_activity_policy_without_restart(self):
+        feature = FEATURES_BY_ID["activity_tracker"]
+        self.assertEqual(feature["channel_modes"], ())
+        self.assertFalse(feature.get("restart_on_change", False))
+
+    def test_settings_service_has_one_canonical_policy(self):
+        self.assertTrue(activity_service.is_activity_enabled(7))
+        activity_service.set_activity_enabled(7, False)
+        self.assertFalse(activity_service.is_activity_enabled(7))
+
+    def test_store_finishes_sessions_and_builds_guild_top(self):
+        start = datetime(2026, 7, 13, 10, 0, tzinfo=timezone.utc)
+        activity_store.remember_activity_start(
+            7, 101, "Game A", "game", started_at=start
+        )
+        loaded = activity_store.load_active_sessions()
+        self.assertEqual(loaded, [(7, 101, "Game A", "game", start.isoformat())])
+        seconds = activity_store.finish_activity_session(
+            7,
+            101,
+            "Game A",
+            "game",
+            ended_at=start + timedelta(seconds=125),
+        )
+        self.assertEqual(seconds, 125)
+        self.assertEqual(activity_store.load_active_sessions(), [])
+
+        activity_store.remember_activity_start(
+            7, 102, "Editor", "app", started_at=start
+        )
+        activity_store.finish_activity_session(
+            7,
+            102,
+            "Editor",
+            "app",
+            ended_at=start + timedelta(seconds=300),
+        )
+        activity_store.remember_activity_start(
+            8, 999, "Other", "game", started_at=start
+        )
+        activity_store.finish_activity_session(
+            8,
+            999,
+            "Other",
+            "game",
+            ended_at=start + timedelta(seconds=9999),
+        )
+
+        top = activity_store.get_activity_top(7, "2026-07-13T00:00:00+00:00")
+        self.assertEqual(top["top_games"], [("Game A", 125)])
+        self.assertEqual(top["top_game_users"], [(101, 125)])
+        self.assertEqual(top["other_activities"], [("Editor", "app", 300)])
+        self.assertEqual(top["top_all_users"], [(102, 300), (101, 125)])
+
+
+class ConversationLayerTests(IsolatedDatabaseTest):
+    def test_legacy_random_chat_setting_is_safely_mention_only(self):
+        settings_store.set_feature_payload(
+            7,
+            "social_chat",
+            {"chance_percent": 12, "mention_only": False},
+        )
+        enabled, chance, mention_only, ambient_opt_in, allowed, excluded = social_chat._get_config(7)
+        self.assertTrue(enabled)
+        self.assertEqual(chance, 0)
+        self.assertTrue(mention_only)
+        self.assertFalse(ambient_opt_in)
+        self.assertEqual(allowed, set())
+        self.assertEqual(excluded, set())
+
+    def test_explicit_turn_context_and_reaction_feedback_share_one_store(self):
+        conversation_store.record_turn(
+            bot_message_id=900,
+            source_message_id=800,
+            guild_id=7,
+            channel_id=70,
+            user_id=101,
+            user_text="Випик, как дела?",
+            bot_text="Нормально, пока VPS не дымится.",
+            provider="ollama",
+            model="qwen3:4b",
+            latency_ms=321,
+        )
+        self.assertEqual(
+            conversation_store.recent_context(7, 70, 101),
+            [
+                {"role": "user", "content": "Випик, как дела?"},
+                {"role": "assistant", "content": "Нормально, пока VPS не дымится."},
+            ],
+        )
+        self.assertEqual(conversation_store.recent_context(7, 70, 999), [])
+        self.assertTrue(conversation_store.record_feedback(900, 101, 1))
+        self.assertFalse(conversation_store.record_feedback(901, 101, -1))
+        with db_connection(self.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT score FROM conversation_feedback WHERE bot_message_id=900"
+                ).fetchone(),
+                (1,),
+            )
 
 
 class DataCatalogTests(IsolatedDatabaseTest):

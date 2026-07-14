@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Лёгкая разговорная болтовня бота.
+Разговорный слой бота с явным согласием пользователя.
 
 Что умеет:
-- иногда отвечает людям не только на токсичность;
-- реагирует на упоминание бота, ответ на сообщение бота, приветствия и вопросы;
-- не спамит: есть кулдаун по каналу и пользователю;
-- умеет редко и адресно подтроллить человека по его модели, если давно не трогал;
+- отвечает на упоминание, имя бота или ответ на сообщение бота;
+- может работать в явно выбранных разговорных каналах;
+- использует бесплатную локальную модель с безопасным fallback;
+- собирает только явные диалоги и оценки реакциями для улучшения;
 - настраивается через slash-команды.
 """
 
@@ -24,6 +24,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from core.conversation_service import ConversationReply, generate_reply
+from core.conversation_store import record_feedback, record_turn
 from core.paths import SOCIAL_DB
 from core.settings_store import (
     clear_feature_channel,
@@ -114,20 +116,6 @@ PARODY_PREFIXES = [
     "Беру микрофон и читаю это как надо:",
 ]
 
-TROLL_PREFIXES = [
-    "Ловлю тебя на слове:",
-    "Стенограмма твоей души такая:",
-    "Если убрать приличия, получается вот это:",
-    "Ты это сказал, а модель услышала вот так:",
-]
-
-TROLL_FALLBACKS = [
-    "Это сообщение заслуживает отдельного расследования.",
-    "Я ничего не добавлю, тут человек сам себя переиграл.",
-    "Сильный заход. Пахнет легендарной ошибкой.",
-    "Вижу сообщение, вижу хаос, вижу характер.",
-]
-
 MEME_CAPTIONS = [
     "Когда чат снова пошёл не по плану",
     "Когда человек сказал это вслух и теперь поздно отступать",
@@ -150,19 +138,22 @@ CARD_COLORS = [
 ]
 
 
-def _get_config(guild_id: int) -> tuple[bool, int, bool, set[int], set[int]]:
+def _get_config(guild_id: int) -> tuple[bool, int, bool, bool, set[int], set[int]]:
     policy = get_feature_policy(guild_id, FEATURE_SOCIAL_CHAT)
     payload = policy.extra or {}
     enabled = policy.enabled
     try:
-        chance_percent = int(payload.get("chance_percent", 12))
+        chance_percent = int(payload.get("chance_percent", 0))
     except (TypeError, ValueError):
-        chance_percent = 12
+        chance_percent = 0
     chance_percent = max(0, min(100, chance_percent))
-    mention_only = bool(payload.get("mention_only", False))
+    ambient_opt_in = bool(payload.get("ambient_opt_in", False))
+    mention_only = bool(payload.get("mention_only", True)) or not ambient_opt_in
+    if not ambient_opt_in:
+        chance_percent = 0
     allowed_channel_ids = set(policy.allowed_channel_ids)
     excluded_channel_ids = set(policy.excluded_channel_ids)
-    return enabled, chance_percent, mention_only, allowed_channel_ids, excluded_channel_ids
+    return enabled, chance_percent, mention_only, ambient_opt_in, allowed_channel_ids, excluded_channel_ids
 
 
 def _normalize_text(text: str) -> str:
@@ -173,6 +164,21 @@ def _normalize_text(text: str) -> str:
 
 def _contains_bot_alias(text: str) -> bool:
     return any(alias in text for alias in BOT_ALIASES)
+
+
+def _is_explicit_address(
+    message: discord.Message,
+    bot_user: discord.ClientUser | discord.Member | None,
+) -> bool:
+    direct_mention = bool(bot_user and bot_user in message.mentions)
+    reply_to_bot = bool(
+        message.reference
+        and message.reference.resolved
+        and isinstance(message.reference.resolved, discord.Message)
+        and bot_user
+        and message.reference.resolved.author.id == bot_user.id
+    )
+    return direct_mention or reply_to_bot or _contains_bot_alias(_normalize_text(message.content or ""))
 
 
 def _extract_topic(text: str) -> str:
@@ -379,61 +385,64 @@ class SocialChat(commands.Cog):
         self._channel_cooldowns: dict[tuple[int, int], datetime] = {}
         self._user_cooldowns: dict[tuple[int, int], datetime] = {}
         self._image_cooldowns: dict[tuple[int, int], datetime] = {}
-        self._troll_cooldowns: dict[tuple[int, int], datetime] = {}
 
-    async def _build_fun_reply(self, message: discord.Message, kind: str) -> str:
+    async def _build_fun_reply(self, message: discord.Message, kind: str) -> ConversationReply:
         user_id = message.author.id
+
+        model_reply = await generate_reply(
+            guild_id=message.guild.id,
+            channel_id=message.channel.id,
+            user_id=user_id,
+            display_name=message.author.display_name,
+            text=message.content,
+        )
+        if model_reply is not None:
+            return model_reply
 
         try:
             from fun_slesh.parody_engine import generate_phrase, model_exists
 
             # Для неожиданных рофлов сначала пробуем самые смешные локальные модели.
-            if kind in {"chaos", "ambient", "talk", "question", "direct"}:
+            if kind in {"chaos", "ambient", "talk"}:
                 if model_exists(user_id, "мем"):
                     phrase = await asyncio.to_thread(generate_phrase, user_id, "мем")
                     if phrase:
-                        return f"{random.choice(PARODY_PREFIXES)} *{phrase}*"
+                        return ConversationReply(
+                            f"{random.choice(PARODY_PREFIXES)} *{phrase}*",
+                            "markov_fallback",
+                            "markov:мем",
+                        )
 
                 if model_exists(user_id, "разум") and random.random() < 0.7:
                     phrase = await asyncio.to_thread(generate_phrase, user_id, "разум")
                     if phrase:
-                        return f"{random.choice(PARODY_PREFIXES)} *{phrase}*"
+                        return ConversationReply(
+                            f"{random.choice(PARODY_PREFIXES)} *{phrase}*",
+                            "markov_fallback",
+                            "markov:разум",
+                        )
 
         except Exception:
             pass
 
-        return _build_reply(kind, message.content)
+        return ConversationReply(_build_reply(kind, message.content), "templates")
 
-    async def _build_model_troll_reply(self, message: discord.Message) -> str | None:
-        user_id = message.author.id
-        try:
-            from fun_slesh.parody_engine import generate_phrase, model_exists
-
-            phrase = None
-            if model_exists(user_id, "разум"):
-                phrase = await asyncio.to_thread(generate_phrase, user_id, "разум")
-            elif model_exists(user_id, "мем"):
-                phrase = await asyncio.to_thread(generate_phrase, user_id, "мем")
-            if phrase:
-                return f"{random.choice(TROLL_PREFIXES)} *{phrase}*"
-        except Exception:
-            pass
-        return random.choice(TROLL_FALLBACKS)
-
-    def _channel_ready(self, guild_id: int, channel_id: int) -> bool:
+    def _channel_ready(self, guild_id: int, channel_id: int, *, direct: bool) -> bool:
         key = (guild_id, channel_id)
         now = datetime.now(UTC)
         last = self._channel_cooldowns.get(key)
-        if last and now - last < timedelta(minutes=8):
+        cooldown = timedelta(seconds=2) if direct else timedelta(minutes=8)
+        if last and now - last < cooldown:
             return False
         self._channel_cooldowns[key] = now
         return True
 
-    def _user_ready(self, guild_id: int, user_id: int) -> bool:
+    def _user_ready(self, guild_id: int, user_id: int, *, direct: bool) -> bool:
         key = (guild_id, user_id)
         now = datetime.now(UTC)
         last = self._user_cooldowns.get(key)
-        if last and now - last < timedelta(minutes=4):
+        cooldown = timedelta(seconds=3) if direct else timedelta(minutes=4)
+        if last and now - last < cooldown:
             return False
         self._user_cooldowns[key] = now
         return True
@@ -446,28 +455,6 @@ class SocialChat(commands.Cog):
             return False
         self._image_cooldowns[key] = now
         return True
-
-    def _troll_hours_silent(self, guild_id: int, user_id: int) -> float:
-        key = (guild_id, user_id)
-        now = datetime.now(UTC)
-        last = self._troll_cooldowns.get(key)
-        if not last:
-            return 999.0
-        return (now - last).total_seconds() / 3600.0
-
-    def _mark_troll(self, guild_id: int, user_id: int):
-        self._troll_cooldowns[(guild_id, user_id)] = datetime.now(UTC)
-
-    async def _send_troll_later(self, message: discord.Message, reply: str):
-        await asyncio.sleep(random.randint(5 * 60, 60 * 60))
-        try:
-            await message.reply(
-                reply,
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception:
-            pass
 
     async def _maybe_build_meme(self, message: discord.Message, kind: str) -> discord.File | None:
         if kind not in {"chaos", "ambient", "talk", "direct", "question"}:
@@ -496,7 +483,7 @@ class SocialChat(commands.Cog):
             return
 
         guild_id = message.guild.id
-        enabled, chance_percent, mention_only, channel_ids, excluded_channel_ids = _get_config(guild_id)
+        enabled, chance_percent, mention_only, ambient_opt_in, channel_ids, excluded_channel_ids = _get_config(guild_id)
         if not enabled:
             return
         if message.channel.id in excluded_channel_ids:
@@ -508,57 +495,82 @@ class SocialChat(commands.Cog):
         if not kind:
             return
 
-        direct_kind = kind in {"direct", "greeting", "thanks", "how_are_you"}
-        if mention_only and not direct_kind:
-            return
-
-        if not self._channel_ready(guild_id, message.channel.id):
-            return
-        if not self._user_ready(guild_id, message.author.id):
-            return
-
-        if not direct_kind:
-            roll = random.randint(1, 100)
-            if roll > chance_percent:
-                hours_silent = self._troll_hours_silent(guild_id, message.author.id)
-                should_troll = False
-                if len(message.content.split()) >= 4:
-                    if hours_silent >= 24:
-                        should_troll = True
-
-                if should_troll:
-                    try:
-                        troll_reply = await self._build_model_troll_reply(message)
-                        self._mark_troll(guild_id, message.author.id)
-                        asyncio.create_task(self._send_troll_later(message, troll_reply))
-                    except Exception:
-                        pass
+        explicit_address = _is_explicit_address(message, self.bot.user)
+        if not explicit_address:
+            # Ambient replies require two deliberate admin choices: opt-in mode
+            # and an allow-listed channel. Legacy chance settings alone cannot
+            # make the bot interrupt conversations.
+            if mention_only or not ambient_opt_in or not channel_ids:
                 return
 
-        reply = await self._build_fun_reply(message, kind)
-        meme_file = await self._maybe_build_meme(message, kind)
+        if not self._channel_ready(guild_id, message.channel.id, direct=explicit_address):
+            return
+        if not self._user_ready(guild_id, message.author.id, direct=explicit_address):
+            return
+
+        if not explicit_address:
+            roll = random.randint(1, 100)
+            if roll > chance_percent:
+                return
+
+        async with message.channel.typing():
+            reply = await self._build_fun_reply(message, kind)
+        meme_file = None if explicit_address else await self._maybe_build_meme(message, kind)
         try:
             if meme_file is not None:
-                await message.reply(
+                sent = await message.reply(
                     random.choice(MEME_REACTIONS),
                     file=meme_file,
                     mention_author=False,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                return
-            await message.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                stored_text = sent.content
+                provider = "meme"
+                model = ""
+                latency_ms = 0
+            else:
+                sent = await message.reply(
+                    reply.text,
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                stored_text = reply.text
+                provider = reply.provider
+                model = reply.model
+                latency_ms = reply.latency_ms
+            record_turn(
+                bot_message_id=sent.id,
+                source_message_id=message.id,
+                guild_id=guild_id,
+                channel_id=message.channel.id,
+                user_id=message.author.id,
+                user_text=message.content,
+                bot_text=stored_text,
+                provider=provider,
+                model=model,
+                latency_ms=latency_ms,
+            )
         except Exception:
             pass
 
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if self.bot.user and payload.user_id == self.bot.user.id:
+            return
+        score = {"👍": 1, "👎": -1}.get(str(payload.emoji))
+        if score is not None:
+            record_feedback(payload.message_id, payload.user_id, score)
+
     @chat_group.command(name="статус", description="Показать текущие настройки болтовни")
     async def статус(self, interaction: discord.Interaction):
-        enabled, chance_percent, mention_only, channel_ids, excluded_channel_ids = _get_config(interaction.guild.id)
+        enabled, chance_percent, mention_only, ambient_opt_in, channel_ids, excluded_channel_ids = _get_config(interaction.guild.id)
         channels = ", ".join(f"<#{cid}>" for cid in sorted(channel_ids)) if channel_ids else "все каналы"
         excluded = ", ".join(f"<#{cid}>" for cid in sorted(excluded_channel_ids)) if excluded_channel_ids else "нет"
         embed = discord.Embed(title="💬 Болтовня бота", color=discord.Color.blurple())
         embed.add_field(name="Включено", value="да" if enabled else "нет", inline=True)
         embed.add_field(name="Шанс автоответа", value=f"{chance_percent}%", inline=True)
         embed.add_field(name="Только при обращении", value="да" if mention_only else "нет", inline=True)
+        embed.add_field(name="Добровольный авточат", value="да" if ambient_opt_in else "нет", inline=True)
         embed.add_field(name="Каналы", value=channels, inline=False)
         embed.add_field(name="Исключения", value=excluded, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -572,7 +584,7 @@ class SocialChat(commands.Cog):
             ephemeral=True,
         )
 
-    @chat_group.command(name="шанс", description="(Админ) Шанс случайного ответа вне прямого обращения")
+    @chat_group.command(name="шанс", description="(Админ) Шанс ответа в добровольно включённых чат-каналах")
     @app_commands.checks.has_permissions(administrator=True)
     async def шанс(self, interaction: discord.Interaction, процент: app_commands.Range[int, 0, 100]):
         set_feature_payload(interaction.guild.id, FEATURE_SOCIAL_CHAT, {"chance_percent": int(процент)})
@@ -581,20 +593,31 @@ class SocialChat(commands.Cog):
             ephemeral=True,
         )
 
-    @chat_group.command(name="режим", description="(Админ) Только по обращению к боту или и обычная болтовня тоже")
+    @chat_group.command(name="режим", description="(Админ) Разрешить автоответы только в выбранных чат-каналах")
     @app_commands.checks.has_permissions(administrator=True)
     async def режим(self, interaction: discord.Interaction, только_по_обращению: bool):
-        set_feature_payload(interaction.guild.id, FEATURE_SOCIAL_CHAT, {"mention_only": bool(только_по_обращению)})
+        set_feature_payload(
+            interaction.guild.id,
+            FEATURE_SOCIAL_CHAT,
+            {
+                "mention_only": bool(только_по_обращению),
+                "ambient_opt_in": not bool(только_по_обращению),
+            },
+        )
         await interaction.response.send_message(
             "✅ Режим обновлён: "
-            + ("бот отвечает только при обращении к нему." if только_по_обращению else "бот может иногда влезать и сам."),
+            + (
+                "бот отвечает только при обращении к нему."
+                if только_по_обращению
+                else "автоответы разрешены только в явно выбранных командой /болтовня канал каналах."
+            ),
             ephemeral=True,
         )
 
     @chat_group.command(name="канал", description="(Админ) Разрешить или запретить болтовню в канале")
     @app_commands.checks.has_permissions(administrator=True)
     async def канал(self, interaction: discord.Interaction, канал: discord.TextChannel, включить: bool):
-        _, _, _, current, _ = _get_config(interaction.guild.id)
+        _, _, _, _, current, _ = _get_config(interaction.guild.id)
         if включить:
             current.add(канал.id)
             set_feature_channel(interaction.guild.id, FEATURE_SOCIAL_CHAT, канал.id, "allow", "Discord command")
@@ -634,7 +657,7 @@ class SocialChat(commands.Cog):
     @chat_group.command(name="исключения", description="(Админ) Показать каналы, где болтовня отключена")
     @app_commands.checks.has_permissions(administrator=True)
     async def chat_excluded_channels(self, interaction: discord.Interaction):
-        _, _, _, _, ids = _get_config(interaction.guild.id)
+        _, _, _, _, _, ids = _get_config(interaction.guild.id)
         text = ", ".join(f"<#{cid}>" for cid in sorted(ids)) if ids else "Исключений нет."
         await interaction.response.send_message(f"Каналы без болтовни: {text}", ephemeral=True)
 

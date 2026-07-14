@@ -27,6 +27,7 @@ SOCIAL_TABLES = (
     "steam_config",
     "wwm_config",
     "tax_config",
+    "activity_tracker_config",
 )
 BIRTHDAY_TABLES = ("birthday_config",)
 BACKUP_SUFFIX = "_legacy_backup"

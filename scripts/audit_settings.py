@@ -25,6 +25,10 @@ SOCIAL_LEGACY_TABLES = {
     "steam_config": "SELECT guild_id, notify_channel, discount_min_pct FROM steam_config",
     "wwm_config": "SELECT guild_id, welcome_channel_id, reception_channel_id, auto_nickname, nickname_template FROM wwm_config",
     "tax_config": "SELECT id, enabled, rate_pct, interval_h, last_run FROM tax_config",
+    "activity_tracker_config": (
+        "SELECT guild_id, channel_id, enabled, notify_starts, notify_ends, article_lookup "
+        "FROM activity_tracker_config"
+    ),
 }
 
 
@@ -196,6 +200,14 @@ def analyze_coverage(report: dict[str, Any]) -> dict[str, Any]:
             }
             if any(payload.get(key) != value for key, value in expected.items()):
                 issues.append(f"payload mismatch economy guild {row['guild_id']}")
+
+    for guild_id, _channel_id, enabled, _notify_starts, _notify_ends, _article_lookup in legacy.get(
+        "activity_tracker_config", []
+    ):
+        row = setting(guild_id, "activity_tracker")
+        if row:
+            if bool(row["enabled"]) != bool(enabled):
+                issues.append(f"enabled mismatch activity_tracker guild {guild_id}")
 
     legacy_rows = sum(len(rows) for rows in legacy.values())
     return {

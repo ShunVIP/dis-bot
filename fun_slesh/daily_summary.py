@@ -325,7 +325,7 @@ def _tracked_daily_lines(stats: dict) -> str:
     if stats.get("total_voice_s") or stats.get("top_voice"):
         lines.append("🎙️ голосовые сессии")
     if stats.get("total_game_s") or stats.get("top_games") or stats.get("top_game_users"):
-        lines.append("🎮 Discord-игры и игровые привычки")
+        lines.append("🎮 Discord-игры и игровое время")
     if stats.get("rep_events"):
         lines.append("⭐ Размер")
     if stats.get("toxic_count"):
@@ -338,7 +338,7 @@ def _tracked_weekly_lines(stats: dict) -> str:
     if stats.get("total_voice_s") or stats.get("top_voice"):
         lines.append("🎙️ голосовые сессии")
     if stats.get("top_games") or stats.get("top_game_users") or stats.get("top_heroes"):
-        lines.append("🎮 Discord-игры и игровые привычки")
+        lines.append("🎮 Discord-игры и игровое время")
     if stats.get("top_other_activities") or stats.get("top_activity_users"):
         lines.append("📡 прочие Discord-активности")
     if stats.get("top_balance") or stats.get("top_streaks"):

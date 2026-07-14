@@ -134,6 +134,15 @@ def ml_data_manifest(audit: dict[str, Any]) -> dict[str, Any]:
                 "inference_location": "vps",
                 "enforcement": "rules_only",
             },
+            "conversation_feedback": {
+                "database": "social",
+                "tables": ["conversation_turns", "conversation_feedback"],
+                "rows": table_index.get(("social", "conversation_turns"), 0),
+                "rated_rows": table_index.get(("social", "conversation_feedback"), 0),
+                "training_location": "local_pc",
+                "inference_location": "local_pc_via_tailscale",
+                "collection_policy": "explicit_bot_conversations_only",
+            },
         },
     }
 

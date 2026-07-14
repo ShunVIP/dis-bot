@@ -268,6 +268,14 @@ FEATURE_REGISTRY = (
         "settings_help": "Канал поздравлений и общий список дат рождения ниже на этой странице.",
     },
     {
+        "id": "activity_tracker",
+        "title": "Игровые активности",
+        "group": "Настройки сервера",
+        "description": "Тихий presence-трекинг и статистика игровых сессий без автоуведомлений.",
+        "channel_modes": (),
+        "settings_help": "Функция только собирает статистику для итогов и команды топа; сама в канал не пишет.",
+    },
+    {
         "id": "wwm_guild",
         "title": "WWM гильдия",
         "group": "Настройки сервера",
@@ -295,9 +303,9 @@ FEATURE_REGISTRY = (
         "id": "social_chat",
         "title": "Болтовня",
         "group": "Модерация",
-        "description": "Случайные ответы бота, шанс ответа и режимы.",
+        "description": "Ответы по обращению и добровольно включаемые разговорные каналы.",
         "channel_modes": ("allow", "exclude"),
-        "settings_help": "Каналы, где бот может отвечать сам, и каналы-исключения.",
+        "settings_help": "Без списка разрешённых каналов бот отвечает только на упоминание, имя или ответ на его сообщение.",
     },
     {
         "id": "voice_roles",
@@ -791,11 +799,10 @@ def _render_feature_registry(bot, guild_id: int = 0) -> str:
             if _feature_requires_restart(feature)
             else ""
         )
-        friendly_settings = (
-            _render_daily_summary_text_form(policy.extra or {})
-            if feature_id == "daily_summary"
-            else ""
-        )
+        if feature_id == "daily_summary":
+            friendly_settings = _render_daily_summary_text_form(policy.extra or {})
+        else:
+            friendly_settings = ""
         cards.append(
             f"""
             <article class="feature-card" id="feature-{escape(feature_id)}">

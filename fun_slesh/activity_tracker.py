@@ -1,43 +1,26 @@
 # -*- coding: utf-8 -*-
-"""
-General Discord activity tracker.
-
-Tracks rich presence activities, stores finished sessions, and can post short
-game haiku without real user mentions.
-"""
+"""Silent Discord presence tracking and on-demand activity statistics."""
 
 from __future__ import annotations
 
 import asyncio
-import html
-import hashlib
-import os
-import random
-import re
-import sqlite3
-import urllib.parse
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
-import aiohttp
 import discord
 from discord import app_commands
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from discord.ext import commands
-from core.settings_store import get_feature_policy
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "social.db"))
+from core.activity_service import is_activity_enabled, set_activity_enabled
+from core.activity_store import (
+    ensure_activity_tables,
+    finish_activity_session,
+    get_activity_top,
+    load_active_sessions,
+    remember_activity_start,
+)
+
+
 UTC = timezone.utc
-MSK = ZoneInfo("Europe/Moscow")
-WIKI_HEADERS = {"User-Agent": "ViPikBot/1.0 (Discord bot; private server)"}
-SEARCH_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; ViPikBot/1.0; Discord private server)",
-    "Accept-Language": "ru,en;q=0.8",
-}
-scheduler = AsyncIOScheduler(timezone=MSK)
-HABIT_MIN_DAYS = 4
-HABIT_WINDOW_MINUTES = 90
-HABIT_REMINDER_GRACE_MINUTES = 35
 
 TRACKED_TYPES = {
     discord.ActivityType.playing: "game",
@@ -55,960 +38,89 @@ TYPE_LABELS = {
     "competing": "соревнование",
 }
 
-GENERIC_OPENINGS = [
-    "Ночь у монитора.",
-    "Свет дрожит на клавишах.",
-    "Пиксели проснулись.",
-    "Тихий старт клиента.",
-    "Экран набирает дыхание.",
-    "Вечер стал загрузкой.",
-    "Курсор режет сумрак.",
-    "Сервер ловит искру.",
-    "Лаунчер щёлкнул тихо.",
-    "В окне растёт другой мир.",
-]
-
-GENERIC_ACTIONS = [
-    "{display_name} входит в {game}.",
-    "{display_name} открывает {game}.",
-    "{display_name} выбирает путь.",
-    "{display_name} снова в игре.",
-    "{game} зовёт {display_name}.",
-    "{display_name} ловит первый кадр.",
-    "{display_name} нажал продолжить.",
-    "{display_name} уходит за экран.",
-]
-
-GENERIC_ENDINGS = [
-    "Чат на миг притих.",
-    "Время пошло по кругу.",
-    "Discord всё записал.",
-    "Карта ждёт следов.",
-    "Сейв ещё впереди.",
-    "Шум кулеров как дождь.",
-    "Миникарта светится.",
-    "Ночь получила квест.",
-    "Пати ищет голос.",
-    "Тень легла на HUD.",
-]
-
-GENRE_STYLES = {
-    "moba": {
-        "needles": ("moba", "моба", "league of legends", "dota", "нексус", "линия", "чемпион"),
-        "openings": ["Линия встала туманом.", "Вард горит в кустах.", "Миньоны идут строем."],
-        "actions": ["{display_name} ловит тайминг.", "{display_name} держит линию.", "{game} зовёт к командной драке."],
-        "endings": ["Карта мигает тревогой.", "Объект ждёт ошибки.", "Пинг летит через реку."],
-    },
-    "racing": {
-        "needles": ("гонк", "racing", "race", "forza", "horizon", "машин", "авто", "трасс"),
-        "openings": ["Асфальт блестит жарой.", "Мотор будит рассвет.", "Пыль летит за спойлером."],
-        "actions": ["{display_name} давит газ.", "{display_name} ловит апекс.", "{game} зовёт на трассу."],
-        "endings": ["Шины пишут дугу.", "Финиш пахнет бензином.", "Радар мигает вдали."],
-    },
-    "strategy": {
-        "needles": ("стратег", "strategy", "пошаг", "тактик", "heroes of might", "homm", "цивилизац"),
-        "openings": ["Карта проснулась в тумане.", "Ход считает клетки.", "Ресурсы звенят под луной."],
-        "actions": ["{display_name} строит план.", "{display_name} ведёт отряд.", "{game} зовёт к долгому ходу."],
-        "endings": ["Флаг ждёт приказа.", "Очередь хода темнеет.", "Разведчик исчез за лесом."],
-    },
-    "rpg": {
-        "needles": ("rpg", "ролевая", "jrpg", "action rpg", "персонаж", "сюжет", "квест"),
-        "openings": ["Квест дрожит на карте.", "Инвентарь шуршит тихо.", "Город хранит побочный путь."],
-        "actions": ["{display_name} выбирает судьбу.", "{display_name} входит в историю.", "{game} раскрывает журнал."],
-        "endings": ["Диалог ждёт ответа.", "Сейв светится у двери.", "Лор ложится на ладонь."],
-    },
-    "shooter": {
-        "needles": ("шутер", "shooter", "fps", "стрел", "оруж", "тактический"),
-        "openings": ["Прицел режет дым.", "Шаги глохнут в коридоре.", "Раунд встаёт на паузу."],
-        "actions": ["{display_name} проверяет угол.", "{display_name} держит прицел.", "{game} зовёт на точку."],
-        "endings": ["Гильза стынет у стены.", "Радар молчит секунду.", "Пульс считает раунд."],
-    },
-    "anime": {
-        "needles": ("аниме", "anime", "gacha", "гача", "оператор", "отряд", "персонажи"),
-        "openings": ["Баннер мерцает в неоне.", "Отряд ждёт приказ.", "Арт сияет на экране."],
-        "actions": ["{display_name} собирает команду.", "{display_name} листает судьбу.", "{game} зовёт новых героев."],
-        "endings": ["Редкость шепчет из света.", "Скилл уходит в кулдаун.", "Меню пахнет надеждой."],
-    },
-    "horror": {
-        "needles": ("хоррор", "horror", "ужас", "страх", "выживание"),
-        "openings": ["Дверь скрипит без ветра.", "Фонарь дрожит в руке.", "Тень стоит за экраном."],
-        "actions": ["{display_name} идёт на звук.", "{display_name} экономит патроны.", "{game} прячет дыхание."],
-        "endings": ["Сейв далеко за спиной.", "Шорох гасит чат.", "Темнота считает шаги."],
-    },
-    "mmo": {
-        "needles": ("mmo", "мморпг", "mmorpg", "онлайн", "рейд", "гильд", "массовая"),
-        "openings": ["Город шумит никами.", "Рейд собирает голоса.", "Аукцион спит в углу."],
-        "actions": ["{display_name} входит в мир.", "{display_name} ищет пати.", "{game} открывает сервер."],
-        "endings": ["Чат торговли мерцает.", "Босс ждёт отката.", "Гильдия зовёт в ночь."],
-    },
-}
-
-
-def _ensure_tables():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS activity_tracker_config (
-                guild_id       INTEGER PRIMARY KEY,
-                channel_id     INTEGER,
-                enabled        INTEGER NOT NULL DEFAULT 1,
-                notify_starts  INTEGER NOT NULL DEFAULT 0,
-                notify_ends    INTEGER NOT NULL DEFAULT 0,
-                article_lookup INTEGER NOT NULL DEFAULT 1
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_sessions (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id      INTEGER NOT NULL,
-                user_id       INTEGER NOT NULL,
-                activity_name TEXT    NOT NULL,
-                activity_type TEXT    NOT NULL,
-                started_at    TEXT    NOT NULL,
-                ended_at      TEXT    NOT NULL,
-                seconds       INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_active_sessions (
-                guild_id      INTEGER NOT NULL,
-                user_id       INTEGER NOT NULL,
-                activity_name TEXT    NOT NULL,
-                activity_type TEXT    NOT NULL,
-                started_at    TEXT    NOT NULL,
-                PRIMARY KEY (guild_id, user_id, activity_name, activity_type)
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_article_cache (
-                activity_name TEXT NOT NULL,
-                lang          TEXT NOT NULL,
-                title         TEXT,
-                extract       TEXT,
-                url           TEXT,
-                fetched_at    TEXT NOT NULL,
-                PRIMARY KEY (activity_name, lang)
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_game_profiles (
-                activity_name TEXT PRIMARY KEY,
-                title         TEXT,
-                genre         TEXT,
-                keywords      TEXT,
-                source_text   TEXT,
-                source_url    TEXT,
-                fetched_at    TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_notice_log (
-                guild_id      INTEGER NOT NULL,
-                user_id       INTEGER NOT NULL,
-                activity_name TEXT    NOT NULL,
-                posted_at     TEXT    NOT NULL,
-                PRIMARY KEY (guild_id, user_id, activity_name)
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_haiku_history (
-                guild_id      INTEGER NOT NULL,
-                activity_name TEXT    NOT NULL,
-                haiku_text    TEXT    NOT NULL,
-                created_at    TEXT    NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_game_habits (
-                guild_id        INTEGER NOT NULL,
-                user_id         INTEGER NOT NULL,
-                activity_name   TEXT    NOT NULL,
-                expected_minute INTEGER NOT NULL,
-                sample_days     INTEGER NOT NULL,
-                active_from     TEXT    NOT NULL,
-                last_seen_date  TEXT,
-                last_reminded_date TEXT,
-                updated_at      TEXT    NOT NULL,
-                PRIMARY KEY (guild_id, user_id, activity_name)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_activity_sessions_guild_started
-                ON activity_sessions(guild_id, started_at);
-            CREATE INDEX IF NOT EXISTS idx_activity_sessions_guild_user
-                ON activity_sessions(guild_id, user_id);
-            CREATE INDEX IF NOT EXISTS idx_activity_haiku_history_game
-                ON activity_haiku_history(guild_id, activity_name, created_at);
-            CREATE INDEX IF NOT EXISTS idx_activity_game_habits_active
-                ON activity_game_habits(guild_id, active_from);
-            """
-        )
-        conn.commit()
-
 
 def _normalize_name(name: str) -> str:
     return " ".join((name or "").strip().split())
 
 
-def _activity_key(activity: discord.BaseActivity) -> tuple[str, str] | None:
-    name = _normalize_name(getattr(activity, "name", "") or "")
-    activity_type = TRACKED_TYPES.get(getattr(activity, "type", None))
-    if not name or not activity_type:
-        return None
-    return name, activity_type
-
-
 def _extract_activities(member: discord.Member) -> set[tuple[str, str]]:
-    found: set[tuple[str, str]] = set()
-    for activity in member.activities or []:
-        key = _activity_key(activity)
-        if key:
-            found.add(key)
-    return found
-
-
-def _fmt_seconds(sec: int) -> str:
-    sec = max(0, int(sec))
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    if h:
-        return f"{h}ч {m}м"
-    return f"{m}м"
-
-
-def _member_name(guild: discord.Guild, user_id: int) -> str:
-    member = guild.get_member(int(user_id))
-    return member.display_name if member else f"участник {user_id}"
-
-
-def _infer_genre(text: str) -> str:
-    normalized = text.lower()
-    scores: dict[str, int] = {}
-    for genre, style in GENRE_STYLES.items():
-        score = sum(1 for needle in style["needles"] if needle in normalized)
-        if score:
-            scores[genre] = score
-    if not scores:
-        return "generic"
-    return max(scores.items(), key=lambda item: item[1])[0]
-
-
-def _style_for_profile(profile: dict | None) -> dict:
-    merged = {
-        "openings": list(GENERIC_OPENINGS),
-        "actions": list(GENERIC_ACTIONS),
-        "endings": list(GENERIC_ENDINGS),
-    }
-    genre = (profile or {}).get("genre")
-    style = GENRE_STYLES.get(genre or "")
-    if style:
-        merged["openings"] = style["openings"] + merged["openings"]
-        merged["actions"] = style["actions"] + merged["actions"]
-        merged["endings"] = style["endings"] + merged["endings"]
-    return merged
-
-
-def _profile_words(profile: dict | None) -> list[str]:
-    if not profile:
-        return []
-    raw_keywords = profile.get("keywords") or []
-    if isinstance(raw_keywords, str):
-        raw_keywords = [w.strip() for w in raw_keywords.split(",") if w.strip()]
-    if raw_keywords:
-        return list(dict.fromkeys(str(w).lower() for w in raw_keywords))[:5]
-
-    text = " ".join(str(profile.get(key) or "") for key in ("title", "source_text"))
-    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9-]{3,}", text)
-    blocked = {
-        "игра", "игры", "video", "game", "games", "часть", "серия", "который", "которая",
-        "после", "была", "были", "это", "для", "with", "from", "обзор", "прохождение",
-    }
-    result = []
-    for word in words:
-        clean = word.strip(".,:;!?()[]{}").lower()
-        if clean in blocked or clean in result:
+    result: set[tuple[str, str]] = set()
+    for activity in member.activities:
+        activity_type = TRACKED_TYPES.get(activity.type)
+        if activity_type is None:
             continue
-        result.append(clean)
-        if len(result) >= 5:
-            break
+        name = _normalize_name(getattr(activity, "name", ""))
+        if name and name.lower() not in {"custom status", "пользовательский статус"}:
+            result.add((name, activity_type))
     return result
 
 
-def _compose_fallback_haiku(game_name: str, display_name: str, profile: dict | None) -> str:
-    rng = random.SystemRandom()
-    style = _style_for_profile(profile)
-    openings = list(style["openings"])
-    actions = list(style["actions"])
-    endings = list(style["endings"])
-
-    words = _profile_words(profile)
-    if words:
-        openings.extend([
-            f"{words[0].capitalize()} в тумане.",
-            f"Поиск шепчет: {words[0]}.",
-        ])
-    if len(words) > 1:
-        endings.extend([
-            f"{words[1].capitalize()} ждёт в углу.",
-            "Лор меняет дыхание.",
-        ])
-
-    return "\n".join(
-        [
-            rng.choice(openings),
-            rng.choice(actions).format(game=game_name, display_name=display_name),
-            rng.choice(endings),
-        ]
-    )
+def _fmt_seconds(seconds: int) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes = remainder // 60
+    if hours:
+        return f"{hours} ч {minutes} мин"
+    return f"{minutes} мин"
 
 
-async def _fetch_wiki_article(game_name: str) -> dict | None:
-    cache_key = game_name.lower()
-    fresh_after = datetime.now(UTC) - timedelta(days=14)
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            """
-            SELECT title, extract, url, fetched_at
-            FROM activity_article_cache
-            WHERE activity_name=? AND lang='ru'
-            """,
-            (cache_key,),
-        ).fetchone()
-        if row:
-            try:
-                fetched_at = datetime.fromisoformat(row[3])
-            except Exception:
-                fetched_at = datetime.min.replace(tzinfo=UTC)
-            if fetched_at >= fresh_after:
-                return {"title": row[0], "extract": row[1], "url": row[2], "lang": "ru"}
-
-    async def search(lang: str, query: str) -> dict | None:
-        base = f"https://{lang}.wikipedia.org/w/rest.php/v1"
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout, headers=WIKI_HEADERS) as session:
-            async with session.get(f"{base}/search/page", params={"q": query, "limit": 3}) as resp:
-                if resp.status != 200:
-                    return None
-                payload = await resp.json()
-            pages = payload.get("pages") or []
-            if not pages:
-                return None
-            best = pages[0]
-            key = best.get("key") or (best.get("title") or "").replace(" ", "_")
-            if not key:
-                return None
-            safe_key = urllib.parse.quote(key, safe="")
-            async with session.get(f"{base}/page/{safe_key}/summary") as resp:
-                if resp.status != 200:
-                    return None
-                summary = await resp.json()
-        title = summary.get("title") or key.replace("_", " ")
-        extract = summary.get("extract") or ""
-        url = f"https://{lang}.wikipedia.org/wiki/{urllib.parse.quote(key, safe='')}"
-        return {"title": title, "extract": extract[:900], "url": url, "lang": lang}
-
-    article = None
-    for lang, query in (("ru", f"{game_name} игра"), ("en", f"{game_name} video game")):
-        try:
-            article = await search(lang, query)
-        except Exception:
-            article = None
-        if article:
-            break
-
-    if article:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO activity_article_cache(activity_name, lang, title, extract, url, fetched_at)
-                VALUES(?,?,?,?,?,?)
-                ON CONFLICT(activity_name, lang) DO UPDATE SET
-                    title=excluded.title,
-                    extract=excluded.extract,
-                    url=excluded.url,
-                    fetched_at=excluded.fetched_at
-                """,
-                (cache_key, "ru", article["title"], article["extract"], article["url"], datetime.now(UTC).isoformat()),
-            )
-            conn.commit()
-    return article
-
-
-def _clean_search_text(value: str) -> str:
-    value = html.unescape(value or "")
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
-
-
-async def _fetch_ru_search_snippets(game_name: str) -> list[dict]:
-    query = f"{game_name} игра обзор геймплей"
-    url = "https://duckduckgo.com/html/"
-    params = {"q": query, "kl": "ru-ru"}
-    timeout = aiohttp.ClientTimeout(total=12)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout, headers=SEARCH_HEADERS) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                text = await resp.text()
-    except Exception:
-        return []
-
-    results = []
-    blocks = re.findall(r'<div class="result__body">(.*?)</div>\s*</div>', text, flags=re.S)
-    if not blocks:
-        blocks = re.findall(r'<div class="result results_links.*?">(.*?)</div>\s*</div>', text, flags=re.S)
-    for block in blocks[:5]:
-        title_match = re.search(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, flags=re.S)
-        snippet_match = re.search(r'class="result__snippet"[^>]*>(.*?)</a>|class="result__snippet"[^>]*>(.*?)</div>', block, flags=re.S)
-        if not title_match:
-            continue
-        raw_url = html.unescape(title_match.group(1))
-        title = _clean_search_text(title_match.group(2))
-        snippet_raw = ""
-        if snippet_match:
-            snippet_raw = snippet_match.group(1) or snippet_match.group(2) or ""
-        snippet = _clean_search_text(snippet_raw)
-        if title or snippet:
-            results.append({"title": title, "snippet": snippet, "url": raw_url})
-    return results
-
-
-def _extract_keywords(text: str, limit: int = 8) -> list[str]:
-    blocked = {
-        "игра", "игры", "игру", "игре", "игрой", "обзор", "геймплей", "прохождение",
-        "дата", "релиз", "трейлер", "скачать", "официальный", "official", "video",
-        "game", "games", "для", "или", "это", "как", "что", "with", "from", "about",
-        "steam", "страница", "сайт", "новости",
-    }
-    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9-]{3,}", (text or "").lower())
-    counts: dict[str, int] = {}
-    for word in words:
-        word = word.strip("-_")
-        if word in blocked or len(word) < 4:
-            continue
-        counts[word] = counts.get(word, 0) + 1
-    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    return [word for word, _ in ranked[:limit]]
-
-
-def _profile_from_cache(game_name: str) -> dict | None:
-    cache_key = game_name.lower()
-    fresh_after = datetime.now(UTC) - timedelta(days=14)
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            """
-            SELECT title, genre, keywords, source_text, source_url, fetched_at
-            FROM activity_game_profiles
-            WHERE activity_name=?
-            """,
-            (cache_key,),
-        ).fetchone()
-    if not row:
-        return None
-    try:
-        fetched_at = datetime.fromisoformat(row[5])
-        if fetched_at.tzinfo is None:
-            fetched_at = fetched_at.replace(tzinfo=UTC)
-    except Exception:
-        return None
-    if fetched_at < fresh_after:
-        return None
-    keywords = [w.strip() for w in (row[2] or "").split(",") if w.strip()]
-    return {
-        "title": row[0] or game_name,
-        "genre": row[1] or "generic",
-        "keywords": keywords,
-        "source_text": row[3] or "",
-        "source_url": row[4],
-    }
-
-
-def _save_profile(game_name: str, profile: dict):
-    cache_key = game_name.lower()
-    keywords = profile.get("keywords") or []
-    if not isinstance(keywords, str):
-        keywords = ", ".join(str(word) for word in keywords[:8])
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO activity_game_profiles(activity_name, title, genre, keywords, source_text, source_url, fetched_at)
-            VALUES(?,?,?,?,?,?,?)
-            ON CONFLICT(activity_name) DO UPDATE SET
-                title=excluded.title,
-                genre=excluded.genre,
-                keywords=excluded.keywords,
-                source_text=excluded.source_text,
-                source_url=excluded.source_url,
-                fetched_at=excluded.fetched_at
-            """,
-            (
-                cache_key,
-                profile.get("title") or game_name,
-                profile.get("genre") or "generic",
-                keywords,
-                (profile.get("source_text") or "")[:1600],
-                profile.get("source_url"),
-                datetime.now(UTC).isoformat(),
-            ),
-        )
-        conn.commit()
-
-
-async def _fetch_game_profile(game_name: str) -> dict:
-    cached = _profile_from_cache(game_name)
-    if cached:
-        return cached
-
-    article = await _fetch_wiki_article(game_name)
-    snippets = await _fetch_ru_search_snippets(game_name)
-    snippet_text = " ".join(
-        f"{item.get('title', '')}. {item.get('snippet', '')}" for item in snippets
-    )
-    source_text = " ".join(
-        part for part in [
-            article.get("title", "") if article else "",
-            article.get("extract", "") if article else "",
-            snippet_text,
-        ] if part
-    )
-    title = (article or {}).get("title") or (snippets[0]["title"] if snippets else game_name)
-    source_url = (article or {}).get("url") or (snippets[0]["url"] if snippets else None)
-    profile = {
-        "title": title,
-        "genre": _infer_genre(f"{game_name} {source_text}"),
-        "keywords": _extract_keywords(source_text),
-        "source_text": source_text[:1600],
-        "source_url": source_url,
-    }
-    _save_profile(game_name, profile)
-    return profile
-
-
-def _recent_haikus(guild_id: int, game_name: str, limit: int = 20) -> set[str]:
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            """
-            SELECT haiku_text FROM activity_haiku_history
-            WHERE guild_id=? AND activity_name=?
-            ORDER BY created_at DESC LIMIT ?
-            """,
-            (guild_id, game_name, limit),
-        ).fetchall()
-    return {str(row[0]) for row in rows}
-
-
-def _remember_haiku(guild_id: int, game_name: str, haiku: str):
-    cutoff = (datetime.now(UTC) - timedelta(days=14)).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO activity_haiku_history(guild_id, activity_name, haiku_text, created_at)
-            VALUES(?,?,?,?)
-            """,
-            (guild_id, game_name, haiku, datetime.now(UTC).isoformat()),
-        )
-        conn.execute("DELETE FROM activity_haiku_history WHERE created_at<?", (cutoff,))
-        conn.commit()
-
-
-def _msk_minute_of_day(dt: datetime) -> int:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    local = dt.astimezone(MSK)
-    return local.hour * 60 + local.minute
-
-
-def _fmt_clock(minute_of_day: int) -> str:
-    minute_of_day %= 24 * 60
-    return f"{minute_of_day // 60:02d}:{minute_of_day % 60:02d} MSK"
-
-
-def _stable_daily_offset(guild_id: int, user_id: int, activity_name: str, day: str) -> int:
-    seed = f"{guild_id}:{user_id}:{activity_name}:{day}".encode("utf-8", errors="ignore")
-    digest = hashlib.sha256(seed).hexdigest()
-    return int(digest[:8], 16) % (HABIT_REMINDER_GRACE_MINUTES + 1)
-
-
-def _mark_habit_seen(guild_id: int, user_id: int, activity_name: str):
-    today = datetime.now(MSK).date().isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            UPDATE activity_game_habits
-            SET last_seen_date=?, updated_at=?
-            WHERE guild_id=? AND user_id=? AND activity_name=?
-            """,
-            (today, datetime.now(UTC).isoformat(), guild_id, user_id, activity_name),
-        )
-        conn.commit()
-
-
-def _detect_activity_habits_for_guild(guild_id: int):
-    now_msk = datetime.now(MSK)
-    today = now_msk.date()
-    start_utc = datetime.combine(today - timedelta(days=7), datetime.min.time(), MSK).astimezone(UTC).isoformat()
-    end_utc = datetime.combine(today, datetime.min.time(), MSK).astimezone(UTC).isoformat()
-
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            """
-            SELECT user_id, activity_name, activity_type, started_at
-            FROM activity_sessions
-            WHERE guild_id=? AND started_at>=? AND started_at<?
-              AND activity_type IN ('game','streaming','listening','watching','competing')
-            ORDER BY user_id, activity_name, activity_type, started_at
-            """,
-            (guild_id, start_utc, end_utc),
-        ).fetchall()
-
-        grouped: dict[tuple[int, str], dict[str, int]] = {}
-        for user_id, activity_name, activity_type, started_at in rows:
-            try:
-                dt = datetime.fromisoformat(started_at)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
-            except Exception:
-                continue
-            local = dt.astimezone(MSK)
-            day = local.date().isoformat()
-            minute = local.hour * 60 + local.minute
-            label = TYPE_LABELS.get(str(activity_type), str(activity_type))
-            display_name = str(activity_name) if str(activity_type) == "game" else f"{str(activity_name)} ({label})"
-            key = (int(user_id), display_name)
-            day_map = grouped.setdefault(key, {})
-            day_map.setdefault(day, minute)
-
-        for (user_id, activity_name), day_map in grouped.items():
-            if len(day_map) < HABIT_MIN_DAYS:
-                continue
-            minutes = sorted(day_map.values())
-            if max(minutes) - min(minutes) > HABIT_WINDOW_MINUTES:
-                continue
-            expected = int(sum(minutes) / len(minutes))
-            active_from = (today + timedelta(days=7)).isoformat()
-            conn.execute(
-                """
-                INSERT INTO activity_game_habits(
-                    guild_id, user_id, activity_name, expected_minute, sample_days,
-                    active_from, last_seen_date, last_reminded_date, updated_at
-                )
-                VALUES(?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(guild_id, user_id, activity_name) DO UPDATE SET
-                    expected_minute=excluded.expected_minute,
-                    sample_days=excluded.sample_days,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    guild_id,
-                    user_id,
-                    activity_name,
-                    expected,
-                    len(day_map),
-                    active_from,
-                    None,
-                    None,
-                    datetime.now(UTC).isoformat(),
-                ),
-            )
-        conn.commit()
-
-
-def _habit_joke(user_id: int, activity_name: str) -> str:
-    try:
-        from fun_slesh.parody_engine import generate_phrase, model_exists
-        for quality in ("мем", "разум"):
-            if model_exists(user_id, quality):
-                phrase = generate_phrase(user_id, quality)
-                if phrase:
-                    return f"{activity_name}: ты обычно уже там. Модель шепчет твоим стилем: «{phrase}»"
-    except Exception:
-        pass
-    fallbacks = [
-        f"{activity_name}: расписание скучает. Где наш законный вечерний заход?",
-        f"{activity_name}: сервер заметил пустой слот и сделал вид, что он календарь.",
-        f"{activity_name}: привычка пришла, а участника нет. Неловко вышло.",
-        f"{activity_name}: этот таймслот уже прогрет, можно заходить.",
-    ]
-    return random.choice(fallbacks)
-
-
-async def _generate_game_haiku(guild_id: int, game_name: str, display_name: str, profile: dict | None) -> str:
-    recent = _recent_haikus(guild_id, game_name)
-    haiku = ""
-    for _ in range(16):
-        candidate = _compose_fallback_haiku(game_name, display_name, profile)
-        if candidate not in recent:
-            haiku = candidate
-            break
-    if not haiku:
-        haiku = _compose_fallback_haiku(game_name, display_name, profile)
-    _remember_haiku(guild_id, game_name, haiku)
-    return haiku
+def _member_name(guild: discord.Guild, user_id: int) -> str:
+    member = guild.get_member(user_id)
+    return member.display_name if member else f"участник {user_id}"
 
 
 class ActivityTracker(commands.Cog):
     activity_group = app_commands.Group(
         name="активности",
-        description="Трекинг Discord-активностей и игр",
+        description="Тихий трекинг Discord-активностей и игр",
     )
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._active: dict[tuple[int, int, str, str], datetime] = {}
-        _ensure_tables()
+        ensure_activity_tables()
         self._load_active_sessions()
-        if not scheduler.running:
-            scheduler.start()
-        scheduler.add_job(
-            self._habit_tick,
-            "interval",
-            minutes=15,
-            id="activity_habit_tick",
-            replace_existing=True,
-            max_instances=1,
-        )
 
-    def _load_active_sessions(self):
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                "SELECT guild_id, user_id, activity_name, activity_type, started_at FROM activity_active_sessions"
-            ).fetchall()
-        for guild_id, user_id, name, activity_type, started_at in rows:
+    def _load_active_sessions(self) -> None:
+        for guild_id, user_id, name, activity_type, started_at in load_active_sessions():
             try:
-                started_dt = datetime.fromisoformat(started_at)
-                if started_dt.tzinfo is None:
-                    started_dt = started_dt.replace(tzinfo=UTC)
-            except Exception:
-                started_dt = datetime.now(UTC)
-            self._active[(int(guild_id), int(user_id), str(name), str(activity_type))] = started_dt
+                started = datetime.fromisoformat(started_at)
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=UTC)
+            except (TypeError, ValueError):
+                started = datetime.now(UTC)
+            self._active[(guild_id, user_id, name, activity_type)] = started
 
     @commands.Cog.listener()
     async def on_ready(self):
         asyncio.create_task(self._reconcile_active_sessions())
 
-    def _remember(self, guild_id: int, user_id: int, name: str, activity_type: str):
-        now = datetime.now(UTC)
-        key = (guild_id, user_id, name, activity_type)
-        self._active[key] = now
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO activity_active_sessions(guild_id, user_id, activity_name, activity_type, started_at)
-                VALUES(?,?,?,?,?)
-                ON CONFLICT(guild_id, user_id, activity_name, activity_type) DO UPDATE SET
-                    started_at=excluded.started_at
-                """,
-                (guild_id, user_id, name, activity_type, now.isoformat()),
-            )
-            conn.commit()
-        habit_name = name if activity_type == "game" else f"{name} ({TYPE_LABELS.get(activity_type, activity_type)})"
-        _mark_habit_seen(guild_id, user_id, habit_name)
+    def _remember(self, guild_id: int, user_id: int, name: str, activity_type: str) -> None:
+        started = datetime.now(UTC)
+        self._active[(guild_id, user_id, name, activity_type)] = started
+        remember_activity_start(
+            guild_id,
+            user_id,
+            name,
+            activity_type,
+            started_at=started,
+        )
 
     def _finish(self, guild_id: int, user_id: int, name: str, activity_type: str) -> int:
-        key = (guild_id, user_id, name, activity_type)
-        started_at = self._active.pop(key, None)
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                """
-                SELECT started_at FROM activity_active_sessions
-                WHERE guild_id=? AND user_id=? AND activity_name=? AND activity_type=?
-                """,
-                (guild_id, user_id, name, activity_type),
-            ).fetchone()
-            conn.execute(
-                """
-                DELETE FROM activity_active_sessions
-                WHERE guild_id=? AND user_id=? AND activity_name=? AND activity_type=?
-                """,
-                (guild_id, user_id, name, activity_type),
-            )
-            if started_at is None and row:
-                try:
-                    started_at = datetime.fromisoformat(row[0])
-                    if started_at.tzinfo is None:
-                        started_at = started_at.replace(tzinfo=UTC)
-                except Exception:
-                    started_at = None
-            if started_at is None:
-                conn.commit()
-                return 0
-            ended_at = datetime.now(UTC)
-            seconds = int((ended_at - started_at).total_seconds())
-            if seconds > 0:
-                conn.execute(
-                    """
-                    INSERT INTO activity_sessions(guild_id, user_id, activity_name, activity_type, started_at, ended_at, seconds)
-                    VALUES(?,?,?,?,?,?,?)
-                    """,
-                    (guild_id, user_id, name, activity_type, started_at.isoformat(), ended_at.isoformat(), seconds),
-                )
-            conn.commit()
-        return max(0, seconds)
-
-    def _config(self, guild_id: int) -> dict:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("INSERT OR IGNORE INTO activity_tracker_config(guild_id) VALUES(?)", (guild_id,))
-            row = conn.execute(
-                """
-                SELECT channel_id, enabled, notify_starts, notify_ends, article_lookup
-                FROM activity_tracker_config WHERE guild_id=?
-                """,
-                (guild_id,),
-            ).fetchone()
-            conn.commit()
-        return {
-            "channel_id": row[0],
-            "enabled": bool(row[1]),
-            "notify_starts": bool(row[2]),
-            "notify_ends": bool(row[3]),
-            "article_lookup": bool(row[4]),
-        }
-
-    def _pick_channel(self, guild: discord.Guild, cfg: dict) -> discord.TextChannel | None:
-        channel_id = cfg.get("channel_id")
-        channel = self.bot.get_channel(channel_id) if channel_id else None
-        if isinstance(channel, discord.TextChannel):
-            return channel
-
-        summary_policy = get_feature_policy(guild.id, "daily_summary")
-        channel = self.bot.get_channel(summary_policy.output_channel_id) if summary_policy.output_channel_id else None
-        if isinstance(channel, discord.TextChannel):
-            return channel
-        return guild.system_channel
-
-    def _notice_recently_posted(self, guild_id: int, user_id: int, name: str, cooldown_minutes: int = 90) -> bool:
-        fresh_after = datetime.now(UTC) - timedelta(minutes=cooldown_minutes)
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                """
-                SELECT posted_at FROM activity_notice_log
-                WHERE guild_id=? AND user_id=? AND activity_name=?
-                """,
-                (guild_id, user_id, name),
-            ).fetchone()
-            if not row:
-                return False
-            try:
-                posted_at = datetime.fromisoformat(row[0])
-                if posted_at.tzinfo is None:
-                    posted_at = posted_at.replace(tzinfo=UTC)
-            except Exception:
-                return False
-        return posted_at >= fresh_after
-
-    def _remember_notice(self, guild_id: int, user_id: int, name: str):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO activity_notice_log(guild_id, user_id, activity_name, posted_at)
-                VALUES(?,?,?,?)
-                ON CONFLICT(guild_id, user_id, activity_name) DO UPDATE SET
-                    posted_at=excluded.posted_at
-                """,
-                (guild_id, user_id, name, datetime.now(UTC).isoformat()),
-            )
-            conn.commit()
-
-    async def _send_start_notice(self, member: discord.Member, name: str, activity_type: str):
-        # Activity starts are tracked silently; summaries and habit reminders carry the signal.
-        return
-        cfg = self._config(member.guild.id)
-        if not cfg["enabled"] or not cfg["notify_starts"] or activity_type != "game":
-            return
-        if self._notice_recently_posted(member.guild.id, member.id, name):
-            return
-        channel = self._pick_channel(member.guild, cfg)
-        if channel is None:
-            return
-        profile = await _fetch_game_profile(name) if cfg["article_lookup"] else {"title": name, "genre": "generic", "keywords": []}
-        haiku = await _generate_game_haiku(member.guild.id, name, member.display_name, profile)
-        embed = discord.Embed(
-            title=f"{member.display_name} запустил {name}",
-            description=f"*{haiku}*",
-            color=discord.Color.dark_teal(),
+        started = self._active.pop((guild_id, user_id, name, activity_type), None)
+        return finish_activity_session(
+            guild_id,
+            user_id,
+            name,
+            activity_type,
+            cached_started_at=started,
         )
-        if profile and profile.get("source_url"):
-            embed.add_field(
-                name="Контекст",
-                value=f"[{profile.get('title') or name}]({profile['source_url']}) · {profile.get('genre') or 'игра'}",
-                inline=False,
-            )
-        try:
-            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-            self._remember_notice(member.guild.id, member.id, name)
-        except Exception:
-            pass
 
-    async def _send_end_notice(self, member: discord.Member, name: str, activity_type: str, seconds: int):
-        # Activity ends are tracked silently to keep the channel free of presence spam.
-        return
-        cfg = self._config(member.guild.id)
-        if not cfg["enabled"] or not cfg["notify_ends"]:
-            return
-        channel = self._pick_channel(member.guild, cfg)
-        if channel is None:
-            return
-        label = TYPE_LABELS.get(activity_type, activity_type)
-        try:
-            await channel.send(
-                f"{member.display_name} завершил {label} **{name}**: {_fmt_seconds(seconds)}.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception:
-            pass
-
-    async def _habit_tick(self):
+    async def _reconcile_active_sessions(self) -> None:
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
-            _detect_activity_habits_for_guild(guild.id)
-            await self._send_due_habit_reminders(guild)
-
-    async def _send_due_habit_reminders(self, guild: discord.Guild):
-        cfg = self._config(guild.id)
-        if not cfg["enabled"]:
-            return
-        channel = self._pick_channel(guild, cfg)
-        if channel is None:
-            return
-
-        now_msk = datetime.now(MSK)
-        today = now_msk.date().isoformat()
-        minute_now = now_msk.hour * 60 + now_msk.minute
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                """
-                SELECT user_id, activity_name, expected_minute, last_seen_date, last_reminded_date
-                FROM activity_game_habits
-                WHERE guild_id=? AND active_from<=?
-                """,
-                (guild.id, today),
-            ).fetchall()
-
-        for user_id, game_name, expected_minute, last_seen_date, last_reminded_date in rows:
-            if last_seen_date == today or last_reminded_date == today:
+            if not is_activity_enabled(guild.id):
                 continue
-            scheduled = (int(expected_minute) + _stable_daily_offset(guild.id, int(user_id), str(game_name), today)) % (24 * 60)
-            if minute_now < scheduled:
-                continue
-            member = guild.get_member(int(user_id))
-            display_name = member.display_name if member else f"участник {user_id}"
-            joke = _habit_joke(int(user_id), str(game_name))
-            content = f"**{game_name}** · {display_name}, обычно около {_fmt_clock(int(expected_minute))}.\n{joke}"
-            try:
-                await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
-                with sqlite3.connect(DB_PATH) as conn:
-                    conn.execute(
-                        """
-                        UPDATE activity_game_habits
-                        SET last_reminded_date=?, updated_at=?
-                        WHERE guild_id=? AND user_id=? AND activity_name=?
-                        """,
-                        (today, datetime.now(UTC).isoformat(), guild.id, int(user_id), str(game_name)),
-                    )
-                    conn.commit()
-            except Exception:
-                pass
-
-    async def _reconcile_active_sessions(self):
-        await self.bot.wait_until_ready()
-        for guild in self.bot.guilds:
-            _detect_activity_habits_for_guild(guild.id)
-        for guild in self.bot.guilds:
             for member in guild.members:
                 if member.bot:
                     continue
@@ -1020,164 +132,89 @@ class ActivityTracker(commands.Cog):
         for guild_id, user_id, name, activity_type in list(self._active):
             guild = self.bot.get_guild(guild_id)
             member = guild.get_member(user_id) if guild else None
-            if member is None:
-                continue
-            if (name, activity_type) not in _extract_activities(member):
+            if member is not None and (name, activity_type) not in _extract_activities(member):
                 self._finish(guild_id, user_id, name, activity_type)
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
         if after.bot or not after.guild:
             return
-        before_items = _extract_activities(before)
-        after_items = _extract_activities(after)
-
-        for name, activity_type in sorted(before_items - after_items):
-            seconds = self._finish(after.guild.id, after.id, name, activity_type)
-            if seconds:
-                await self._send_end_notice(after, name, activity_type, seconds)
-
-        for name, activity_type in sorted(after_items - before_items):
-            self._remember(after.guild.id, after.id, name, activity_type)
-            await self._send_start_notice(after, name, activity_type)
-
-    @activity_group.command(name="канал", description="(Админ) Канал для постов об игровых активностях")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def активности_канал(self, interaction: discord.Interaction, канал: discord.TextChannel):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO activity_tracker_config(guild_id, channel_id, enabled)
-                VALUES(?,?,1)
-                ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id, enabled=1
-                """,
-                (interaction.guild.id, канал.id),
-            )
-            conn.commit()
-        await interaction.response.send_message(
-            f"✅ Игровые хокку и топы активностей будут идти в {канал.mention}.",
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-    @activity_group.command(name="вкл", description="(Админ) Включить или выключить трекинг активностей")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def активности_вкл(self, interaction: discord.Interaction, включить: bool):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO activity_tracker_config(guild_id, enabled)
-                VALUES(?,?)
-                ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled
-                """,
-                (interaction.guild.id, int(включить)),
-            )
-            conn.commit()
-        status = "✅ Включён" if включить else "⛔ Выключен"
-        await interaction.response.send_message(f"{status} трекинг активностей.", ephemeral=True)
-
-    @activity_group.command(name="посты", description="(Админ) Настроить посты о старте/конце активностей")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def активности_посты(
-        self,
-        interaction: discord.Interaction,
-        старты_игр: bool = False,
-        окончания: bool = False,
-        статьи: bool = True,
-    ):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO activity_tracker_config(guild_id, notify_starts, notify_ends, article_lookup)
-                VALUES(?,?,?,?)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    notify_starts=excluded.notify_starts,
-                    notify_ends=excluded.notify_ends,
-                    article_lookup=excluded.article_lookup
-                """,
-                (interaction.guild.id, int(старты_игр), int(окончания), int(статьи)),
-            )
-            conn.commit()
-        await interaction.response.send_message("✅ Настройки постов активностей обновлены.", ephemeral=True)
-
-    @activity_group.command(name="топ", description="Топ активностей за N дней")
-    async def активности_топ(self, interaction: discord.Interaction, дней: app_commands.Range[int, 1, 365] = 7):
-        await interaction.response.defer()
-        since = (datetime.now(UTC) - timedelta(days=int(дней))).isoformat()
-        with sqlite3.connect(DB_PATH) as conn:
-            top_games = conn.execute(
-                """
-                SELECT activity_name, SUM(seconds) AS total
-                FROM activity_sessions
-                WHERE guild_id=? AND started_at>=? AND activity_type='game'
-                GROUP BY activity_name
-                ORDER BY total DESC LIMIT 10
-                """,
-                (interaction.guild.id, since),
-            ).fetchall()
-            top_game_users = conn.execute(
-                """
-                SELECT user_id, SUM(seconds) AS total
-                FROM activity_sessions
-                WHERE guild_id=? AND started_at>=? AND activity_type='game'
-                GROUP BY user_id
-                ORDER BY total DESC LIMIT 10
-                """,
-                (interaction.guild.id, since),
-            ).fetchall()
-            other_activities = conn.execute(
-                """
-                SELECT activity_name, activity_type, SUM(seconds) AS total
-                FROM activity_sessions
-                WHERE guild_id=? AND started_at>=? AND activity_type<>'game'
-                GROUP BY activity_name, activity_type
-                ORDER BY total DESC LIMIT 10
-                """,
-                (interaction.guild.id, since),
-            ).fetchall()
-            top_all_users = conn.execute(
-                """
-                SELECT user_id, SUM(seconds) AS total
-                FROM activity_sessions
-                WHERE guild_id=? AND started_at>=?
-                GROUP BY user_id
-                ORDER BY total DESC LIMIT 10
-                """,
-                (interaction.guild.id, since),
-            ).fetchall()
-
-        if not top_games and not top_game_users and not other_activities and not top_all_users:
-            await interaction.followup.send("📭 Пока нет завершённых активностей за выбранный период.")
+        if not is_activity_enabled(after.guild.id):
+            for guild_id, user_id, name, activity_type in list(self._active):
+                if guild_id == after.guild.id and user_id == after.id:
+                    self._finish(guild_id, user_id, name, activity_type)
             return
 
-        def other_activity_line(i: int, row: tuple) -> str:
-            name, activity_type, total = row
-            label = TYPE_LABELS.get(activity_type, activity_type)
-            return f"**{i}.** {name} ({label}) — **{_fmt_seconds(int(total))}**"
+        before_items = _extract_activities(before)
+        after_items = _extract_activities(after)
+        for name, activity_type in sorted(before_items - after_items):
+            self._finish(after.guild.id, after.id, name, activity_type)
+        for name, activity_type in sorted(after_items - before_items):
+            self._remember(after.guild.id, after.id, name, activity_type)
+
+    @activity_group.command(name="вкл", description="(Админ) Включить или выключить тихий трекинг")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def активности_вкл(self, interaction: discord.Interaction, включить: bool):
+        set_activity_enabled(interaction.guild.id, включить)
+        status = "✅ Включён" if включить else "⛔ Выключен"
+        await interaction.response.send_message(
+            f"{status} тихий трекинг активностей.",
+            ephemeral=True,
+        )
+
+    @activity_group.command(name="топ", description="Топ активностей за N дней")
+    async def активности_топ(
+        self,
+        interaction: discord.Interaction,
+        дней: app_commands.Range[int, 1, 365] = 7,
+    ):
+        await interaction.response.defer()
+        since = (datetime.now(UTC) - timedelta(days=int(дней))).isoformat()
+        stats = get_activity_top(interaction.guild.id, since)
+        top_games = stats["top_games"]
+        top_game_users = stats["top_game_users"]
+        other_activities = stats["other_activities"]
+        top_all_users = stats["top_all_users"]
+
+        if not any((top_games, top_game_users, other_activities, top_all_users)):
+            await interaction.followup.send(
+                "📭 Пока нет завершённых активностей за выбранный период."
+            )
+            return
 
         game_lines = [
-            f"**{i}.** {name} — **{_fmt_seconds(int(total))}**"
-            for i, (name, total) in enumerate(top_games, start=1)
+            f"**{index}.** {name} — **{_fmt_seconds(int(total))}**"
+            for index, (name, total) in enumerate(top_games, start=1)
         ]
         game_user_lines = [
-            f"**{i}.** {_member_name(interaction.guild, int(user_id))} — **{_fmt_seconds(int(total))}**"
-            for i, (user_id, total) in enumerate(top_game_users, start=1)
+            f"**{index}.** {_member_name(interaction.guild, int(user_id))} — **{_fmt_seconds(int(total))}**"
+            for index, (user_id, total) in enumerate(top_game_users, start=1)
         ]
-        other_lines = [other_activity_line(i, row) for i, row in enumerate(other_activities, start=1)]
+        other_lines = [
+            f"**{index}.** {name} ({TYPE_LABELS.get(activity_type, activity_type)}) — **{_fmt_seconds(int(total))}**"
+            for index, (name, activity_type, total) in enumerate(other_activities, start=1)
+        ]
         all_user_lines = [
-            f"**{i}.** {_member_name(interaction.guild, int(user_id))} — **{_fmt_seconds(int(total))}**"
-            for i, (user_id, total) in enumerate(top_all_users, start=1)
+            f"**{index}.** {_member_name(interaction.guild, int(user_id))} — **{_fmt_seconds(int(total))}**"
+            for index, (user_id, total) in enumerate(top_all_users, start=1)
         ]
-        embed = discord.Embed(title=f"🎮 Активности за {дней} дн.", color=discord.Color.teal())
-        if game_lines:
-            embed.add_field(name="Топ игр", value="\n".join(game_lines), inline=False)
-        if game_user_lines:
-            embed.add_field(name="Топ игроков по играм", value="\n".join(game_user_lines), inline=False)
-        if other_lines:
-            embed.add_field(name="Другие активности", value="\n".join(other_lines), inline=False)
-        if all_user_lines:
-            embed.add_field(name="Все активности по участникам", value="\n".join(all_user_lines), inline=False)
-        await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+        embed = discord.Embed(
+            title=f"🎮 Активности за {дней} дн.",
+            color=discord.Color.teal(),
+        )
+        for title, lines in (
+            ("Топ игр", game_lines),
+            ("Топ игроков по играм", game_user_lines),
+            ("Другие активности", other_lines),
+            ("Все активности по участникам", all_user_lines),
+        ):
+            if lines:
+                embed.add_field(name=title, value="\n".join(lines), inline=False)
+        await interaction.followup.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def setup(bot: commands.Bot):
