@@ -34,6 +34,9 @@ def _count(conn: sqlite3.Connection, table: str) -> int:
 
 def build_report() -> dict[str, object]:
     with sqlite3.connect(SOCIAL_DB) as conn:
+        existing_tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
         counts = {table: _count(conn, table) for table in TABLES}
         channels = conn.execute(
             "SELECT id, name FROM platform_text_channels ORDER BY id"
@@ -46,6 +49,7 @@ def build_report() -> dict[str, object]:
         ).fetchall() if counts["platform_messages"] else []
     return {
         "database": SOCIAL_DB,
+        "present": {table: table in existing_tables for table in TABLES},
         "counts": counts,
         "channels": [{"id": row[0], "name": row[1]} for row in channels],
         "web_sources": dict(web_sources),
