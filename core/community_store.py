@@ -260,11 +260,13 @@ def get_user_roles(discord_user_id: int) -> list[dict[str, Any]]:
     ]
 
 
-def ensure_first_owner(discord_user_id: int):
+def ensure_first_owner(discord_user_id: int, *, bootstrap_allowed: bool = False) -> bool:
+    if not bootstrap_allowed:
+        return False
     ensure_community_tables()
     now = _now()
     with db_connection(SOCIAL_DB) as conn:
-        row = conn.execute("SELECT COUNT(*) FROM community_user_roles").fetchone()
+        row = conn.execute("SELECT COUNT(*) FROM community_user_roles WHERE role_slug='owner'").fetchone()
         if int(row[0] or 0) == 0:
             conn.execute(
                 """
@@ -274,6 +276,8 @@ def ensure_first_owner(discord_user_id: int):
                 (int(discord_user_id), now),
             )
             conn.commit()
+            return True
+    return False
 
 
 def has_admin_access(discord_user_id: int) -> bool:

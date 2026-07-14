@@ -20,6 +20,8 @@ from aiohttp import web
 from config import (
     APP_API_HOST,
     APP_API_PORT,
+    APP_ALLOWED_GUILD_IDS,
+    APP_OWNER_USER_IDS,
     BOT_API_TOKEN,
     DISCORD_CLIENT_ID,
     DISCORD_CLIENT_SECRET,
@@ -124,6 +126,32 @@ LOGIN_WINDOW_SECONDS = 5 * 60
 LOGIN_ATTEMPT_LIMIT = 10
 
 
+def _id_set(value: str) -> frozenset[int]:
+    result = set()
+    for item in str(value or "").split(","):
+        try:
+            parsed = int(item.strip())
+        except ValueError:
+            continue
+        if parsed > 0:
+            result.add(parsed)
+    return frozenset(result)
+
+
+ALLOWED_GUILD_IDS = _id_set(APP_ALLOWED_GUILD_IDS)
+OWNER_USER_IDS = _id_set(APP_OWNER_USER_IDS)
+
+
+def _has_allowed_guild(raw_guilds: object) -> bool:
+    if not ALLOWED_GUILD_IDS or not isinstance(raw_guilds, list):
+        return False
+    member_guild_ids = {
+        int(item["id"])
+        for item in raw_guilds if isinstance(item, dict) and str(item.get("id") or "").isdigit()
+    }
+    return bool(ALLOWED_GUILD_IDS.intersection(member_guild_ids))
+
+
 def _json(data, status: int = 200):
     return web.Response(
         text=json.dumps(data, ensure_ascii=False),
@@ -141,11 +169,26 @@ def _current_user(request: web.Request):
 
 
 def _secure_cookie(request: web.Request) -> bool:
-    return request.secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+    forwarded_https = (
+        request.remote in {"127.0.0.1", "::1"}
+        and request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+    )
+    return request.secure or forwarded_https
 
 
 def _client_ip(request: web.Request) -> str:
     return request.remote or "unknown"
+
+
+def _connect_sources() -> str:
+    sources = ["'self'"]
+    parsed = urlparse(LIVEKIT_URL)
+    if parsed.netloc:
+        if parsed.scheme in {"wss", "https"}:
+            sources.extend((f"wss://{parsed.netloc}", f"https://{parsed.netloc}"))
+        elif parsed.scheme in {"ws", "http"}:
+            sources.extend((f"ws://{parsed.netloc}", f"http://{parsed.netloc}"))
+    return " ".join(dict.fromkeys(sources))
 
 
 @web.middleware
@@ -163,12 +206,19 @@ async def security_middleware(request: web.Request, handler):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Permissions-Policy"] = "camera=(), geolocation=(), payment=(), usb=()"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(self), display-capture=(self), "
+        "geolocation=(), payment=(), usb=()"
+    )
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; "
         "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
-        "connect-src 'self' https: wss:; media-src 'self' blob:; form-action 'self'"
+        f"connect-src {_connect_sources()}; media-src 'self' blob:; form-action 'self'"
     )
+    if request.path.startswith(("/api/", "/auth/")):
+        response.headers["Cache-Control"] = "no-store"
+    if _secure_cookie(request):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
@@ -291,6 +341,15 @@ async def auth_callback(request: web.Request):
                 return _json({"error": "discord_user_failed"}, 400)
             user_data = await resp.json()
 
+        if not ALLOWED_GUILD_IDS:
+            return _json({"error": "admission_not_configured"}, 503)
+        async with session.get(f"{DISCORD_API}/users/@me/guilds", headers=headers) as resp:
+            if resp.status >= 400:
+                return _json({"error": "discord_guilds_failed"}, 400)
+            raw_guilds = await resp.json()
+        if not _has_allowed_guild(raw_guilds):
+            return _json({"error": "guild_membership_required"}, 403)
+
         connections = []
         async with session.get(f"{DISCORD_API}/users/@me/connections", headers=headers) as resp:
             if resp.status < 400:
@@ -317,7 +376,7 @@ async def auth_callback(request: web.Request):
         email=user_data.get("email") or "",
         login_name=user_data.get("global_name") or user_data.get("username", ""),
     )
-    ensure_first_owner(discord_user_id)
+    ensure_first_owner(discord_user_id, bootstrap_allowed=discord_user_id in OWNER_USER_IDS)
     session_id = create_session(discord_user_id)
     response = web.HTTPFound("/")
     response.set_cookie(
@@ -346,7 +405,7 @@ async def auth_local_login(request: web.Request):
     user = authenticate_local_user(str(data.get("email") or ""), str(data.get("password") or ""))
     if not user:
         return _json({"error": "bad_login"}, 401)
-    ensure_first_owner(user["id"])
+    ensure_first_owner(user["id"], bootstrap_allowed=int(user["id"]) in OWNER_USER_IDS)
     session_id = create_session(user["id"])
     response = _json({"ok": True, "user": user})
     request.app["login_attempts"].pop(_client_ip(request), None)
@@ -368,7 +427,7 @@ async def auth_code_login(request: web.Request):
     user = consume_login_code(str(data.get("code") or ""))
     if not user:
         return _json({"error": "bad_or_expired_code"}, 401)
-    ensure_first_owner(user["id"])
+    ensure_first_owner(user["id"], bootstrap_allowed=int(user["id"]) in OWNER_USER_IDS)
     session_id = create_session(user["id"])
     request.app["login_attempts"].pop(_client_ip(request), None)
     response = _json({"ok": True, "user": user})

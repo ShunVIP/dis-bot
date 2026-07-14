@@ -287,6 +287,7 @@ class WebSecurityTests(IsolatedDatabaseTest):
                 await request.json()
                 return web.json_response({"ok": True})
             app.router.add_post("/write", write)
+            app.router.add_post("/api/write", write)
             app.router.add_post("/parse-json", parse_json)
             runner = web.AppRunner(app)
             await runner.setup()
@@ -301,6 +302,13 @@ class WebSecurityTests(IsolatedDatabaseTest):
                     self.assertEqual(response.status, 200)
                     self.assertEqual(response.headers["X-Frame-Options"], "DENY")
                     self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+                    self.assertNotIn("connect-src 'self' https: wss:", response.headers["Content-Security-Policy"])
+                async with session.post(
+                    base + "/api/write",
+                    headers={"Origin": base, "X-Forwarded-Proto": "https"},
+                ) as response:
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertIn("max-age=31536000", response.headers["Strict-Transport-Security"])
                 async with session.post(
                     base + "/parse-json",
                     data="{bad\\json}",
@@ -578,10 +586,19 @@ class ParodyLayerTests(IsolatedDatabaseTest):
 
 
 class PermissionTests(IsolatedDatabaseTest):
-    def test_first_user_bootstraps_as_owner_and_admin(self):
-        community_store.ensure_first_owner(100)
+    def test_owner_bootstrap_requires_explicit_allowlist_decision(self):
+        self.assertFalse(community_store.ensure_first_owner(99))
+        self.assertFalse(community_store.has_admin_access(99))
+        self.assertTrue(community_store.ensure_first_owner(100, bootstrap_allowed=True))
         self.assertTrue(community_store.has_admin_access(100))
         self.assertFalse(community_store.has_admin_access(101))
+
+    def test_web_admission_parses_ids_and_requires_allowed_membership(self):
+        self.assertEqual(web_server._id_set("123, bad, 456, -7"), frozenset({123, 456}))
+        with patch.object(web_server, "ALLOWED_GUILD_IDS", frozenset({123})):
+            self.assertTrue(web_server._has_allowed_guild([{"id": "123"}, {"id": "999"}]))
+            self.assertFalse(web_server._has_allowed_guild([{"id": "999"}]))
+            self.assertFalse(web_server._has_allowed_guild({"id": "123"}))
 
     def test_discord_admin_panel_accepts_only_admin_or_manage_guild(self):
         regular = SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False, manage_guild=False))

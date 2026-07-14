@@ -162,6 +162,7 @@ powershell -ExecutionPolicy Bypass -File scripts/sync_training_to_vps.ps1
 - LiveKit, если включается self-hosted voice.
 
 `KGTD.env` нельзя коммитить или включать в deploy bundle.
+Для web OAuth обязательно задаются `APP_ALLOWED_GUILD_IDS`; bootstrap-владелец может быть только в `APP_OWNER_USER_IDS`.
 
 ## Проверка
 

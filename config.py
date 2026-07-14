@@ -11,6 +11,8 @@ DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
 DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "").strip()
 DISCORD_OAUTH_SCOPES = os.getenv("DISCORD_OAUTH_SCOPES", "identify email guilds").strip()
+APP_ALLOWED_GUILD_IDS = os.getenv("APP_ALLOWED_GUILD_IDS", "").strip()
+APP_OWNER_USER_IDS = os.getenv("APP_OWNER_USER_IDS", "").strip()
 
 # Future web/app API.
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").strip()

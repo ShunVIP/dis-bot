@@ -2,7 +2,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from config import APP_BASE_URL
+from config import APP_ALLOWED_GUILD_IDS, APP_BASE_URL
 
 from core.settings_store import get_feature_policy, is_channel_allowed
 from core.platform_store import (
@@ -48,7 +48,15 @@ class WebBridge(commands.Cog):
         await self.bot.wait_until_ready()
 
     @app_commands.command(name="приложение", description="Получить одноразовый код входа в ViPik app")
+    @app_commands.guild_only()
     async def приложение(self, interaction: discord.Interaction):
+        allowed_guilds = {
+            int(item.strip()) for item in APP_ALLOWED_GUILD_IDS.split(",")
+            if item.strip().isdigit()
+        }
+        if not interaction.guild or not allowed_guilds or interaction.guild.id not in allowed_guilds:
+            await interaction.response.send_message("Вход в приложение для этого сервера закрыт.", ephemeral=True)
+            return
         user = interaction.user
         upsert_web_user(
             user.id,

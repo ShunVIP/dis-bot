@@ -114,7 +114,7 @@ This is intentionally not a separate public registration flow yet. Users should 
 
 ## Admin Model
 
-The first authenticated user is automatically assigned local `owner` through `ensure_first_owner()`. After that, platform/server settings, role catalog changes, channel creation and feature-channel settings require `owner` or `admin` in `community_user_roles`.
+Discord OAuth is admitted only when the user belongs to a guild listed in `APP_ALLOWED_GUILD_IDS`. A fresh database grants `owner` only to a user explicitly listed in `APP_OWNER_USER_IDS`; an arbitrary first login never becomes owner. Platform/server settings, role catalog changes, channel creation and feature-channel settings require `owner` or `admin` in `community_user_roles`.
 
 The frontend hides admin-only settings for non-admins, but backend checks remain the source of truth.
 
