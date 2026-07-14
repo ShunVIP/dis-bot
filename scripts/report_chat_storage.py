@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
+from contextlib import closing
+from pathlib import Path
 
 from core.paths import SOCIAL_DB
 
@@ -19,6 +22,10 @@ TABLES = (
     "platform_web_chat_migration",
     "platform_web_outbox_migration",
     "platform_text_channels",
+    "platform_dm_threads",
+    "platform_dm_reads",
+    "platform_rate_events",
+    "platform_audit_log",
 )
 
 
@@ -32,8 +39,9 @@ def _count(conn: sqlite3.Connection, table: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
 
-def build_report() -> dict[str, object]:
-    with sqlite3.connect(SOCIAL_DB) as conn:
+def build_report(path: str = SOCIAL_DB) -> dict[str, object]:
+    database = str(Path(path).resolve())
+    with closing(sqlite3.connect(database)) as conn:
         existing_tables = {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
@@ -48,7 +56,7 @@ def build_report() -> dict[str, object]:
             "SELECT scope, COUNT(*) FROM platform_messages GROUP BY scope"
         ).fetchall() if counts["platform_messages"] else []
     return {
-        "database": SOCIAL_DB,
+        "database": database,
         "present": {table: table in existing_tables for table in TABLES},
         "counts": counts,
         "channels": [{"id": row[0], "name": row[1]} for row in channels],
@@ -58,4 +66,7 @@ def build_report() -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    print(json.dumps(build_report(), ensure_ascii=False, indent=2))
+    parser = argparse.ArgumentParser(description="Read-only chat/DM storage report")
+    parser.add_argument("--db", default=SOCIAL_DB)
+    args = parser.parse_args()
+    print(json.dumps(build_report(args.db), ensure_ascii=False, indent=2))

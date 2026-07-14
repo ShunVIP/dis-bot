@@ -32,7 +32,7 @@ from core.summary_service import (
 from web_app import server as web_server
 from web_app.server import security_middleware
 from scripts.build_ml_manifest import build_manifest
-from scripts import audit_settings, finalize_settings_migration
+from scripts import audit_settings, finalize_settings_migration, report_chat_storage
 from scripts.report_learning_readiness import build_report as build_learning_readiness_report
 from scripts.train_toxicity_model import train_model
 from fun_slesh import social_chat
@@ -778,6 +778,26 @@ class PlatformDmTests(IsolatedDatabaseTest):
 
 
 class ChatStorageConsolidationTests(IsolatedDatabaseTest):
+    def test_chat_storage_report_honors_explicit_database_path(self):
+        alternate = str(Path(self.temp_dir.name) / "alternate-chat.db")
+        with db_connection(alternate) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE platform_text_channels(id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+                CREATE TABLE platform_messages(id INTEGER PRIMARY KEY, scope TEXT NOT NULL);
+                CREATE TABLE platform_rate_events(id INTEGER PRIMARY KEY);
+                CREATE TABLE platform_audit_log(id INTEGER PRIMARY KEY);
+                INSERT INTO platform_text_channels VALUES(9, 'alternate');
+                INSERT INTO platform_messages VALUES(1, 'dm');
+                """
+            )
+        report = report_chat_storage.build_report(alternate)
+        self.assertEqual(report["database"], str(Path(alternate).resolve()))
+        self.assertEqual(report["counts"]["platform_messages"], 1)
+        self.assertEqual(report["counts"]["platform_rate_events"], 0)
+        self.assertEqual(report["channels"], [{"id": 9, "name": "alternate"}])
+        self.assertEqual(report["platform_scopes"], {"dm": 1})
+
     def test_persistent_rate_limit_and_audit_log_are_bounded(self):
         for index in range(6):
             result = platform_store.consume_platform_rate_limit(
