@@ -61,6 +61,7 @@ from core.profile_service import forget_ai_personalization, get_unified_profile,
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
 from core.ml_artifacts import load_artifact_manifest
 from core.ml_insights import build_ml_insights
+from core.moderation_service import moderation_overview, review_toxicity_sample
 from core.platform_store import (
     add_general_chat_message,
     add_platform_message,
@@ -848,6 +849,28 @@ async def api_platform_audit(request: web.Request):
     return _json({"events": list_platform_audit(limit)})
 
 
+async def api_moderation_overview(request: web.Request):
+    _require_admin(request)
+    limit = _positive_int(request.query.get("limit")) or 50
+    return _json(moderation_overview(limit))
+
+
+async def api_moderation_toxicity_feedback(request: web.Request):
+    user = _require_admin(request)
+    message_id = _positive_int(request.match_info.get("message_id"))
+    if not message_id:
+        return _json({"error": "bad_message_id"}, 400)
+    try:
+        data = await request.json()
+        level = int(data.get("level"))
+        saved = review_toxicity_sample(message_id, level, user["id"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _json({"error": "bad_toxicity_level"}, 400)
+    if not saved:
+        return _json({"error": "shadow_sample_not_found"}, 404)
+    return _json({"ok": True, "message_id": message_id, "level": level})
+
+
 async def api_settings(request: web.Request):
     _require_admin(request)
     guild_id = _settings_guild_id(request.query.get("guild_id"))
@@ -1297,6 +1320,11 @@ def create_app() -> web.Application:
     app.router.add_delete("/api/platform/messages/{message_id}", api_platform_message_delete)
     app.router.add_post("/api/platform/messages/{message_id}/reactions", api_platform_message_reaction)
     app.router.add_get("/api/platform/audit", api_platform_audit)
+    app.router.add_get("/api/moderation/overview", api_moderation_overview)
+    app.router.add_post(
+        "/api/moderation/toxicity/{message_id}/feedback",
+        api_moderation_toxicity_feedback,
+    )
     app.router.add_get("/api/settings", api_settings)
     app.router.add_get("/api/ml/status", api_ml_status)
     app.router.add_get("/api/ml/insights", api_ml_insights)

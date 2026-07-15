@@ -48,9 +48,8 @@ ViPik — self-hosted Discord-бот с приватной веб-панелью
 - сообщения, реакции, создание DM и uploads защищены постоянными per-user rate limits; административная модерация чужих сообщений пишется в `platform_audit_log`;
 - браузер не выбирает Discord guild/channel: outbox использует только включённый `web_chat.output_channel` из `settings_store`;
 - новые вложения принимаются только через ViPik upload, а чтение `/uploads/...` требует авторизованную сессию;
-- сообщения, реакции, создание DM и uploads защищены постоянными per-user rate limits; административная модерация чужих сообщений пишется в `platform_audit_log`;
-- браузер не выбирает Discord guild/channel: outbox использует только включённый `web_chat.output_channel` из `settings_store`;
-- новые вложения принимаются только через ViPik upload, а чтение `/uploads/...` требует авторизованную сессию;
+- закрытый центр модерации объединяет очередь ручной разметки токсичности и `platform_audit_log`; доступ проверяется backend-ролью `admin`;
+- ручная метка уровня 0–3 записывается как ML feedback и в аудит, но enforcement остаётся `rules_only`;
 - API статуса версионированных ML-артефактов;
 - приватные голосовые комнаты через self-hosted LiveKit, выбор устройств и показ экрана;
 - закрытые voice-комнаты с membership и ограниченными приглашениями;

@@ -143,7 +143,7 @@ async function applyInitialVoiceInvite() {
 
 async function applyInitialView() {
   const view = new URLSearchParams(location.search).get("view");
-  const allowed = new Set(["overview", "profile", "server", "members", "chat", "voice", "games", "settings"]);
+  const allowed = new Set(["overview", "profile", "server", "members", "chat", "voice", "games", "moderation", "settings"]);
   if (!view || !allowed.has(view)) return;
   setView(view);
   if (view === "profile") await loadUnifiedProfile().catch(console.error);
@@ -152,6 +152,7 @@ async function applyInitialView() {
   if (view === "chat") await loadChat().catch(console.error);
   if (view === "voice") await loadVoiceRooms().catch(console.error);
   if (view === "games") await loadLol().catch(console.error);
+  if (view === "moderation") await loadModeration().catch(console.error);
   if (view === "settings") await loadSettings().catch(console.error);
 }
 
@@ -1187,6 +1188,64 @@ async function loadSettings() {
   renderRoles(memberData.roles || [], "settingsRoleCatalog");
 }
 
+function renderModeration(data) {
+  const summary = data.summary || {};
+  const cards = [
+    ["Событий токсичности", summary.events || 0],
+    ["ML-проверок", summary.shadow_samples || 0],
+    ["Ждут разметки", summary.pending_samples || 0],
+    ["Проверено людьми", summary.reviewed_samples || 0],
+  ];
+  $("moderationSummary").innerHTML = cards.map(([label, value]) => `
+    <article class="status-card"><span>${escapeHtml(label)}</span><strong>${Number(value)}</strong></article>
+  `).join("");
+
+  const levels = data.levels || [];
+  const pending = data.pending || [];
+  $("toxicityReviewQueue").classList.toggle("muted", pending.length === 0);
+  $("toxicityReviewQueue").innerHTML = pending.length ? pending.map((sample) => `
+    <article class="review-card">
+      <blockquote>${escapeHtml(sample.snippet || "Без фрагмента")}</blockquote>
+      <div class="review-meta">
+        <span>Правила: ${Number(sample.rule_level)}</span>
+        <span>ML: ${Number(sample.ml_level)} · ${Math.round(Number(sample.ml_confidence || 0) * 100)}%</span>
+        <span>${escapeHtml(sample.model_version || "модель")}</span>
+      </div>
+      <div class="level-actions">
+        ${levels.map((item) => `<button class="button ghost" type="button" data-toxicity-message="${Number(sample.message_id)}" data-toxicity-level="${Number(item.level)}">${Number(item.level)} · ${escapeHtml(item.label)}</button>`).join("")}
+      </div>
+    </article>
+  `).join("") : "Нет сообщений, ожидающих проверки.";
+
+  const events = data.audit || [];
+  $("moderationAudit").classList.toggle("muted", events.length === 0);
+  $("moderationAudit").innerHTML = events.length ? events.map((event) => `
+    <article class="audit-item">
+      <strong>${escapeHtml(event.action)}</strong>
+      <span>админ ${Number(event.actor_id)} · ${escapeHtml(event.target_type)} ${Number(event.target_id)}</span>
+      <small>${escapeHtml(new Date(event.created_at).toLocaleString("ru-RU"))}</small>
+    </article>
+  `).join("") : "Действий модераторов пока нет.";
+  $("moderationStatus").textContent = summary.enforcement === "rules_only"
+    ? "ML без автосанкций"
+    : "загружено";
+}
+
+async function loadModeration() {
+  if (!state.me?.authenticated || !state.me?.is_admin) return;
+  $("moderationStatus").textContent = "загружаем...";
+  renderModeration(await api("/api/moderation/overview?limit=50"));
+}
+
+async function submitToxicityFeedback(messageId, level) {
+  $("moderationStatus").textContent = "сохраняем разметку...";
+  await api(`/api/moderation/toxicity/${messageId}/feedback`, {
+    method: "POST",
+    body: JSON.stringify({ level }),
+  });
+  await loadModeration();
+}
+
 async function saveSocialChatSettings() {
   const guild = Number($("settingsGuild").value || 0);
   const ambient = $("socialChatAmbient").checked;
@@ -1263,8 +1322,21 @@ document.querySelectorAll(".nav").forEach((button) => {
     if (button.dataset.view === "chat") await loadChat().catch(console.error);
     if (button.dataset.view === "voice") await loadVoiceRooms().catch(console.error);
     if (button.dataset.view === "games") await loadLol().catch(console.error);
+    if (button.dataset.view === "moderation") await loadModeration().catch(console.error);
     if (button.dataset.view === "settings") await loadSettings().catch(console.error);
   });
+});
+
+$("reloadModeration").addEventListener("click", () => loadModeration().catch(console.error));
+$("toxicityReviewQueue").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-toxicity-message]");
+  if (!button) return;
+  button.disabled = true;
+  submitToxicityFeedback(Number(button.dataset.toxicityMessage), Number(button.dataset.toxicityLevel))
+    .catch((error) => {
+      button.disabled = false;
+      $("moderationStatus").textContent = error?.message || "Не удалось сохранить";
+    });
 });
 
 window.addEventListener("beforeinstallprompt", (event) => {

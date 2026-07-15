@@ -1002,6 +1002,53 @@ input, textarea, select {
   grid-column: 1 / -1;
 }
 
+.moderation-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr);
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.review-queue,
+.audit-list {
+  display: grid;
+  gap: 10px;
+}
+
+.review-card,
+.audit-item {
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 13px;
+}
+
+.review-card blockquote {
+  margin: 0 0 10px;
+  overflow-wrap: anywhere;
+}
+
+.review-meta,
+.level-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.review-meta {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.audit-item {
+  display: grid;
+  gap: 5px;
+}
+
+.audit-item span,
+.audit-item small { color: var(--muted); }
+
 .server-preview {
   min-height: 138px;
   display: flex;
@@ -1072,6 +1119,7 @@ input, textarea, select {
   .settings-grid {
     grid-template-columns: 1fr;
   }
+  .moderation-layout { grid-template-columns: 1fr; }
   .settings-wide { grid-column: auto; }
   .profile-form .wide { grid-column: auto; }
   .profile-hero { align-items: flex-start; flex-direction: column; padding: 24px; }

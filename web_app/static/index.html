@@ -31,6 +31,7 @@
       <button class="nav" data-view="chat">Чат</button>
       <button class="nav" data-view="voice">Голос</button>
       <button class="nav" data-view="games">Игры</button>
+      <button class="nav" data-view="moderation" data-admin-only>Модерация</button>
       <button class="nav" data-view="settings" data-admin-only>Настройки бота</button>
     </aside>
 
@@ -333,6 +334,34 @@
           <div id="lolStatus" class="muted status-line"></div>
           <div id="lolProfile" class="profile-grid muted">Профиль не загружен</div>
         </section>
+      </section>
+
+      <section id="moderation" class="view" data-admin-only>
+        <div class="band compact">
+          <div>
+            <h1>Центр модерации</h1>
+            <p>Проверяй спорные оценки токсичности и действия модераторов. ML остаётся в теневом режиме и не выдаёт наказания.</p>
+          </div>
+          <button id="reloadModeration" class="button" type="button">Обновить</button>
+        </div>
+        <div id="moderationSummary" class="status-grid moderation-summary"></div>
+        <div class="moderation-layout">
+          <section class="panel">
+            <div class="section-head">
+              <h2>Разметка токсичности</h2>
+              <span id="moderationStatus" class="muted">не загружено</span>
+            </div>
+            <p class="muted">Выбери реальный уровень сообщения: 0 — норма, 1 — дружеский подкол, 2 — токсично, 3 — жёстко.</p>
+            <div id="toxicityReviewQueue" class="review-queue muted">Очередь не загружена</div>
+          </section>
+          <section class="panel">
+            <div class="section-head">
+              <h2>Журнал действий</h2>
+              <span class="muted">последние события</span>
+            </div>
+            <div id="moderationAudit" class="audit-list muted">Журнал не загружен</div>
+          </section>
+        </div>
       </section>
 
       <section id="settings" class="view" data-admin-only>

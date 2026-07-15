@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -709,6 +709,16 @@ class WebSecurityTests(IsolatedDatabaseTest):
         self.assertTrue(settings_store.has_feature_setting(7, "social_chat"))
         self.assertFalse(settings_store.has_feature_setting(0, "social_chat"))
 
+    def test_moderation_ui_contract_is_admin_only_and_actionable(self):
+        root = Path(__file__).resolve().parent.parent / "web_app" / "static"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        javascript = (root / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-view="moderation" data-admin-only', html)
+        self.assertIn('id="toxicityReviewQueue"', html)
+        self.assertIn('id="moderationAudit"', html)
+        self.assertIn('/api/moderation/overview', javascript)
+        self.assertIn('data-toxicity-level', javascript)
+
 
 class PlatformDmTests(IsolatedDatabaseTest):
     def test_dm_unread_count_and_read_marker_are_member_scoped(self):
@@ -944,6 +954,57 @@ class ChatStorageConsolidationTests(IsolatedDatabaseTest):
         event = platform_store.list_platform_audit()[0]
         self.assertEqual(event["action"], "message.delete_other")
         self.assertEqual((event["actor_id"], event["target_id"]), (99, message_id))
+
+    def test_toxicity_moderation_api_requires_admin_and_records_feedback(self):
+        web_app_store.upsert_web_user(7, "seven")
+        web_app_store.upsert_web_user(99, "moderator")
+        community_store.set_user_roles(99, ["admin"], source="test")
+        admin_session = web_app_store.create_session(99)
+        member_session = web_app_store.create_session(7)
+        toxicity_store.save_shadow_prediction(
+            message_id=404, guild_id=7, channel_id=9, user_id=42,
+            text="спорный фрагмент", prediction={
+                "rule_level": 1, "ml_level": 2, "ml_confidence": 0.89,
+                "model_version": "tox-nb-test", "effective_level": 1,
+            },
+        )
+
+        async def scenario():
+            app = web_server.create_app()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            base = f"http://127.0.0.1:{port}"
+            async with ClientSession() as session:
+                member_headers = {"Cookie": f"vipik_session={member_session}"}
+                admin_headers = {"Cookie": f"vipik_session={admin_session}", "Origin": base}
+                async with session.get(f"{base}/api/moderation/overview", headers=member_headers) as response:
+                    self.assertEqual(response.status, 403)
+                async with session.get(f"{base}/api/moderation/overview", headers=admin_headers) as response:
+                    self.assertEqual(response.status, 200)
+                    payload = await response.json()
+                    self.assertEqual(payload["pending"][0]["message_id"], 404)
+                    self.assertEqual(payload["summary"]["enforcement"], "rules_only")
+                async with session.post(
+                    f"{base}/api/moderation/toxicity/404/feedback",
+                    json={"level": 4}, headers=admin_headers,
+                ) as response:
+                    self.assertEqual(response.status, 400)
+                async with session.post(
+                    f"{base}/api/moderation/toxicity/404/feedback",
+                    json={"level": 2}, headers=admin_headers,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                async with session.get(f"{base}/api/moderation/overview", headers=admin_headers) as response:
+                    payload = await response.json()
+                    self.assertEqual(payload["summary"]["reviewed_samples"], 1)
+                    self.assertEqual(payload["pending"], [])
+                    self.assertEqual(payload["audit"][0]["action"], "toxicity.feedback")
+            await runner.cleanup()
+
+        asyncio.run(scenario())
 
     def test_legacy_web_chat_is_migrated_once_and_archived(self):
         with db_connection(self.db_path) as conn:
@@ -1763,6 +1824,23 @@ class ToxicityLayerTests(IsolatedDatabaseTest):
         self.assertEqual(toxicity_store.count_toxicity_feedback(), 1)
         self.assertEqual(toxicity_store.list_pending_shadow_samples(), [])
         self.assertFalse(toxicity_store.save_toxicity_feedback(999, 0, 55))
+
+    def test_moderation_service_normalizes_queue_and_audits_review(self):
+        toxicity_store.save_shadow_prediction(
+            message_id=101, guild_id=7, channel_id=9, user_id=42,
+            text="пример для центра модерации", prediction={
+                "rule_level": 0, "ml_level": 2, "ml_confidence": 0.93,
+                "model_version": "tox-nb-test", "effective_level": 0,
+            },
+        )
+        overview = moderation_service.moderation_overview()
+        self.assertEqual(overview["pending"][0]["snippet"], "пример для центра модерации")
+        self.assertEqual(overview["summary"]["enforcement"], "rules_only")
+        self.assertTrue(moderation_service.review_toxicity_sample(101, 1, 55))
+        updated = moderation_service.moderation_overview()
+        self.assertEqual(updated["pending"], [])
+        self.assertEqual(updated["summary"]["reviewed_samples"], 1)
+        self.assertEqual(updated["audit"][0]["metadata"]["corrected_level"], 1)
 
     def test_settings_and_service_cooldown_remain_configurable(self):
         toxicity_store.set_toxicity_threshold(7, 3)
