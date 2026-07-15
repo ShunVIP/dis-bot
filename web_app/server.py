@@ -58,6 +58,7 @@ from core.community_store import (
     upsert_role,
 )
 from core.profile_service import forget_ai_personalization, get_unified_profile, update_unified_profile
+from core.conversation_service import conversation_runtime_status
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
 from core.ml_artifacts import load_artifact_manifest
 from core.ml_insights import build_ml_insights
@@ -908,6 +909,11 @@ async def api_ml_status(request: web.Request):
     )
 
 
+async def api_conversation_model_status(request: web.Request):
+    _require_admin(request)
+    return _json({"conversation_model": conversation_runtime_status()})
+
+
 async def api_ml_insights(request: web.Request):
     _require_admin(request)
     guild_id = int(request.query.get("guild_id") or 0) or None
@@ -1327,6 +1333,7 @@ def create_app() -> web.Application:
     )
     app.router.add_get("/api/settings", api_settings)
     app.router.add_get("/api/ml/status", api_ml_status)
+    app.router.add_get("/api/ml/conversation-status", api_conversation_model_status)
     app.router.add_get("/api/ml/insights", api_ml_insights)
     app.router.add_patch("/api/guilds/{guild_id}/features/{feature}", api_patch_feature)
     app.router.add_put("/api/guilds/{guild_id}/features/{feature}/channels/{mode}/{channel_id}", api_put_channel)

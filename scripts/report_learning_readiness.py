@@ -22,6 +22,7 @@ TABLES = (
     "conversation_turns",
     "conversation_feedback",
     "conversation_preferences",
+    "conversation_runtime_status",
     "gamer_profiles",
     "toxicity_log",
     "toxicity_ml_shadow",
@@ -75,6 +76,7 @@ def build_report(path: str = SOCIAL_DB) -> dict:
                 JOIN conversation_preferences p ON p.user_id=t.user_id AND p.training_opt_in=1
                 JOIN conversation_feedback f ON f.bot_message_id=t.bot_message_id
                     AND f.reviewer_user_id=t.user_id AND f.score=1
+                WHERE t.provider='ollama'
                 """
             ).fetchone()[0])
     return {

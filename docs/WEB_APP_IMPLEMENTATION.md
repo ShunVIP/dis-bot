@@ -70,7 +70,16 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
 - `core/web_app_store.py`: sessions, web users, chat, outbox.
 - `core/community_store.py`: local roles, member cards, badges, statuses and profile cosmetics.
 - `core/platform_store.py`: local servers, text channels, DM threads, platform messages, rate events, moderation audit and game activity.
+- `core/conversation_service.py`: local Ollama routing, persisted runtime health and exponential circuit breaker.
+- `core/moderation_service.py`: toxicity review projection and audited human feedback.
 - `fun_slesh/web_bridge.py`: Discord bot bridge for web chat outbox.
+
+## Conversational model status
+
+- `GET /api/ml/conversation-status` is admin-only and reports whether the private Ollama endpoint is configured, online, or in cooldown.
+- Bot and web app share `conversation_runtime_status`, so failures remain visible across process restarts.
+- A failed request opens a 15–300 second circuit breaker; Discord uses its immediate fallback while the endpoint is cooling down.
+- Only self-approved, training-opted-in turns whose provider is exactly `ollama` enter QLoRA. Markov, meme and template responses are excluded by both dataset and readiness SQL.
 
 ## Required env
 

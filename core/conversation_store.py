@@ -48,8 +48,76 @@ def ensure_conversation_tables() -> None:
                 gamer_tags_json TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS conversation_runtime_status (
+                provider TEXT PRIMARY KEY,
+                configured INTEGER NOT NULL DEFAULT 0,
+                available INTEGER NOT NULL DEFAULT 0,
+                model TEXT NOT NULL DEFAULT '',
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                last_success_at TEXT NOT NULL DEFAULT '',
+                last_failure_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                cooldown_until TEXT NOT NULL DEFAULT '',
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
             """
         )
+
+
+def get_conversation_runtime_status(provider: str = "ollama") -> dict[str, object]:
+    ensure_conversation_tables()
+    with connection(SOCIAL_DB) as conn:
+        row = conn.execute(
+            """
+            SELECT configured,available,model,failure_count,last_success_at,last_failure_at,
+                   last_error,cooldown_until,latency_ms,updated_at
+            FROM conversation_runtime_status WHERE provider=?
+            """,
+            (str(provider)[:40],),
+        ).fetchone()
+    if not row:
+        return {
+            "provider": str(provider)[:40], "configured": False, "available": False,
+            "model": "", "failure_count": 0, "last_success_at": "", "last_failure_at": "",
+            "last_error": "", "cooldown_until": "", "latency_ms": 0, "updated_at": "",
+        }
+    return {
+        "provider": str(provider)[:40], "configured": bool(row[0]), "available": bool(row[1]),
+        "model": str(row[2]), "failure_count": int(row[3]), "last_success_at": str(row[4]),
+        "last_failure_at": str(row[5]), "last_error": str(row[6]),
+        "cooldown_until": str(row[7]), "latency_ms": int(row[8]), "updated_at": str(row[9]),
+    }
+
+
+def save_conversation_runtime_status(
+    *, provider: str = "ollama", configured: bool, available: bool, model: str,
+    failure_count: int = 0, last_success_at: str = "", last_failure_at: str = "",
+    last_error: str = "", cooldown_until: str = "", latency_ms: int = 0,
+) -> dict[str, object]:
+    ensure_conversation_tables()
+    updated_at = datetime.now(UTC).isoformat()
+    with connection(SOCIAL_DB) as conn:
+        conn.execute(
+            """
+            INSERT INTO conversation_runtime_status(
+                provider,configured,available,model,failure_count,last_success_at,
+                last_failure_at,last_error,cooldown_until,latency_ms,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(provider) DO UPDATE SET
+                configured=excluded.configured,available=excluded.available,model=excluded.model,
+                failure_count=excluded.failure_count,last_success_at=excluded.last_success_at,
+                last_failure_at=excluded.last_failure_at,last_error=excluded.last_error,
+                cooldown_until=excluded.cooldown_until,latency_ms=excluded.latency_ms,
+                updated_at=excluded.updated_at
+            """,
+            (
+                str(provider)[:40], int(bool(configured)), int(bool(available)), str(model)[:120],
+                max(0, int(failure_count)), str(last_success_at), str(last_failure_at),
+                str(last_error)[:240], str(cooldown_until), max(0, int(latency_ms)), updated_at,
+            ),
+        )
+    return get_conversation_runtime_status(provider)
 
 
 def get_conversation_preferences(user_id: int) -> dict[str, object]:
@@ -225,6 +293,7 @@ def list_training_examples(database: str | None = None) -> list[dict[str, object
             JOIN conversation_feedback f ON f.bot_message_id=t.bot_message_id
                 AND f.reviewer_user_id=t.user_id AND f.score=1
             {profile_join}
+            WHERE t.provider='ollama'
             ORDER BY t.created_at
             """
         ).fetchall()

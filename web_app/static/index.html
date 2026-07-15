@@ -429,6 +429,15 @@
           </section>
 
           <section class="panel settings-wide">
+            <div class="section-head">
+              <h2>Локальная разговорная модель</h2>
+              <span id="conversationModelState" class="muted">не проверено</span>
+            </div>
+            <div id="conversationModelStatus" class="model-status muted">Статус Qwen/Ollama не загружен.</div>
+            <p class="muted">Модель работает бесплатно на приватном ПК. При недоступности бот мгновенно переходит к безопасным шаблонам/Markov после circuit breaker, не задерживая чат.</p>
+          </section>
+
+          <section class="panel settings-wide">
             <h2>Каналы функций бота</h2>
             <form id="settingsForm" class="settings-form">
               <input id="settingsGuild" inputmode="numeric" placeholder="Guild ID">

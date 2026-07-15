@@ -46,6 +46,7 @@ from core.settings_store import (
     set_feature_payload,
 )
 from core.social_chat_service import normalize_social_chat_payload, update_social_chat_policy
+from core.conversation_service import conversation_runtime_status
 from core.paths import BIRTHDAYS_DB, SOCIAL_DB
 from core.toxicity_store import (
     count_toxicity_feedback,
@@ -1106,6 +1107,34 @@ def _render_toxicity_ml_panel() -> str:
     </section>
     """
 
+
+def _render_conversation_model_panel() -> str:
+    status = conversation_runtime_status()
+    state_labels = {
+        "disabled": "Не настроена",
+        "unknown": "Ожидает первого запроса",
+        "online": "Доступна",
+        "cooldown": "Временно недоступна",
+    }
+    state = state_labels.get(str(status.get("state") or "unknown"), "Неизвестно")
+    configured = bool(status.get("configured"))
+    endpoint = str(status.get("endpoint_host") or "") if configured else "LOCAL_CHAT_API_URL не задан"
+    last_success = str(status.get("last_success_at") or "ещё не было")
+    last_error = str(status.get("last_error") or "нет")
+    return f"""
+    <section class="card" id="conversation-model">
+      <h2>Разговорная Qwen / Ollama</h2>
+      <p class="help">Бесплатная модель работает на приватном ПК. При сбое persistent circuit breaker сразу отдаёт fallback и временно не повторяет медленный запрос.</p>
+      <div class="grid">
+        <div class="item"><div class="label">Состояние</div><div class="value">{escape(state)}</div></div>
+        <div class="item"><div class="label">Модель</div><div class="value">{escape(str(status.get('model') or 'qwen3:8b'))}</div></div>
+        <div class="item"><div class="label">Endpoint</div><div class="value">{escape(endpoint)}</div></div>
+        <div class="item"><div class="label">Последний успех</div><div class="value">{escape(last_success)}</div></div>
+        <div class="item"><div class="label">Последняя ошибка</div><div class="value">{escape(last_error)}</div></div>
+      </div>
+    </section>
+    """
+
 def _render_page(bot, request: web.Request | None = None, message: str = "") -> str:
     summary = policy_summary()
     if request is not None:
@@ -1128,6 +1157,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
     database_panel = _render_database_panel(bot, active_guild_id)
     birthdays_panel = _render_birthdays_panel(bot)
     toxicity_ml_panel = _render_toxicity_ml_panel()
+    conversation_model_panel = _render_conversation_model_panel()
     restart_card = _render_restart_card(request)
     return f"""<!doctype html>
 <html lang="ru">
@@ -1301,6 +1331,7 @@ def _render_page(bot, request: web.Request | None = None, message: str = "") -> 
       {database_panel}
       {birthdays_panel}
       {toxicity_ml_panel}
+      {conversation_model_panel}
 
       <section class="card" id="system">
         <h2>Система</h2>

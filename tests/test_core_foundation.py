@@ -21,6 +21,7 @@ from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_fea
 from core.admin_panel import (
     FEATURES_BY_ID,
     _member_has_admin_access,
+    _render_conversation_model_panel,
     _render_social_chat_controls,
 )
 from core.summary_service import (
@@ -718,6 +719,42 @@ class WebSecurityTests(IsolatedDatabaseTest):
         self.assertIn('id="moderationAudit"', html)
         self.assertIn('/api/moderation/overview', javascript)
         self.assertIn('data-toxicity-level', javascript)
+        self.assertIn('id="conversationModelStatus"', html)
+        self.assertIn('/api/ml/conversation-status', javascript)
+
+    def test_conversation_model_status_api_requires_admin(self):
+        web_app_store.upsert_web_user(7, "member")
+        web_app_store.upsert_web_user(99, "admin")
+        community_store.set_user_roles(99, ["admin"], source="test")
+        member_session = web_app_store.create_session(7)
+        admin_session = web_app_store.create_session(99)
+
+        async def scenario():
+            with patch.dict(conversation_service.os.environ, {"LOCAL_CHAT_API_URL": ""}):
+                app = web_server.create_app()
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, "127.0.0.1", 0)
+                await site.start()
+                port = site._server.sockets[0].getsockname()[1]
+                base = f"http://127.0.0.1:{port}"
+                async with ClientSession() as session:
+                    async with session.get(
+                        f"{base}/api/ml/conversation-status",
+                        headers={"Cookie": f"vipik_session={member_session}"},
+                    ) as response:
+                        self.assertEqual(response.status, 403)
+                    async with session.get(
+                        f"{base}/api/ml/conversation-status",
+                        headers={"Cookie": f"vipik_session={admin_session}"},
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        model = (await response.json())["conversation_model"]
+                        self.assertEqual(model["state"], "disabled")
+                        self.assertFalse(model["configured"])
+                await runner.cleanup()
+
+        asyncio.run(scenario())
 
 
 class PlatformDmTests(IsolatedDatabaseTest):
@@ -1571,6 +1608,96 @@ class ActivityLayerTests(IsolatedDatabaseTest):
 
 
 class ConversationLayerTests(IsolatedDatabaseTest):
+    def test_local_conversation_model_success_updates_shared_runtime_status(self):
+        async def scenario():
+            async def chat(_request):
+                return web.json_response({
+                    "message": {"content": "Привет. Я действительно отвечаю через Qwen."},
+                    "model": "qwen3:8b-test",
+                })
+
+            app = web.Application()
+            app.router.add_post("/api/chat", chat)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            with patch.dict(conversation_service.os.environ, {
+                "LOCAL_CHAT_API_URL": f"http://127.0.0.1:{port}",
+                "LOCAL_CHAT_MODEL": "qwen3:8b-test",
+                "LOCAL_CHAT_TIMEOUT_SECONDS": "3",
+            }):
+                reply = await conversation_service.generate_reply(
+                    guild_id=7, channel_id=70, user_id=101,
+                    display_name="Игрок", text="Випик, ты тут?",
+                )
+                status = conversation_service.conversation_runtime_status()
+            await runner.cleanup()
+            self.assertIsNotNone(reply)
+            self.assertEqual(reply.provider, "ollama")
+            self.assertIn("Qwen", reply.text)
+            self.assertEqual(status["state"], "online")
+            self.assertEqual(status["failure_count"], 0)
+            self.assertTrue(status["last_success_at"])
+
+        asyncio.run(scenario())
+
+    def test_local_conversation_model_failure_opens_persistent_circuit(self):
+        requests = 0
+
+        async def scenario():
+            async def chat(_request):
+                nonlocal requests
+                requests += 1
+                return web.json_response({"error": "offline"}, status=503)
+
+            app = web.Application()
+            app.router.add_post("/api/chat", chat)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            with patch.dict(conversation_service.os.environ, {
+                "LOCAL_CHAT_API_URL": f"http://127.0.0.1:{port}",
+                "LOCAL_CHAT_MODEL": "qwen3:8b-test",
+                "LOCAL_CHAT_TIMEOUT_SECONDS": "3",
+            }):
+                first = await conversation_service.generate_reply(
+                    guild_id=7, channel_id=70, user_id=101,
+                    display_name="Игрок", text="первый запрос",
+                )
+                second = await conversation_service.generate_reply(
+                    guild_id=7, channel_id=70, user_id=101,
+                    display_name="Игрок", text="второй запрос",
+                )
+                status = conversation_service.conversation_runtime_status()
+            await runner.cleanup()
+            self.assertIsNone(first)
+            self.assertIsNone(second)
+            self.assertEqual(requests, 1)
+            self.assertEqual(status["state"], "cooldown")
+            self.assertEqual(status["last_error"], "http_503")
+            self.assertEqual(status["failure_count"], 1)
+
+        asyncio.run(scenario())
+
+    def test_unconfigured_model_status_is_disabled_without_network_attempt(self):
+        with patch.dict(conversation_service.os.environ, {"LOCAL_CHAT_API_URL": ""}):
+            reply = asyncio.run(conversation_service.generate_reply(
+                guild_id=7, channel_id=70, user_id=101,
+                display_name="Игрок", text="проверка fallback",
+            ))
+            status = conversation_service.conversation_runtime_status()
+        self.assertIsNone(reply)
+        self.assertEqual(status["state"], "disabled")
+        self.assertFalse(status["configured"])
+        panel = _render_conversation_model_panel()
+        self.assertIn("Разговорная Qwen / Ollama", panel)
+        self.assertIn("Не настроена", panel)
+        self.assertIn("LOCAL_CHAT_API_URL не задан", panel)
+
     def test_legacy_random_chat_setting_is_safely_mention_only(self):
         settings_store.set_feature_payload(
             7,
@@ -1710,6 +1837,22 @@ class ConversationLayerTests(IsolatedDatabaseTest):
         self.assertIn("@user", user_text)
         self.assertIn("URL", user_text)
         self.assertNotIn("123456789012345678", user_text)
+
+    def test_markov_and_template_fallbacks_never_enter_llm_training_dataset(self):
+        conversation_store.set_conversation_preferences(101, training_opt_in=True)
+        for message_id, provider in ((910, "markov_fallback"), (911, "templates"), (912, "meme")):
+            conversation_store.record_turn(
+                bot_message_id=message_id, source_message_id=message_id - 100,
+                guild_id=7, channel_id=70, user_id=101,
+                user_text="одобренный вопрос", bot_text="одобренный fallback",
+                provider=provider, model="markov:мем" if provider == "markov_fallback" else "",
+            )
+            self.assertTrue(conversation_store.record_feedback(message_id, 101, 1))
+        self.assertEqual(conversation_store.list_training_examples(self.db_path), [])
+        self.assertEqual(
+            build_learning_readiness_report(self.db_path)["conversation_consent"]["approved_examples"],
+            0,
+        )
 
     def test_learning_readiness_counts_only_consented_self_approved_answers(self):
         conversation_store.set_conversation_preferences(101, training_opt_in=True)

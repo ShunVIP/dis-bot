@@ -1171,10 +1171,11 @@ async function unlinkLol() {
 async function loadSettings() {
   if (!state.me?.authenticated) return;
   const guild = $("settingsGuild").value || "0";
-  const [settingsData, serverData, memberData] = await Promise.all([
+  const [settingsData, serverData, memberData, conversationData] = await Promise.all([
     api(`/api/settings?guild_id=${encodeURIComponent(guild)}`),
     api("/api/platform/server"),
     api("/api/community/members"),
+    api("/api/ml/conversation-status"),
   ]);
   $("settingsOutput").textContent = JSON.stringify(settingsData, null, 2);
   $("settingsGuild").value = String(settingsData.guild_id || "");
@@ -1186,6 +1187,29 @@ async function loadSettings() {
     : "только по обращению";
   renderServerSettings(serverData.server);
   renderRoles(memberData.roles || [], "settingsRoleCatalog");
+  renderConversationModelStatus(conversationData.conversation_model || {});
+}
+
+function renderConversationModelStatus(status) {
+  const labels = {
+    disabled: "не настроена",
+    unknown: "ожидает первого запроса",
+    online: "доступна",
+    cooldown: "временно недоступна",
+  };
+  const state = String(status.state || "unknown");
+  $("conversationModelState").textContent = labels[state] || state;
+  const rows = [
+    ["Модель", status.model || "qwen3:8b"],
+    ["Endpoint", status.configured ? (status.endpoint_host || "настроен") : "LOCAL_CHAT_API_URL не задан"],
+    ["Последний успех", status.last_success_at ? new Date(status.last_success_at).toLocaleString("ru-RU") : "ещё не было"],
+    ["Последняя ошибка", status.last_error || "нет"],
+    ["Задержка", status.latency_ms ? `${Number(status.latency_ms)} мс` : "—"],
+  ];
+  $("conversationModelStatus").classList.remove("muted");
+  $("conversationModelStatus").innerHTML = rows.map(([label, value]) => `
+    <div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>
+  `).join("");
 }
 
 function renderModeration(data) {
