@@ -113,6 +113,10 @@
 - production-аудит 2026-07-14 подтвердил отсутствие активных legacy config-таблиц; сохранённый pre-consent `social_chat` payload переводится в policy v2 с эффективным шансом 0%, а обе admin-поверхности используют одинаковую нормализацию.
 - runtime разговорной модели хранит общее состояние в `conversation_runtime_status`: web-настройки показывают Qwen/Ollama, а persistent circuit breaker не даёт отключённому домашнему ПК задерживать каждый Discord-ответ на полный timeout.
 - dataset/readiness SQL принимает только provider `ollama`; Markov-пародии, мемы и шаблонные fallback-ответы технически не попадают в QLoRA.
+- Итоги сервера разделены на `core.summary_stats_store` (агрегации SQLite),
+  `core.summary_store` (идемпотентность публикаций), `core.summary_service`
+  (чистые границы периодов, фильтрация и текстовая проекция) и
+  `fun_slesh.daily_summary` (Discord embeds, scheduler и interactions).
 
 ## Следующий порядок работ
 

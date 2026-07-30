@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -1421,6 +1421,64 @@ class SummaryServiceTests(unittest.TestCase):
         self.assertEqual(bounded_int({"limit": "bad"}, "limit", 3), 3)
         self.assertTrue(block_enabled({}, "daily_block_stats"))
         self.assertFalse(block_enabled({"daily_block_stats": "выкл"}, "daily_block_stats"))
+
+    def test_period_bounds_and_game_filtering_are_discord_independent(self):
+        self.assertEqual(
+            summary_service.week_bounds(date(2026, 7, 29)),
+            (date(2026, 7, 20), date(2026, 7, 27)),
+        )
+        self.assertEqual(
+            summary_service.week_bounds(date(2026, 8, 2)),
+            (date(2026, 7, 27), date(2026, 8, 3)),
+        )
+        self.assertEqual(
+            summary_service.month_bounds(date(2026, 12, 15)),
+            (date(2026, 12, 1), date(2027, 1, 1)),
+        )
+        payload = {"game_filter_mode": "only_selected", "game_spotlight_game": "Elden Ring"}
+        stats = {
+            "top_game_users": [(9, 999)],
+            "top_user_games": [
+                (2, "Other", 500),
+                (1, "elden ring", 400),
+                (3, "Elden Ring", 800),
+            ],
+        }
+        self.assertEqual(
+            summary_service.selected_game_user_rows(payload, stats),
+            [(3, 800), (1, 400)],
+        )
+        self.assertEqual(
+            summary_service.filter_game_rows(payload, [("Other", 5), ("Elden Ring", 4)]),
+            [("Elden Ring", 4)],
+        )
+
+    def test_summary_text_projection_keeps_rankings_and_empty_states_stable(self):
+        names = {1: "Алиса", 2: "Боб"}
+        resolve = lambda user_id: names.get(user_id, f"участник {user_id}")
+        self.assertEqual(summary_service.format_seconds(3661), "1ч 1м")
+        self.assertEqual(summary_service.format_seconds(-1), "0м")
+        self.assertEqual(
+            summary_service.format_rank_lines([(1, 7), (2, 3)], "сообщ.", resolve),
+            "🥇 Алиса — **7 сообщ.**\n🥈 Боб — **3 сообщ.**",
+        )
+        self.assertEqual(summary_service.format_term_lines([]), "Пока пусто.")
+        self.assertIn(
+            "главная игра: Elden Ring (1ч 0м)",
+            summary_service.period_focus_line(
+                {"top_games": [("Elden Ring", 3600)]},
+                resolve,
+            ),
+        )
+        self.assertEqual(
+            summary_service.weekly_champion_ids({
+                "top_msgs": [(1, 9)],
+                "top_voice": [(1, 8)],
+                "top_game_users": [(2, 7)],
+                "top_rep": [],
+            }),
+            [1, 2],
+        )
 
 
 class SummaryStoreTests(IsolatedDatabaseTest):

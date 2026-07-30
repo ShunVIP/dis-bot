@@ -27,9 +27,28 @@ from core.summary_service import (
     block_enabled as _summary_block_enabled,
     block_title as _summary_block_title,
     bounded_int as _summary_int,
+    daily_winners as _daily_winners_text,
+    filter_game_rows as _filter_game_rows,
+    fit_field as _fit_summary_field,
+    format_game_spotlight_lines as _game_spotlight_lines,
+    format_named_duration_lines as _named_duration_lines,
+    format_rank_lines as _rank_lines,
+    format_seconds as _format_seconds,
+    format_term_lines as _term_lines,
+    format_user_game_lines as _user_game_lines,
     merge_summary_settings,
+    month_bounds as _month_bounds,
+    period_focus_line as _period_focus,
     render_summary_template as _render_summary_template,
+    selected_game as _selected_game,
+    selected_game_user_rows as _selected_game_users,
+    summary_metrics as _metrics_text,
+    tracked_daily_lines as _daily_sources_text,
+    tracked_weekly_lines as _weekly_sources_text,
     truthy_setting as _truthy_payload,
+    week_bounds as _week_bounds,
+    weekly_champion_ids as _champion_ids,
+    winner_haiku as _champion_haiku,
 )
 from core.summary_store import (
     ensure_summary_tables as _ensure_tables,
@@ -94,35 +113,9 @@ def _summary_compact(payload: dict) -> bool:
     return _truthy_payload(payload.get("summary_compact_mode"))
 
 
-def _summary_selected_game(payload: dict) -> str:
-    return str(payload.get("game_spotlight_game") or "").strip()
-
-
-def _summary_filter_game_rows(payload: dict, rows: list[tuple]) -> list[tuple]:
-    if str(payload.get("game_filter_mode") or "all").strip() != "only_selected":
-        return rows
-    selected = _summary_selected_game(payload).casefold()
-    if not selected:
-        return rows
-    result = []
-    for row in rows:
-        if len(row) >= 2 and str(row[1]).strip().casefold() == selected:
-            result.append(row)
-        elif row and str(row[0]).strip().casefold() == selected:
-            result.append(row)
-    return result
-
-
-def _summary_selected_game_user_rows(payload: dict, stats: dict) -> list[tuple[int, int]]:
-    selected = _summary_selected_game(payload).casefold()
-    if str(payload.get("game_filter_mode") or "all").strip() != "only_selected" or not selected:
-        return list(stats.get("top_game_users") or [])
-    rows = []
-    for user_id, activity_name, seconds in stats.get("top_user_games", []):
-        if str(activity_name).strip().casefold() == selected:
-            rows.append((int(user_id), int(seconds)))
-    rows.sort(key=lambda row: row[1], reverse=True)
-    return rows
+_summary_selected_game = _selected_game
+_summary_filter_game_rows = _filter_game_rows
+_summary_selected_game_user_rows = _selected_game_users
 
 
 def _apply_summary_branding(emb: discord.Embed, guild: discord.Guild, payload: dict):
@@ -179,30 +172,15 @@ def _save_summary_enabled(guild_id: int, enabled: bool):
     set_feature_enabled(guild_id, FEATURE_DAILY_SUMMARY, enabled)
 
 
-def _fmt_seconds(sec: int) -> str:
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    if h:
-        return f"{h}ч {m}м"
-    return f"{m}м"
+_fmt_seconds = _format_seconds
 
 
 def _week_bounds_msk() -> tuple[date, date]:
-    today = datetime.now(MSK).date()
-    start_current_week = today - timedelta(days=today.weekday())
-    if today.weekday() == 6:
-        return start_current_week, today + timedelta(days=1)
-    return start_current_week - timedelta(days=7), start_current_week
+    return _week_bounds(datetime.now(MSK).date())
 
 
 def _month_bounds_msk() -> tuple[date, date]:
-    today = datetime.now(MSK).date()
-    start_this_month = today.replace(day=1)
-    if today.month == 12:
-        start_next_month = today.replace(year=today.year + 1, month=1, day=1)
-    else:
-        start_next_month = today.replace(month=today.month + 1, day=1)
-    return start_this_month, start_next_month
+    return _month_bounds(datetime.now(MSK).date())
 
 
 def _get_weekly_stats(guild_id: int) -> dict:
@@ -231,123 +209,48 @@ def _format_rank_lines(
     value_formatter=None,
     limit: int = 5,
 ) -> str:
-    medals = ["🥇", "🥈", "🥉"]
-    lines = []
-    for i, (user_id, raw_value) in enumerate(rows[:limit], start=1):
-        prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
-        value = int(raw_value) if cast_int else raw_value
-        shown = value_formatter(value) if value_formatter else f"{value} {suffix}"
-        lines.append(f"{prefix} {_member_name(guild, int(user_id))} — **{shown}**")
-    return "\n".join(lines) if lines else "Пока пусто."
+    return _rank_lines(
+        rows, suffix, lambda user_id: _member_name(guild, user_id),
+        cast_int=cast_int, value_formatter=value_formatter, limit=limit,
+    )
 
 
 def _format_term_lines(rows: list[tuple]) -> str:
-    if not rows:
-        return "Пока пусто."
-    return "\n".join(f"**{i}.** {term} — **{int(count)}**" for i, (term, count) in enumerate(rows[:3], start=1))
+    return _term_lines(rows)
 
 
 def _format_named_duration_lines(rows: list[tuple], limit: int = 5) -> str:
-    if not rows:
-        return "Пока пусто."
-    medals = ["🥇", "🥈", "🥉"]
-    lines = []
-    for i, (name, seconds) in enumerate(rows[:limit], start=1):
-        prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
-        lines.append(f"{prefix} {name} — **{_fmt_seconds(int(seconds))}**")
-    return "\n".join(lines)
+    return _named_duration_lines(rows, limit)
 
 
 def _summary_metrics(stats: dict) -> str:
-    parts = [
-        f"💬 **{int(stats.get('total_msgs') or 0)}** сообщ.",
-        f"🎙️ **{_fmt_seconds(int(stats.get('total_voice_s') or 0))}** войс",
-        f"🎮 **{_fmt_seconds(int(stats.get('total_game_s') or 0))}** игры",
-    ]
-    return "  •  ".join(parts)
+    return _metrics_text(stats)
 
 
 def _period_focus_line(guild: discord.Guild, stats: dict) -> str:
-    focus = []
-    if stats.get("top_msgs"):
-        uid, total = stats["top_msgs"][0]
-        focus.append(f"чат держал {_member_name(guild, int(uid))} ({int(total)} сообщ.)")
-    if stats.get("top_game_users"):
-        uid, seconds = stats["top_game_users"][0]
-        focus.append(f"в играх лидировал {_member_name(guild, int(uid))} ({_fmt_seconds(int(seconds))})")
-    if stats.get("top_games"):
-        name, seconds = stats["top_games"][0]
-        focus.append(f"главная игра: {name} ({_fmt_seconds(int(seconds))})")
-    if not focus:
-        return "Период прошёл тихо: статистика ещё копится."
-    return " · ".join(focus[:3])
+    return _period_focus(stats, lambda user_id: _member_name(guild, user_id))
 
 
 def _fit_field(value: str, limit: int = 1024) -> str:
-    if len(value) <= limit:
-        return value
-    return value[: limit - 1].rstrip() + "…"
+    return _fit_summary_field(value, limit)
 
 
 def _format_user_game_lines(guild: discord.Guild, rows: list[tuple], limit: int = 10) -> str:
-    if not rows:
-        return "Пока пусто."
-    medals = ["🥇", "🥈", "🥉"]
-    lines = []
-    for i, (user_id, game_name, seconds) in enumerate(rows[:limit], start=1):
-        prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
-        lines.append(
-            f"{prefix} {_member_name(guild, int(user_id))} — **{game_name}**, {_fmt_seconds(int(seconds))}"
-        )
-    return "\n".join(lines)
+    return _user_game_lines(rows, lambda user_id: _member_name(guild, user_id), limit)
 
 
 def _format_game_spotlight_lines(guild: discord.Guild, stats: dict, game_name: str, limit: int = 10) -> str:
-    wanted = game_name.strip().casefold()
-    rows = [
-        (int(user_id), str(activity_name), int(seconds))
-        for user_id, activity_name, seconds in stats.get("top_user_games", [])
-        if str(activity_name).strip().casefold() == wanted
-    ]
-    if not rows:
-        return ""
-    rows.sort(key=lambda row: row[2], reverse=True)
-    medals = ["🥇", "🥈", "🥉"]
-    lines = []
-    for i, (user_id, _activity_name, seconds) in enumerate(rows[:limit], start=1):
-        prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
-        lines.append(f"{prefix} {_member_name(guild, user_id)} — **{_fmt_seconds(seconds)}**")
-    return "\n".join(lines)
+    return _game_spotlight_lines(
+        stats, game_name, lambda user_id: _member_name(guild, user_id), limit,
+    )
 
 
 def _tracked_daily_lines(stats: dict) -> str:
-    lines = ["💬 сообщения, слова и эмодзи: топ-3 слов и эмодзи длиннее 2 букв"]
-    if stats.get("total_voice_s") or stats.get("top_voice"):
-        lines.append("🎙️ голосовые сессии")
-    if stats.get("total_game_s") or stats.get("top_games") or stats.get("top_game_users"):
-        lines.append("🎮 Discord-игры и игровое время")
-    if stats.get("rep_events"):
-        lines.append("⭐ Размер")
-    if stats.get("toxic_count"):
-        lines.append("☢️ токсичность")
-    return "\n".join(lines)
+    return _daily_sources_text(stats)
 
 
 def _tracked_weekly_lines(stats: dict) -> str:
-    lines = ["💬 сообщения, слова и эмодзи: топ-3 слов и эмодзи длиннее 2 букв"]
-    if stats.get("total_voice_s") or stats.get("top_voice"):
-        lines.append("🎙️ голосовые сессии")
-    if stats.get("top_games") or stats.get("top_game_users") or stats.get("top_heroes"):
-        lines.append("🎮 Discord-игры и игровое время")
-    if stats.get("top_other_activities") or stats.get("top_activity_users"):
-        lines.append("📡 прочие Discord-активности")
-    if stats.get("top_balance") or stats.get("top_streaks"):
-        lines.append("💰 экономика и дэйлики")
-    if stats.get("top_rep"):
-        lines.append("⭐ Размер")
-    if stats.get("top_toxic"):
-        lines.append("☢️ токсичность")
-    return "\n".join(lines)
+    return _weekly_sources_text(stats)
 
 
 def _winner_phrase(user_id: int) -> str | None:
@@ -364,42 +267,15 @@ def _winner_phrase(user_id: int) -> str | None:
 
 
 def _winner_haiku(display_name: str, categories: list[str]) -> str:
-    joined = ", ".join(categories[:3])
-    return (
-        f"Корона недели.\n"
-        f"{display_name} забрал: {joined}.\n"
-        f"Сервер шлёт салют."
-    )
+    return _champion_haiku(display_name, categories)
 
 
 def _daily_winners(guild: discord.Guild, stats: dict) -> str:
-    lines = []
-    if stats.get("top_chatters"):
-        uid, total = stats["top_chatters"][0]
-        lines.append(f"💬 Чат: {_member_name(guild, int(uid))} — **{int(total)} сообщ.**")
-    if stats.get("top_voice"):
-        uid, seconds = stats["top_voice"][0]
-        lines.append(f"🎙️ Войс: {_member_name(guild, int(uid))} — **{_fmt_seconds(int(seconds))}**")
-    if stats.get("top_game_users"):
-        uid, seconds = stats["top_game_users"][0]
-        lines.append(f"🎮 Игры: {_member_name(guild, int(uid))} — **{_fmt_seconds(int(seconds))}**")
-    return "\n".join(lines) if lines else "Сегодня победители спрятались в тумане."
+    return _daily_winners_text(stats, lambda user_id: _member_name(guild, user_id))
 
 
 def _weekly_champion_ids(stats: dict) -> list[int]:
-    sources = [
-        stats.get("top_msgs", []),
-        stats.get("top_voice", []),
-        stats.get("top_game_users", []),
-        stats.get("top_rep", []),
-    ]
-    result = []
-    for rows in sources:
-        if rows:
-            uid = int(rows[0][0])
-            if uid not in result:
-                result.append(uid)
-    return result[:5]
+    return _champion_ids(stats)
 
 
 def _build_winner_congrats(guild: discord.Guild, stats: dict) -> str:
