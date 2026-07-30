@@ -67,6 +67,7 @@ def ensure_platform_tables():
                 guild_id        INTEGER NOT NULL DEFAULT 0,
                 channel_id      INTEGER NOT NULL DEFAULT 0,
                 source          TEXT NOT NULL DEFAULT 'platform',
+                reply_to_message_id INTEGER NOT NULL DEFAULT 0,
                 status          TEXT NOT NULL DEFAULT 'stored',
                 created_at      TEXT NOT NULL
             );
@@ -133,6 +134,7 @@ def ensure_platform_tables():
         _ensure_column(conn, "platform_messages", "guild_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "platform_messages", "channel_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "platform_messages", "source", "TEXT NOT NULL DEFAULT 'platform'")
+        _ensure_column(conn, "platform_messages", "reply_to_message_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "platform_messages", "status", "TEXT NOT NULL DEFAULT 'stored'")
         _ensure_column(conn, "platform_dm_threads", "member_low", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "platform_dm_threads", "member_high", "INTEGER NOT NULL DEFAULT 0")
@@ -142,6 +144,13 @@ def ensure_platform_tables():
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_platform_messages_target ON platform_messages(scope, target_id, id)"
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_conversation_reply
+            ON platform_messages(source, reply_to_message_id)
+            WHERE source='conversation_ai' AND reply_to_message_id>0
+            """
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_platform_dm_reads_user ON platform_dm_reads(user_id, thread_id)"
@@ -651,6 +660,7 @@ def add_platform_message(
     guild_id: int = 0,
     channel_id: int = 0,
     source: str = "platform",
+    reply_to_message_id: int = 0,
     queue_discord: bool = False,
 ) -> int:
     ensure_platform_tables()
@@ -660,13 +670,15 @@ def add_platform_message(
     if not text and not clean_attachments:
         raise ValueError("empty message")
     with db_connection(SOCIAL_DB) as conn:
+        clean_source = str(source or "platform")[:32]
+        clean_reply_to = max(0, int(reply_to_message_id))
         cur = conn.execute(
             """
-            INSERT INTO platform_messages(
+            INSERT OR IGNORE INTO platform_messages(
                 scope, target_id, author_id, author_name, content, attachment_json,
-                guild_id, channel_id, source, status, created_at
+                guild_id, channel_id, source, reply_to_message_id, status, created_at
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 clean_scope,
@@ -677,13 +689,29 @@ def add_platform_message(
                 json.dumps(clean_attachments, ensure_ascii=False),
                 int(guild_id),
                 int(channel_id),
-                str(source or "platform")[:32],
+                clean_source,
+                clean_reply_to,
                 "pending" if queue_discord and guild_id and channel_id else "stored",
                 _now(),
             ),
         )
-        message_id = int(cur.lastrowid)
-        if queue_discord and guild_id and channel_id:
+        inserted = bool(cur.rowcount)
+        if inserted:
+            message_id = int(cur.lastrowid)
+        elif clean_source == "conversation_ai" and clean_reply_to:
+            row = conn.execute(
+                """
+                SELECT id FROM platform_messages
+                WHERE source='conversation_ai' AND reply_to_message_id=?
+                """,
+                (clean_reply_to,),
+            ).fetchone()
+            if not row:
+                raise RuntimeError("conversation reply idempotency lookup failed")
+            message_id = int(row[0])
+        else:
+            raise RuntimeError("message insert was ignored")
+        if inserted and queue_discord and guild_id and channel_id:
             conn.execute(
                 """
                 INSERT INTO platform_discord_outbox(
@@ -693,7 +721,7 @@ def add_platform_message(
                 """,
                 (message_id, int(guild_id), int(channel_id), int(author_id), author_name[:120], text, _now()),
             )
-        if clean_scope == "dm":
+        if inserted and clean_scope == "dm":
             conn.execute("UPDATE platform_dm_threads SET updated_at=? WHERE id=?", (_now(), int(target_id)))
         conn.commit()
         return message_id
@@ -831,7 +859,8 @@ def list_platform_messages(scope: str, target_id: int, limit: int = 80) -> list[
         rows = conn.execute(
             """
             SELECT id, scope, target_id, author_id, author_name, content, attachment_json,
-                   edited_at, deleted_at, created_at, guild_id, channel_id, source, status
+                   edited_at, deleted_at, created_at, guild_id, channel_id, source,
+                   reply_to_message_id, status
             FROM platform_messages
             WHERE scope=? AND target_id=?
             ORDER BY id DESC LIMIT ?
@@ -855,7 +884,8 @@ def list_platform_messages(scope: str, target_id: int, limit: int = 80) -> list[
             "guild_id": row[10],
             "channel_id": row[11],
             "source": row[12],
-            "status": row[13],
+            "reply_to_message_id": row[13],
+            "status": row[14],
             "reactions": reactions.get(int(row[0]), []),
         }
         for row in reversed(rows)

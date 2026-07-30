@@ -78,6 +78,11 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
 
 - `GET /api/ml/conversation-status` is admin-only and reports whether the private Ollama endpoint is configured, online, or in cooldown.
 - Bot and web app share `conversation_runtime_status`, so failures remain visible across process restarts.
+- The fallback chat queues only explicit `@ViPik`/`ViPik`/`Випик` requests in
+  `conversation_web_jobs`. A background worker writes one idempotent answer into
+  the same channel, mirrors it through the configured Discord route, and stores
+  thumbs-up/down feedback for consent-gated local learning. Ordinary chat and DM
+  messages never trigger this worker.
 - A failed request opens a 15–300 second circuit breaker; Discord uses its immediate fallback while the endpoint is cooling down.
 - Only self-approved, training-opted-in turns whose provider is exactly `ollama` enter QLoRA. Markov, meme and template responses are excluded by both dataset and readiness SQL.
 

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -551,6 +551,63 @@ class WebSecurityTests(IsolatedDatabaseTest):
         app = web_server.create_app()
         routes = {(route.method, route.resource.canonical) for route in app.router.routes()}
         self.assertIn(("POST", "/api/profile/forget-ai"), routes)
+
+    def test_chat_explicit_vipik_request_gets_async_reply_and_feedback(self):
+        web_app_store.upsert_web_user(5, "player")
+        session_id = web_app_store.create_session(5)
+        reply = conversation_service.ConversationReply(
+            text="Да, я тут. Даже VPS пока не дымится.",
+            provider="ollama", model="qwen3:8b", latency_ms=12,
+        )
+
+        async def scenario():
+            with patch.object(conversation_service, "generate_reply", return_value=reply):
+                app = web_server.create_app()
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, "127.0.0.1", 0)
+                await site.start()
+                port = site._server.sockets[0].getsockname()[1]
+                base = f"http://127.0.0.1:{port}"
+                headers = {"Cookie": f"vipik_session={session_id}", "Origin": base}
+                async with ClientSession() as session:
+                    async with session.post(
+                        f"{base}/api/chat",
+                        json={"content": "@ViPik, ты тут?"},
+                        headers=headers,
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        posted = await response.json()
+                        self.assertTrue(posted["ai_queued"])
+
+                    bot_message_id = 0
+                    for _ in range(30):
+                        await asyncio.sleep(0.05)
+                        job = conversation_store.get_web_conversation_request(posted["id"])
+                        if job and job["status"] == "done":
+                            bot_message_id = int(job["bot_message_id"])
+                            break
+                    self.assertGreater(bot_message_id, 0)
+
+                    async with session.post(
+                        f"{base}/api/chat/{bot_message_id}/reactions",
+                        json={"emoji": "👍"},
+                        headers=headers,
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertTrue((await response.json())["active"])
+                    with db_connection(self.db_path) as conn:
+                        score = conn.execute(
+                            """
+                            SELECT score FROM conversation_feedback
+                            WHERE bot_message_id=? AND reviewer_user_id=5
+                            """,
+                            (bot_message_id,),
+                        ).fetchone()
+                    self.assertEqual(score, (1,))
+                await runner.cleanup()
+
+        asyncio.run(scenario())
 
     def test_oauth_tokens_are_scrubbed_and_sessions_are_hashed(self):
         web_app_store.ensure_web_tables()
@@ -1788,6 +1845,74 @@ class ConversationLayerTests(IsolatedDatabaseTest):
                 ).fetchone(),
                 (1,),
             )
+
+    def test_web_conversation_requires_explicit_name_and_is_restart_idempotent(self):
+        target_id = platform_store.get_general_channel_id()
+        source_message_id = platform_store.add_platform_message(
+            "channel", target_id, 101, "Игрок", "@ViPik, посоветуй MMO"
+        )
+        self.assertFalse(web_conversation_service.queue_if_explicit(
+            source_message_id=source_message_id + 1, target_id=target_id,
+            guild_id=7, channel_id=70, user_id=101, display_name="Игрок",
+            text="Просто разговариваю в чате",
+        ))
+        self.assertTrue(web_conversation_service.queue_if_explicit(
+            source_message_id=source_message_id, target_id=target_id,
+            guild_id=7, channel_id=70, user_id=101, display_name="Игрок",
+            text="@ViPik, посоветуй MMO",
+        ))
+        self.assertFalse(web_conversation_service.queue_if_explicit(
+            source_message_id=source_message_id, target_id=target_id,
+            guild_id=7, channel_id=70, user_id=101, display_name="Игрок",
+            text="@ViPik, посоветуй MMO",
+        ))
+        jobs = conversation_store.claim_web_conversation_requests()
+        self.assertEqual(len(jobs), 1)
+        reply = conversation_service.ConversationReply(
+            text="Попробуй Guild Wars 2 — там можно пропасть красиво.",
+            provider="ollama", model="qwen3:8b", latency_ms=42,
+        )
+        with patch.object(conversation_service, "generate_reply", return_value=reply):
+            first = asyncio.run(web_conversation_service.process_web_conversation_job(jobs[0]))
+            second = asyncio.run(web_conversation_service.process_web_conversation_job(jobs[0]))
+        self.assertEqual(first, second)
+        messages = platform_store.list_platform_messages("channel", target_id)
+        ai_messages = [item for item in messages if item["source"] == "conversation_ai"]
+        self.assertEqual(len(ai_messages), 1)
+        self.assertEqual(ai_messages[0]["reply_to_message_id"], source_message_id)
+        self.assertEqual(
+            conversation_store.get_web_conversation_request(source_message_id)["status"],
+            "done",
+        )
+        self.assertEqual(
+            conversation_store.recent_context(7, 70, 101)[-1]["content"],
+            reply.text,
+        )
+
+    def test_stale_web_conversation_job_is_reclaimed_and_feedback_can_be_removed(self):
+        target_id = platform_store.get_general_channel_id()
+        self.assertTrue(conversation_store.enqueue_web_conversation_request(
+            source_message_id=123, target_id=target_id, guild_id=0, channel_id=0,
+            user_id=101, display_name="Игрок", user_text="Випик, ты тут?",
+        ))
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE conversation_web_jobs
+                SET status='processing',updated_at='2000-01-01T00:00:00+00:00'
+                WHERE source_message_id=123
+                """
+            )
+        job = conversation_store.claim_web_conversation_requests()[0]
+        self.assertEqual(job["attempts"], 1)
+        conversation_store.record_turn(
+            bot_message_id=456, source_message_id=123, guild_id=0, channel_id=0,
+            user_id=101, user_text="Випик, ты тут?", bot_text="Тут.",
+            provider="ollama",
+        )
+        self.assertTrue(conversation_store.record_feedback(456, 101, 1))
+        self.assertTrue(conversation_store.clear_conversation_feedback(456, 101))
+        self.assertFalse(conversation_store.clear_conversation_feedback(456, 101))
 
     def test_gamer_archetypes_merge_activity_and_steam_signals(self):
         with db_connection(self.db_path) as conn:

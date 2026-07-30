@@ -61,8 +61,138 @@ def ensure_conversation_tables() -> None:
                 latency_ms INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS conversation_web_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_message_id INTEGER NOT NULL UNIQUE,
+                target_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                channel_id INTEGER NOT NULL DEFAULT 0,
+                user_id INTEGER NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                user_text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'processing', 'done', 'failed')),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                bot_message_id INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversation_web_jobs_status
+                ON conversation_web_jobs(status, id);
             """
         )
+
+
+def enqueue_web_conversation_request(
+    *, source_message_id: int, target_id: int, guild_id: int, channel_id: int,
+    user_id: int, display_name: str, user_text: str,
+) -> bool:
+    ensure_conversation_tables()
+    now = datetime.now(UTC).isoformat()
+    with connection(SOCIAL_DB) as conn:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO conversation_web_jobs(
+                source_message_id,target_id,guild_id,channel_id,user_id,display_name,
+                user_text,status,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,'pending',?,?)
+            """,
+            (
+                int(source_message_id), int(target_id), int(guild_id), int(channel_id),
+                int(user_id), str(display_name)[:120], str(user_text)[:2000], now, now,
+            ),
+        )
+        return bool(cursor.rowcount)
+
+
+def claim_web_conversation_requests(*, limit: int = 5) -> list[dict[str, object]]:
+    ensure_conversation_tables()
+    now = datetime.now(UTC)
+    stale = (now - timedelta(minutes=5)).isoformat()
+    with connection(SOCIAL_DB) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            UPDATE conversation_web_jobs SET status='pending',updated_at=?
+            WHERE status='processing' AND updated_at<?
+            """,
+            (now.isoformat(), stale),
+        )
+        rows = conn.execute(
+            """
+            SELECT id,source_message_id,target_id,guild_id,channel_id,user_id,
+                   display_name,user_text,attempts
+            FROM conversation_web_jobs
+            WHERE status='pending' AND attempts<3
+            ORDER BY id LIMIT ?
+            """,
+            (max(1, min(int(limit), 20)),),
+        ).fetchall()
+        if rows:
+            conn.executemany(
+                """
+                UPDATE conversation_web_jobs
+                SET status='processing',attempts=attempts+1,updated_at=?
+                WHERE id=? AND status='pending'
+                """,
+                [(now.isoformat(), int(row[0])) for row in rows],
+            )
+    return [
+        {
+            "id": int(row[0]), "source_message_id": int(row[1]),
+            "target_id": int(row[2]), "guild_id": int(row[3]),
+            "channel_id": int(row[4]), "user_id": int(row[5]),
+            "display_name": str(row[6]), "user_text": str(row[7]),
+            "attempts": int(row[8]) + 1,
+        }
+        for row in rows
+    ]
+
+
+def complete_web_conversation_request(job_id: int, bot_message_id: int) -> None:
+    ensure_conversation_tables()
+    with connection(SOCIAL_DB) as conn:
+        conn.execute(
+            """
+            UPDATE conversation_web_jobs
+            SET status='done',bot_message_id=?,last_error='',updated_at=?
+            WHERE id=?
+            """,
+            (int(bot_message_id), datetime.now(UTC).isoformat(), int(job_id)),
+        )
+
+
+def fail_web_conversation_request(job_id: int, error: str) -> None:
+    ensure_conversation_tables()
+    with connection(SOCIAL_DB) as conn:
+        conn.execute(
+            """
+            UPDATE conversation_web_jobs
+            SET status=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,
+                last_error=?,updated_at=?
+            WHERE id=?
+            """,
+            (str(error)[:240], datetime.now(UTC).isoformat(), int(job_id)),
+        )
+
+
+def get_web_conversation_request(source_message_id: int) -> dict[str, object] | None:
+    ensure_conversation_tables()
+    with connection(SOCIAL_DB) as conn:
+        row = conn.execute(
+            """
+            SELECT id,status,attempts,bot_message_id,last_error
+            FROM conversation_web_jobs WHERE source_message_id=?
+            """,
+            (int(source_message_id),),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row[0]), "status": str(row[1]), "attempts": int(row[2]),
+        "bot_message_id": int(row[3]), "last_error": str(row[4]),
+    }
 
 
 def get_conversation_runtime_status(provider: str = "ollama") -> dict[str, object]:
@@ -209,10 +339,20 @@ def record_turn(
     with connection(SOCIAL_DB) as conn:
         conn.execute(
             """
-            INSERT OR REPLACE INTO conversation_turns(
+            INSERT INTO conversation_turns(
                 bot_message_id,source_message_id,guild_id,channel_id,user_id,
                 user_text,bot_text,provider,model,latency_ms,created_at
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(bot_message_id) DO UPDATE SET
+                source_message_id=excluded.source_message_id,
+                guild_id=excluded.guild_id,
+                channel_id=excluded.channel_id,
+                user_id=excluded.user_id,
+                user_text=excluded.user_text,
+                bot_text=excluded.bot_text,
+                provider=excluded.provider,
+                model=excluded.model,
+                latency_ms=excluded.latency_ms
             """,
             (
                 int(bot_message_id), int(source_message_id), int(guild_id),
@@ -246,11 +386,31 @@ def record_feedback(bot_message_id: int, reviewer_user_id: int, score: int) -> b
     return True
 
 
+def clear_conversation_feedback(bot_message_id: int, reviewer_user_id: int) -> bool:
+    ensure_conversation_tables()
+    with connection(SOCIAL_DB) as conn:
+        cursor = conn.execute(
+            """
+            DELETE FROM conversation_feedback
+            WHERE bot_message_id=? AND reviewer_user_id=?
+            """,
+            (int(bot_message_id), int(reviewer_user_id)),
+        )
+        return bool(cursor.rowcount)
+
+
 def purge_old_turns(*, retention_days: int = 90) -> int:
     ensure_conversation_tables()
     cutoff = (datetime.now(UTC) - timedelta(days=max(7, int(retention_days)))).isoformat()
     with connection(SOCIAL_DB) as conn:
         cursor = conn.execute("DELETE FROM conversation_turns WHERE created_at<?", (cutoff,))
+        conn.execute(
+            """
+            DELETE FROM conversation_web_jobs
+            WHERE status IN ('done','failed') AND updated_at<?
+            """,
+            (cutoff,),
+        )
         return int(cursor.rowcount)
 
 
@@ -261,10 +421,16 @@ def delete_user_conversation_data(user_id: int) -> dict[str, int]:
             "DELETE FROM conversation_feedback WHERE reviewer_user_id=?", (int(user_id),)
         ).rowcount
         turns = conn.execute("DELETE FROM conversation_turns WHERE user_id=?", (int(user_id),)).rowcount
+        jobs = conn.execute(
+            "DELETE FROM conversation_web_jobs WHERE user_id=?", (int(user_id),)
+        ).rowcount
         preferences = conn.execute(
             "DELETE FROM conversation_preferences WHERE user_id=?", (int(user_id),)
         ).rowcount
-    return {"turns": int(turns), "feedback": int(feedback), "preferences": int(preferences)}
+    return {
+        "turns": int(turns), "jobs": int(jobs),
+        "feedback": int(feedback), "preferences": int(preferences),
+    }
 
 
 def list_training_examples(database: str | None = None) -> list[dict[str, object]]:

@@ -211,11 +211,20 @@ function renderChat(messages) {
         <div class="message-body">${msg.deleted_at ? "<em>Сообщение удалено</em>" : renderRichContent(msg.content)}</div>
         ${msg.deleted_at ? "" : renderAttachments(msg.attachments || [])}
         ${renderReactions(msg.reactions || [])}
-        ${renderMessageActions()}
+        ${msg.source === "conversation_ai" ? renderAiFeedbackActions() : renderMessageActions()}
       </div>
     `;
   }).join("");
   box.scrollTop = box.scrollHeight;
+}
+
+function renderAiFeedbackActions() {
+  return `
+    <div class="message-actions ai-feedback-actions" aria-label="Оценить ответ ViPik">
+      <button type="button" data-action="react" data-emoji="👍" title="Полезный ответ">👍</button>
+      <button type="button" data-action="react" data-emoji="👎" title="Неудачный ответ">👎</button>
+    </div>
+  `;
 }
 
 function messageMatches(msg, query) {
@@ -1392,7 +1401,7 @@ $("chatForm").addEventListener("submit", async (event) => {
   if (!text && !attachments.length) return;
   $("chatStatus").textContent = "";
   try {
-    await api("/api/chat", {
+    const result = await api("/api/chat", {
       method: "POST",
       body: JSON.stringify({ content: text, attachments }),
     });
@@ -1400,6 +1409,9 @@ $("chatForm").addEventListener("submit", async (event) => {
     state.attachments.chat = [];
     renderAttachmentTray("chat");
     await loadChat();
+    if (result.ai_queued) {
+      $("chatStatus").textContent = "ViPik думает — ответ появится здесь.";
+    }
   } catch (error) {
     console.error(error);
     $("chatStatus").textContent = chatErrorText(error);

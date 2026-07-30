@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import asyncio
+from contextlib import suppress
 import mimetypes
 import re
 import time
@@ -59,6 +60,12 @@ from core.community_store import (
 )
 from core.profile_service import forget_ai_personalization, get_unified_profile, update_unified_profile
 from core.conversation_service import conversation_runtime_status
+from core.conversation_store import (
+    claim_web_conversation_requests,
+    clear_conversation_feedback,
+    record_feedback,
+)
+from core.web_conversation_service import process_web_conversation_job, queue_if_explicit
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
 from core.ml_artifacts import load_artifact_manifest
 from core.ml_insights import build_ml_insights
@@ -76,6 +83,7 @@ from core.platform_store import (
     ensure_platform_tables,
     get_server,
     get_or_create_dm,
+    get_general_channel_id,
     get_platform_message_context,
     list_activities,
     list_dm_threads,
@@ -990,7 +998,16 @@ async def api_chat_post(request: web.Request):
         )
     except ValueError as exc:
         return _json({"error": "bad_message", "detail": str(exc)}, 400)
-    return _json({"ok": True, "id": message_id})
+    ai_queued = queue_if_explicit(
+        source_message_id=message_id,
+        target_id=get_general_channel_id(),
+        guild_id=guild_id,
+        channel_id=channel_id,
+        user_id=user["id"],
+        display_name=user.get("global_name") or user.get("username") or str(user["id"]),
+        text=content,
+    )
+    return _json({"ok": True, "id": message_id, "ai_queued": ai_queued})
 
 
 async def api_upload(request: web.Request):
@@ -1092,10 +1109,39 @@ async def api_chat_reaction(request: web.Request):
     if limited is not None:
         return limited
     try:
-        active = toggle_general_chat_reaction(message_id, user["id"], str(data.get("emoji") or "+"))
+        emoji = str(data.get("emoji") or "+")
+        active = toggle_general_chat_reaction(message_id, user["id"], emoji)
     except ValueError:
         return _json({"error": "message_forbidden"}, 403)
+    if emoji in {"👍", "👎"}:
+        if active:
+            record_feedback(message_id, user["id"], 1 if emoji == "👍" else -1)
+        else:
+            clear_conversation_feedback(message_id, user["id"])
     return _json({"ok": True, "active": active})
+
+
+async def _web_conversation_worker(app: web.Application) -> None:
+    while True:
+        jobs = claim_web_conversation_requests(limit=2)
+        if not jobs:
+            await asyncio.sleep(1)
+            continue
+        for job in jobs:
+            try:
+                await process_web_conversation_job(job)
+            except Exception:
+                app.logger.exception("web conversation job %s failed", job.get("id"))
+
+
+async def _web_conversation_worker_context(app: web.Application):
+    task = asyncio.create_task(_web_conversation_worker(app), name="web-conversation-worker")
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 async def api_lol_profile(request: web.Request):
@@ -1297,6 +1343,7 @@ def create_app() -> web.Application:
         client_max_size=MAX_UPLOAD_BYTES + 1024 * 1024,
         middlewares=[security_middleware],
     )
+    app.cleanup_ctx.append(_web_conversation_worker_context)
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
     app.router.add_get("/auth/discord", auth_login)
