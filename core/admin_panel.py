@@ -16,6 +16,22 @@ import discord
 from aiohttp import web
 
 from config import DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET
+from core.admin_panel_service import (
+    FEATURES_BY_ID,
+    FEATURE_REGISTRY,
+    SUMMARY_DAILY_BLOCKS,
+    SUMMARY_FILTER_OPTIONS,
+    SUMMARY_PERIOD_BLOCKS,
+    SUMMARY_RENDER_OPTIONS,
+    SUMMARY_TEMPLATE_HELP,
+    SUMMARY_TEXT_FIELDS,
+    SUMMARY_THEME_OPTIONS,
+    block_enabled as _block_enabled,
+    build_daily_summary_payload,
+    feature_requires_restart as _feature_requires_restart,
+    mode_title as _mode_title,
+    parse_social_chat_form,
+)
 from core.birthday_store import (
     get_birthday,
     list_birthdays,
@@ -220,10 +236,6 @@ def _status_chip(ok: bool, on_text: str = "ON", off_text: str = "OFF") -> str:
     )
 
 
-def _feature_requires_restart(feature: dict) -> bool:
-    return bool(feature.get("restart_on_change"))
-
-
 def _mark_restart_required(request: web.Request, feature: dict, action: str):
     if not _feature_requires_restart(feature):
         return
@@ -255,261 +267,6 @@ def _render_restart_card(request: web.Request | None) -> str:
 async def _delayed_process_restart(delay_seconds: float = 1.5):
     await asyncio.sleep(delay_seconds)
     os._exit(0)
-
-
-FEATURE_REGISTRY = (
-    {
-        "id": "daily_summary",
-        "title": "Итоги сервера",
-        "group": "Настройки сервера",
-        "description": "Автопостинг итогов дня, недели и месяца.",
-        "channel_modes": ("output",),
-        "settings_help": "Канал, куда бот отправляет итоги. Расписание пока хранится в коде планировщика.",
-    },
-    {
-        "id": "birthday",
-        "title": "Дни рождения",
-        "group": "Настройки сервера",
-        "description": "Поздравления, канал поздравлений и пользовательские даты.",
-        "channel_modes": ("output",),
-        "settings_help": "Канал поздравлений и общий список дат рождения ниже на этой странице.",
-    },
-    {
-        "id": "activity_tracker",
-        "title": "Игровые активности",
-        "group": "Настройки сервера",
-        "description": "Тихий presence-трекинг и статистика игровых сессий без автоуведомлений.",
-        "channel_modes": (),
-        "settings_help": "Функция только собирает статистику для итогов и команды топа; сама в канал не пишет.",
-    },
-    {
-        "id": "wwm_guild",
-        "title": "WWM гильдия",
-        "group": "Настройки сервера",
-        "description": "Ники WWM, карточки, приветствие и приемная.",
-        "channel_modes": ("output", "allow", "exclude"),
-        "settings_help": "Канал приветствия, приемная и ограничения по каналам для WWM-сценариев.",
-    },
-    {
-        "id": "steam",
-        "title": "Steam-релизы",
-        "group": "Настройки сервера",
-        "description": "Steam-профили, вишлисты, релизы и уведомления.",
-        "channel_modes": ("output",),
-        "settings_help": "Канал уведомлений и минимальная скидка для подборок.",
-    },
-    {
-        "id": "toxicity",
-        "title": "Токсичность",
-        "group": "Модерация",
-        "description": "Детектор токсичности, пороги и исключения каналов.",
-        "channel_modes": ("allow", "exclude"),
-        "settings_help": "Где проверять сообщения и где проверку отключить. Порог можно поправить в дополнительных настройках.",
-    },
-    {
-        "id": "social_chat",
-        "title": "Болтовня",
-        "group": "Модерация",
-        "description": "Ответы по обращению и добровольно включаемые разговорные каналы.",
-        "channel_modes": ("allow", "exclude"),
-        "settings_help": "Без списка разрешённых каналов бот отвечает только на упоминание, имя или ответ на его сообщение.",
-    },
-    {
-        "id": "voice_roles",
-        "title": "Голосовые роли",
-        "group": "Экономика и роли",
-        "description": "Авто-роли по голосовым каналам и исключения.",
-        "channel_modes": ("allow", "exclude"),
-        "settings_help": "Ограничения для автоматических ролей, связанных с голосовыми каналами.",
-    },
-    {
-        "id": "economy",
-        "title": "Экономика",
-        "group": "Экономика и роли",
-        "description": "Налоги, магазин, награды и персональная валюта.",
-        "channel_modes": (),
-        "settings_help": "Налоги, магазин ролей, награды активности и персональная валюта.",
-    },
-    {
-        "id": "activity_rewards",
-        "title": "Награды за активность",
-        "group": "Экономика и роли",
-        "description": "Монеты и репутация за сообщения и время в голосе.",
-        "channel_modes": (),
-        "settings_help": "Включение хранится здесь; интервалы и суммы задаются командой /награды_настроить.",
-    },
-    {
-        "id": "message_stats",
-        "title": "Статистика сообщений",
-        "group": "Настройки сервера",
-        "description": "Суточные агрегаты сообщений, слов, эмодзи и исключения каналов.",
-        "channel_modes": ("exclude",),
-        "settings_help": "Исключённые каналы не участвуют в статистике и пассивных наградах.",
-    },
-    {
-        "id": "heroes_troll",
-        "title": "Heroes troll",
-        "group": "Игры",
-        "description": "Шутливые сообщения о запуске и завершении Heroes of Might and Magic.",
-        "channel_modes": ("output",),
-        "settings_help": "Канал сообщений; история игровых сессий хранится отдельно от настройки.",
-    },
-    {
-        "id": "rep_roles",
-        "title": "Размер-роли",
-        "group": "Экономика и роли",
-        "description": "Автоматические временные роли по порогам репутации.",
-        "channel_modes": (),
-        "settings_help": "Здесь систему можно отключить; пороги редактируются Discord-командами.",
-    },
-    {
-        "id": "parody_training",
-        "title": "Пародии и модели",
-        "group": "Модели и пародии",
-        "description": "Markov-модели, фильтры корпуса и безопасное обучение.",
-        "channel_modes": ("allow", "exclude"),
-        "restart_on_change": True,
-        "settings_help": "Каналы для сбора/использования пародийных ответов и безопасные флаги моделей.",
-    },
-    {
-        "id": "maintenance",
-        "title": "Обслуживание",
-        "group": "Обслуживание",
-        "description": "Сбор сообщений, индексация, профилактика и ручные проверки.",
-        "channel_modes": (),
-        "restart_on_change": True,
-        "settings_help": "Тяжелые сервисные действия. Опасные операции оставлены за подтверждением и перезапуском.",
-    },
-    {
-        "id": "fallback_platform",
-        "title": "Сайт и запасной чат",
-        "group": "Сайт и app",
-        "description": "Сайт/app, чат, комнаты, голосовые комнаты и демонстрации экрана.",
-        "channel_modes": (),
-        "restart_on_change": True,
-        "settings_help": "Настройки запасной площадки, когда Discord недоступен или нужен веб-чат.",
-    },
-)
-
-FEATURES_BY_ID = {item["id"]: item for item in FEATURE_REGISTRY}
-
-SUMMARY_TEXT_FIELDS = (
-    (
-        "daily_title_template",
-        "Заголовок итога дня",
-        "🌙 Итог дня — {date}",
-        "Можно вставить: {date} - дата итога, {guild} - сервер, {haiku} - автоматическое хокку.",
-    ),
-    (
-        "daily_description_template",
-        "Текст под заголовком дня",
-        "*{haiku}*",
-        "Можно вставить: {haiku} - автоматическое хокку, {date} - дата, {guild} - сервер.",
-    ),
-    (
-        "daily_footer_template",
-        "Подпись итога дня",
-        "Увидимся завтра 👋",
-        "Можно вставить: {date} - дата, {guild} - сервер, {haiku} - хокку.",
-    ),
-    (
-        "weekly_title_template",
-        "Заголовок недели",
-        "🏆 Итоги недели — {start}–{end}",
-        "Можно вставить: {start} - начало периода, {end} - конец периода, {guild} - сервер, {period} - тип периода.",
-    ),
-    (
-        "monthly_title_template",
-        "Заголовок месяца",
-        "📅 Итоги месяца — {start}–{end}",
-        "Можно вставить: {start} - начало периода, {end} - конец периода, {guild} - сервер, {period} - тип периода.",
-    ),
-    (
-        "period_footer_template",
-        "Подпись недели и месяца",
-        "Итоги за {period}. Канал и автопостинг настраиваются в админ-панели.",
-        "Можно вставить: {period} - неделя или месяц, {start} - начало, {end} - конец, {guild} - сервер.",
-    ),
-    (
-        "weekly_champion_message_template",
-        "Сообщение с упоминанием чемпионов недели",
-        "🏆 Поздравляем чемпионов недели: {mentions}",
-        "Можно вставить: {mentions} - упоминания чемпионов, {guild} - сервер, {period} - период.",
-    ),
-    (
-        "game_spotlight_title_template",
-        "Заголовок выбранной игры",
-        "{label}: {game}",
-        "Можно вставить: {label} - твоё название, {game} - выбранная игра, {period}, {start}, {end}, {guild}.",
-    ),
-    (
-        "game_spotlight_empty_template",
-        "Если никто не играл в выбранную игру",
-        "За этот период никто не отметился в {game}.",
-        "Можно вставить: {game} - выбранная игра, {label} - твоё название, {period}, {start}, {end}, {guild}.",
-    ),
-)
-
-SUMMARY_DAILY_BLOCKS = (
-    ("daily_block_stats", "За день", "Общая сумма сообщений, войса и времени в играх."),
-    ("daily_block_tracked", "Что трекалось", "Пояснение, какие данные бот учитывал."),
-    ("daily_block_voice_games", "Играли", "Голосовые игровые каналы, где была активность."),
-    ("daily_block_top_chatters", "Самые активные", "Топ участников по сообщениям."),
-    ("daily_block_top_voice", "Топ войса", "Топ участников по времени в голосе."),
-    ("daily_block_top_words", "Слова дня", "Топ слов за день."),
-    ("daily_block_top_emojis", "Эмодзи дня", "Топ эмодзи за день."),
-    ("daily_block_top_games", "Игры дня", "Топ игр по времени."),
-    ("daily_block_user_games", "Кто во что играл", "Участники и игры, в которых они отметились."),
-    ("daily_block_game_users", "Топ игроков дня", "Топ участников по игровому времени."),
-    ("daily_block_game_winner", "Игровой победитель дня", "Первое место среди игроков дня."),
-    ("daily_block_winners", "Победители дня", "Сводка победителей по чату, войсу и играм."),
-    ("daily_block_misc", "Прочее", "Токсичность и дополнительные события дня."),
-)
-
-SUMMARY_PERIOD_BLOCKS = (
-    ("period_block_main_people", "Главные люди", "Топ участников по сообщениям за неделю или месяц."),
-    ("period_block_voice", "Войс", "Топ участников по времени в голосе."),
-    ("period_block_rep", "Размер", "Топ по репутации/Размеру."),
-    ("period_block_words", "О чём шумели", "Слова и эмодзи периода."),
-    ("period_block_game_overview", "Игровой блок", "Heroes, топ игр и топ игроков."),
-    ("period_block_game_spotlight", "Выбранная игра", "Отдельный блок по игре из списка, например Where Winds Meet."),
-    ("period_block_user_games", "Кто во что играл", "Участники и игры периода."),
-    ("period_block_other_activities", "Другие активности", "Стримы, слушает, смотрит и другие Discord-активности."),
-    ("period_block_balance", "Баланс", "Топ по валюте."),
-    ("period_block_streaks", "Серии", "Топ серий активности."),
-    ("period_block_toxic", "Токсичность", "Топ токсичности и цитата."),
-    ("period_block_champion_congrats", "Поздравления чемпионам", "Текстовый блок поздравлений победителей."),
-)
-
-SUMMARY_THEME_OPTIONS = (
-    ("neon", "Неон", "Контрастный игровой стиль: фиолетовый, синий, яркие акценты."),
-    ("royal", "Премиум", "Золотой акцент для недельных и месячных итогов."),
-    ("forest", "Спокойный", "Зеленый и бирюзовый, меньше визуального шума."),
-    ("fire", "Жаркий", "Красный/оранжевый акцент для соревновательных итогов."),
-)
-
-SUMMARY_FILTER_OPTIONS = (
-    ("all", "Показывать все игры"),
-    ("spotlight", "Все игры + отдельный блок выбранной игры"),
-    ("only_selected", "Только выбранная игра в игровых блоках"),
-)
-
-SUMMARY_RENDER_OPTIONS = (
-    ("embed", "Embed + кнопки"),
-    ("components_v2", "Components v2 beta"),
-)
-
-SUMMARY_TEMPLATE_HELP = (
-    ("{date}", "Дата итога дня"),
-    ("{haiku}", "Автоматическое хокку дня"),
-    ("{guild}", "Название сервера"),
-    ("{start}", "Начало периода недели или месяца"),
-    ("{end}", "Конец периода недели или месяца"),
-    ("{period}", "Тип периода: неделю или месяц"),
-    ("{mentions}", "Упоминания чемпионов недели"),
-    ("{label}", "Твоё название группы, например “Задроты недели”"),
-    ("{game}", "Выбранная игра из активности сервера"),
-)
 
 
 def _admin_guild_id(bot) -> int:
@@ -623,15 +380,6 @@ def _render_template_help() -> str:
         </table>
       </details>
     """
-
-
-def _block_enabled(payload: dict, key: str) -> bool:
-    value = payload.get(key)
-    if value is None:
-        return True
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on", "да", "вкл"}
 
 
 def _render_summary_block_controls(payload: dict) -> str:
@@ -1516,14 +1264,6 @@ def _feature_or_404(feature_id: str) -> dict:
     return feature
 
 
-def _mode_title(mode: str) -> str:
-    return {
-        "output": "канал публикаций",
-        "allow": "разрешенный канал",
-        "exclude": "запрещенный канал",
-    }.get(mode, mode)
-
-
 async def _feature_enabled(request: web.Request) -> web.Response:
     _assert_ip_allowed(request)
     if not _is_authorized(request):
@@ -1613,26 +1353,7 @@ async def _daily_summary_text(request: web.Request) -> web.Response:
     if not _is_authorized(request):
         raise web.HTTPUnauthorized(text="Admin token required")
     data = await request.post()
-    payload = {}
-    for key, _, default, _ in SUMMARY_TEXT_FIELDS:
-        value = str(data.get(key) or "").strip()
-        payload[key] = value or default
-    payload["game_spotlight_enabled"] = str(data.get("game_spotlight_enabled") or "").strip() in {"1", "true", "on", "yes"}
-    payload["game_spotlight_label"] = str(data.get("game_spotlight_label") or "").strip() or "Задроты"
-    payload["game_spotlight_game"] = str(data.get("game_spotlight_game") or "").strip()
-    payload["summary_theme"] = str(data.get("summary_theme") or "neon").strip() or "neon"
-    payload["summary_render_mode"] = str(data.get("summary_render_mode") or "embed").strip() or "embed"
-    payload["summary_accent_color"] = str(data.get("summary_accent_color") or "").strip()
-    payload["summary_thumbnail_url"] = str(data.get("summary_thumbnail_url") or "").strip()
-    payload["summary_buttons_enabled"] = str(data.get("summary_buttons_enabled") or "").strip() in {"1", "true", "on", "yes"}
-    payload["summary_compact_mode"] = str(data.get("summary_compact_mode") or "").strip() in {"1", "true", "on", "yes"}
-    payload["game_filter_mode"] = str(data.get("game_filter_mode") or "all").strip() or "all"
-    payload["daily_top_limit"] = str(data.get("daily_top_limit") or "3").strip() or "3"
-    payload["period_top_limit"] = str(data.get("period_top_limit") or "5").strip() or "5"
-    for key, _, _ in (*SUMMARY_DAILY_BLOCKS, *SUMMARY_PERIOD_BLOCKS):
-        payload[key] = str(data.get(key) or "").strip() in {"1", "true", "on", "yes"}
-        payload[f"{key}_title"] = str(data.get(f"{key}_title") or "").strip()
-        payload[f"{key}_limit"] = str(data.get(f"{key}_limit") or "").strip()
+    payload = build_daily_summary_payload(data)
     guild_id = _admin_guild_id(request.app["bot"])
     set_feature_payload(guild_id, "daily_summary", payload)
     message = "Текст итогов сервера сохранен."
@@ -1644,11 +1365,8 @@ async def _social_chat_settings(request: web.Request) -> web.Response:
     if not _is_authorized(request):
         raise web.HTTPUnauthorized(text="Admin token required")
     data = await request.post()
-    ambient_opt_in = str(data.get("ambient_opt_in") or "").strip().lower() in {
-        "1", "true", "on", "yes",
-    }
     try:
-        chance_percent = int(str(data.get("chance_percent") or "0").strip())
+        ambient_opt_in, chance_percent = parse_social_chat_form(data)
     except ValueError as exc:
         raise web.HTTPBadRequest(text="Шанс автоответа должен быть числом от 0 до 100") from exc
     guild_id = _admin_guild_id(request.app["bot"])

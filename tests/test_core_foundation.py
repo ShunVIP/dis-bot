@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, FormData, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
+from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -92,6 +92,50 @@ class IsolatedDatabaseTest(unittest.TestCase):
         for item in reversed(self.patches):
             item.stop()
         self.temp_dir.cleanup()
+
+
+class AdminPanelServiceTests(unittest.TestCase):
+    def test_feature_registry_is_unique_and_preserves_markov_boundary(self):
+        feature_ids = [item["id"] for item in admin_panel_service.FEATURE_REGISTRY]
+        self.assertEqual(len(feature_ids), len(set(feature_ids)))
+        self.assertIs(FEATURES_BY_ID, admin_panel_service.FEATURES_BY_ID)
+        self.assertIn("Markov", FEATURES_BY_ID["parody_training"]["description"])
+        self.assertTrue(admin_panel_service.feature_requires_restart(
+            FEATURES_BY_ID["parody_training"]
+        ))
+        self.assertFalse(admin_panel_service.feature_requires_restart(
+            FEATURES_BY_ID["daily_summary"]
+        ))
+
+    def test_daily_summary_form_projection_applies_defaults_and_checkbox_state(self):
+        payload = admin_panel_service.build_daily_summary_payload({
+            "daily_title_template": "  Свои итоги {date}  ",
+            "summary_theme": "royal",
+            "summary_buttons_enabled": "on",
+            "daily_block_stats": "1",
+            "daily_block_stats_title": "  Сегодня  ",
+            "daily_top_limit": "",
+        })
+        self.assertEqual(payload["daily_title_template"], "Свои итоги {date}")
+        self.assertEqual(payload["daily_description_template"], "*{haiku}*")
+        self.assertEqual(payload["summary_theme"], "royal")
+        self.assertTrue(payload["summary_buttons_enabled"])
+        self.assertFalse(payload["summary_compact_mode"])
+        self.assertTrue(payload["daily_block_stats"])
+        self.assertFalse(payload["daily_block_top_voice"])
+        self.assertEqual(payload["daily_block_stats_title"], "Сегодня")
+        self.assertEqual(payload["daily_top_limit"], "3")
+
+    def test_social_chat_form_rejects_invalid_chance(self):
+        self.assertEqual(
+            admin_panel_service.parse_social_chat_form({
+                "ambient_opt_in": "on", "chance_percent": "25",
+            }),
+            (True, 25),
+        )
+        for value in ("oops", "-1", "101"):
+            with self.assertRaises(ValueError):
+                admin_panel_service.parse_social_chat_form({"chance_percent": value})
 
 
 class SettingsStoreTests(IsolatedDatabaseTest):

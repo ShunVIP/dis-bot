@@ -120,6 +120,9 @@
 - Каталог `/команды` разделён на `core.menu_catalog_service` (чистая
   классификация, фильтрация и сортировка команд) и `fun_slesh.menu`
   (сбор метаданных discord.py, embeds, modals и interactions).
+- Админ-панель разделена на `core.admin_panel_service` (реестр функций,
+  схема и нормализация форм итогов/болтовни) и `core.admin_panel`
+  (OAuth/IP admission, HTML view и HTTP controller).
 
 ## Следующий порядок работ
 
