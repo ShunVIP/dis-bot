@@ -106,6 +106,10 @@ class AdminPanelServiceTests(unittest.TestCase):
         self.assertFalse(admin_panel_service.feature_requires_restart(
             FEATURES_BY_ID["daily_summary"]
         ))
+        self.assertEqual(
+            FEATURES_BY_ID["raid_schedule"]["channel_modes"],
+            ("output",),
+        )
 
     def test_daily_summary_form_projection_applies_defaults_and_checkbox_state(self):
         payload = admin_panel_service.build_daily_summary_payload({
@@ -1570,6 +1574,37 @@ class RaidScheduleServiceTests(unittest.TestCase):
             menu_catalog_service.category_for_command("рейд", "fun_slesh.raid_schedule"),
             "🕹️ Игры",
         )
+
+    def test_weekly_post_state_prevents_restart_duplicates_and_tracks_channel_changes(self):
+        reference = date(2026, 7, 30)
+        state = raid_schedule_service.build_raid_post_state(
+            reference,
+            channel_id=100,
+            message_id=200,
+            posted_at="2026-07-30T00:00:00+00:00",
+        )
+        self.assertEqual(state["last_week_start"], "2026-07-27")
+        self.assertFalse(
+            raid_schedule_service.raid_post_is_due(state, reference, channel_id=100)
+        )
+        self.assertTrue(
+            raid_schedule_service.raid_post_is_due(state, reference, channel_id=101)
+        )
+        self.assertTrue(
+            raid_schedule_service.raid_post_is_due(
+                state,
+                date(2026, 8, 3),
+                channel_id=100,
+            )
+        )
+
+    def test_shared_raid_embed_contains_full_week_and_possible_dates(self):
+        embed = raid_schedule.build_raid_embed(date(2026, 7, 30))
+        self.assertEqual(embed.title, "🗓️ Рейды · 27.07–02.08.2026")
+        self.assertEqual(len(embed.description.splitlines()), 7)
+        self.assertEqual(embed.fields[0].name, "🎯 Возможные даты")
+        self.assertIn("28.07", embed.fields[0].value)
+        self.assertIn("01.08", embed.fields[0].value)
 
 
 class MenuCatalogServiceTests(unittest.TestCase):

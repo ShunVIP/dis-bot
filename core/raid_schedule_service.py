@@ -82,6 +82,36 @@ def available_raid_days(reference: date) -> tuple[RaidDay, ...]:
     return tuple(item for item in build_raid_week(reference) if item.available)
 
 
+def raid_week_key(reference: date) -> str:
+    monday, _ = week_bounds(reference)
+    return monday.isoformat()
+
+
+def raid_post_is_due(
+    state: dict[str, object],
+    reference: date,
+    channel_id: int,
+) -> bool:
+    return (
+        state.get("last_week_start") != raid_week_key(reference)
+        or state.get("last_channel_id") != int(channel_id)
+    )
+
+
+def build_raid_post_state(
+    reference: date,
+    channel_id: int,
+    message_id: int,
+    posted_at: str,
+) -> dict[str, object]:
+    return {
+        "last_week_start": raid_week_key(reference),
+        "last_channel_id": int(channel_id),
+        "last_message_id": int(message_id),
+        "posted_at": posted_at,
+    }
+
+
 def parse_reference_date(raw: str | None, *, today: date) -> date:
     value = str(raw or "").strip()
     if not value:
