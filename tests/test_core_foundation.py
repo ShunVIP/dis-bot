@@ -1608,6 +1608,14 @@ class ActivityLayerTests(IsolatedDatabaseTest):
 
 
 class ConversationLayerTests(IsolatedDatabaseTest):
+    def test_local_model_default_timeout_covers_measured_cold_start(self):
+        with patch.dict(conversation_service.os.environ, {
+            "LOCAL_CHAT_API_URL": "http://127.0.0.1:11434",
+            "LOCAL_CHAT_TIMEOUT_SECONDS": "",
+        }):
+            _, _, _, timeout = conversation_service.local_model_config()
+        self.assertEqual(timeout, 120.0)
+
     def test_local_conversation_model_success_updates_shared_runtime_status(self):
         async def scenario():
             async def chat(_request):

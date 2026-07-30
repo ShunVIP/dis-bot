@@ -172,7 +172,7 @@ python scripts/train_toxicity_model.py --max-clean 2000
 ```env
 LOCAL_CHAT_API_URL=http://100.x.y.z:11434
 LOCAL_CHAT_MODEL=qwen3:8b
-LOCAL_CHAT_TIMEOUT_SECONDS=45
+LOCAL_CHAT_TIMEOUT_SECONDS=120
 ```
 
 Если ПК или Ollama недоступны, бот автоматически использует Markov-пародию либо
@@ -186,6 +186,15 @@ LoRA/ранжирующей модели; обучение на всём чат�
 пишутся в общий `conversation_runtime_status`; после сбоя persistent circuit breaker
 делает паузу 15–300 секунд и мгновенно отдаёт fallback вместо повторных 45-секундных
 ожиданий. Endpoint статуса закрыт backend-ролью `admin`.
+
+Рекомендуемая сеть без публичного порта: Ollama слушает только
+`127.0.0.1:11434`, а `tailscale serve --bg --yes --tcp 11434 11434` проксирует
+его внутрь tailnet. В `LOCAL_CHAT_API_URL` на VPS указывается Tailscale-IP ПК.
+Проверка полного пути выполняется командой:
+
+```powershell
+python -m scripts.probe_conversation_model --url http://100.x.y.z:11434
+```
 
 ### Advisory-инсайты
 

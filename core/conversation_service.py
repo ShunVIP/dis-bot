@@ -42,9 +42,9 @@ def local_model_config() -> tuple[str, str, str, float]:
     model = os.getenv("LOCAL_CHAT_MODEL", "qwen3:8b").strip() or "qwen3:8b"
     token = os.getenv("LOCAL_CHAT_API_TOKEN", "").strip()
     try:
-        timeout = max(3.0, min(float(os.getenv("LOCAL_CHAT_TIMEOUT_SECONDS", "45")), 120.0))
+        timeout = max(3.0, min(float(os.getenv("LOCAL_CHAT_TIMEOUT_SECONDS", "120")), 120.0))
     except ValueError:
-        timeout = 45.0
+        timeout = 120.0
     return base_url, model, token, timeout
 
 
