@@ -1698,10 +1698,10 @@ class ConversationLayerTests(IsolatedDatabaseTest):
                 display_name="Игрок", text="проверка fallback",
             ))
             status = conversation_service.conversation_runtime_status()
+            panel = _render_conversation_model_panel()
         self.assertIsNone(reply)
         self.assertEqual(status["state"], "disabled")
         self.assertFalse(status["configured"])
-        panel = _render_conversation_model_panel()
         self.assertIn("Разговорная Qwen / Ollama", panel)
         self.assertIn("Не настроена", panel)
         self.assertIn("LOCAL_CHAT_API_URL не задан", panel)
