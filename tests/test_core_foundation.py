@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, FormData, web
-from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
+from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -37,7 +37,7 @@ from scripts.build_ml_manifest import build_manifest
 from scripts import audit_settings, finalize_settings_migration, report_chat_storage
 from scripts.report_learning_readiness import build_report as build_learning_readiness_report
 from scripts.train_toxicity_model import train_model
-from fun_slesh import social_chat
+from fun_slesh import raid_schedule, social_chat
 
 
 class IsolatedDatabaseTest(unittest.TestCase):
@@ -1521,6 +1521,55 @@ class VoiceRoomTests(IsolatedDatabaseTest):
         self.assertEqual(claims["video"]["room"], "room-1")
         self.assertTrue(claims["video"]["roomJoin"])
         self.assertLessEqual(claims["exp"] - claims["nbf"], 15 * 60 + 5)
+
+
+class RaidScheduleServiceTests(unittest.TestCase):
+    def test_anchor_week_matches_described_shifts_and_joint_windows(self):
+        days = raid_schedule_service.build_raid_week(date(2026, 7, 30))
+        self.assertEqual((days[0].day, days[-1].day), (date(2026, 7, 27), date(2026, 8, 2)))
+        by_day = {item.day: item for item in days}
+        self.assertEqual(by_day[date(2026, 7, 30)].lucy.code, "off")
+        self.assertEqual(by_day[date(2026, 7, 30)].raimi.code, "work24")
+        self.assertEqual(by_day[date(2026, 7, 31)].lucy.code, "office")
+        self.assertEqual(by_day[date(2026, 7, 31)].raimi.code, "off")
+        self.assertEqual(by_day[date(2026, 8, 2)].lucy.code, "remote")
+        self.assertEqual(by_day[date(2026, 8, 2)].raimi.code, "recovery")
+        possible = raid_schedule_service.available_raid_days(date(2026, 7, 30))
+        self.assertEqual(
+            [item.day for item in possible],
+            [date(2026, 7, 28), date(2026, 8, 1)],
+        )
+        self.assertTrue(all(item.availability_note == "после 21:00 МСК" for item in possible))
+
+    def test_four_day_cycle_continues_into_following_week(self):
+        possible = raid_schedule_service.available_raid_days(date(2026, 8, 3))
+        self.assertEqual(
+            [item.day for item in possible],
+            [date(2026, 8, 5), date(2026, 8, 9)],
+        )
+        line = raid_schedule_service.format_raid_day(possible[0])
+        self.assertIn("✅", line)
+        self.assertIn("рейд после 21:00 МСК", line)
+
+    def test_reference_date_parser_and_discord_command_contract(self):
+        today = date(2026, 7, 30)
+        self.assertEqual(raid_schedule_service.parse_reference_date(None, today=today), today)
+        self.assertEqual(
+            raid_schedule_service.parse_reference_date("01.08", today=today),
+            date(2026, 8, 1),
+        )
+        self.assertEqual(
+            raid_schedule_service.parse_reference_date("2026-08-09", today=today),
+            date(2026, 8, 9),
+        )
+        with self.assertRaises(ValueError):
+            raid_schedule_service.parse_reference_date("завтра", today=today)
+        self.assertEqual(raid_schedule.RaidSchedule.рейд.name, "рейд")
+        self.assertIn("рейд", menu_catalog_service.PUBLIC_SLASH_COMMANDS)
+        self.assertEqual(
+            menu_catalog_service.category_for_command("рейд", "fun_slesh.raid_schedule"),
+            "🕹️ Игры",
+        )
 
 
 class MenuCatalogServiceTests(unittest.TestCase):

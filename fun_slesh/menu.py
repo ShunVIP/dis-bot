@@ -140,6 +140,7 @@ SECTION_ACTIONS: dict[str, tuple[SectionAction, ...]] = {
         SectionAction("steam_hub", "Steam", "🎮", "steam_hub", row=1),
         SectionAction("game_lol", "League of Legends", "🧬", "game_lol_hub", row=1),
         SectionAction("wwm_hub", "WWM", "🌿", "wwm_hub", row=1),
+        SectionAction("raid_schedule", "Рейд", "🗓️", "call", "RaidSchedule", "рейд", {"дата": None}, row=1),
     ),
     "🔍 Поиск": (
         SectionAction("search_wwm", "WWM база", "🔎", "wwm_search_modal", row=1),
@@ -1250,10 +1251,15 @@ async def _send_games_hub(bot: commands.Bot, interaction: discord.Interaction):
     async def wwm(next_interaction: discord.Interaction):
         await _send_wwm_hub(bot, next_interaction)
 
+    async def raid(next_interaction: discord.Interaction):
+        await _invoke_cog_action(
+            bot, next_interaction, "RaidSchedule", "рейд", дата=None
+        )
+
     await _send_action_picker(
         interaction,
         title="🎮 Игровой хаб",
-        description="Один вход для мини-игр, Steam, LoL и WWM.",
+        description="Один вход для мини-игр, рейдов, Steam, LoL и WWM.",
         placeholder="Выбери игровой раздел",
         options=[
             discord.SelectOption(label="КНБ", value="rps", emoji="✊"),
@@ -1263,6 +1269,7 @@ async def _send_games_hub(bot: commands.Bot, interaction: discord.Interaction):
             discord.SelectOption(label="Steam", value="steam", emoji="🎮"),
             discord.SelectOption(label="League of Legends", value="lol", emoji="🧬"),
             discord.SelectOption(label="WWM", value="wwm", emoji="🌿"),
+            discord.SelectOption(label="Расписание рейда", value="raid", emoji="🗓️"),
         ],
         callbacks={
             "rps": rps,
@@ -1272,6 +1279,7 @@ async def _send_games_hub(bot: commands.Bot, interaction: discord.Interaction):
             "steam": steam,
             "lol": lol,
             "wwm": wwm,
+            "raid": raid,
         },
     )
 

@@ -13,6 +13,8 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 
+PUBLIC_SLASH_COMMANDS = frozenset({"команды", "админ", "рейд"})
+
 CATEGORY_ORDER = [
     "👤 Профиль",
     "💰 Кошелек и магазин",
@@ -113,6 +115,7 @@ PARODY_COMMANDS = {
 STEAM_ROOTS = {"стим_привязать", "стим_отвязать", "стим", "стим_вишлист", "стим_общие", "релизы"}
 GAME_PROFILE_ROOTS = {"lol"}
 WWM_ROOTS = {"wwm"}
+RAID_ROOTS = {"рейд"}
 ACTIVITY_STATS_ROOTS = {"токсичность", "итоги"}
 ACTIVITY_ADMIN_ROOTS = {"войс_роли"}
 ACTIVITY_HIDDEN_ROOTS = {"heroes_troll", "sixty_seven"}
@@ -136,6 +139,8 @@ def category_for_command(qualified_name: str, module_name: str) -> str:
     if root in REMINDER_ROOTS:
         return "⏰ Напоминания"
     if root in WWM_ROOTS or module_name == "fun_slesh.wwm_guild":
+        return "🕹️ Игры"
+    if root in RAID_ROOTS or module_name == "fun_slesh.raid_schedule":
         return "🕹️ Игры"
     if root in SEARCH_COMMANDS or module_name in {"fun_slesh.ai_tools", "fun_slesh.wwm_search_cog"}:
         return "🔍 Поиск"

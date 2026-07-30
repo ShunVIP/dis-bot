@@ -10,6 +10,7 @@ from discord.app_commands.tree import _retrieve_guild_ids
 from discord.utils import MISSING
 from config import TOKEN
 from core.admin_panel import start_admin_panel
+from core.menu_catalog_service import PUBLIC_SLASH_COMMANDS
 
 if not TOKEN:
     raise ValueError("Discord bot token is missing. Set tok or DISCORD_BOT_TOKEN in KGTD.env")
@@ -26,7 +27,6 @@ intents.presences       = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-PUBLIC_MENU_COMMANDS = {"команды", "админ"}
 SKIP_EXTENSION_FILES = {
     "parody_channel_settings.py",
     "parody_engine_wakelock.py",
@@ -67,14 +67,14 @@ def enable_menu_catalog_command_tree():
 
 
 def collapse_slash_commands_to_menu():
-    """Keep only /команды and /админ visible, but preserve all commands for menu UI."""
+    """Keep compact public entrypoints visible and preserve all commands for menu UI."""
     all_commands = list(bot.tree.get_commands())
     bot.menu_catalog_commands = all_commands
 
     hidden = []
     kept = []
     for cmd in all_commands:
-        if cmd.name in PUBLIC_MENU_COMMANDS:
+        if cmd.name in PUBLIC_SLASH_COMMANDS:
             kept.append(cmd.name)
             continue
 
