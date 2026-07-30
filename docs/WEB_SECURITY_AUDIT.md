@@ -1,6 +1,6 @@
 # Web application security audit
 
-Date: 2026-07-14
+Date: 2026-07-30
 
 Scope: `web_app/server.py`, `core/web_app_store.py`, profile/chat/DM/upload APIs and the planned VPS service.
 
@@ -21,6 +21,11 @@ The user web application must remain private and Tailscale-only. It is not appro
 - Uploaded files are no longer public static routes: a valid ViPik session is required to read them, and new message attachments must reference a ViPik-owned upload path.
 - The PWA service worker explicitly excludes `/uploads/`, `/api/` and `/auth/` from browser Cache Storage.
 - Message posting, reactions, DM creation and upload requests use persistent per-user rate limits with `429` and `Retry-After` responses.
+- Voice room creation, invite issuance and LiveKit token issuance have separate
+  persistent per-user rate limits.
+- Joining a voice room never enables the microphone automatically. Microphone
+  capture and screen sharing require separate user actions in the connected room.
+- LiveKit room tokens are scoped to one room and identity and expire after 15 minutes.
 - The compatibility chat cannot submit arbitrary Discord guild/channel IDs. Discord outbox routing comes only from the administrator-owned `web_chat.output_channel` setting.
 - DM read/post/edit/reaction access is checked at the HTTP boundary; admin status never grants access to another pair's DM.
 - Editing or deleting another user's channel message as an admin creates a `platform_audit_log` event exposed through an admin-only endpoint.
@@ -33,7 +38,9 @@ The user web application must remain private and Tailscale-only. It is not appro
 3. Set a strong `BOT_API_TOKEN` before enabling direct HTTP ingestion from the bot. Shared-database chat/outbox operation does not require it.
 4. Bind the service only to the VPS Tailscale address, never `0.0.0.0` or the public interface.
 5. Verify login, logout, profile update, chat and DM using a non-admin account and an admin account. Automated HTTP tests cover the access boundary; a live two-account UI check remains required before public exposure.
-6. Keep LiveKit/voice on its current private Tailscale boundary until its separate TLS, media-port and room-authorization audit is complete.
+6. Keep LiveKit/voice on its current private Tailscale boundary. Room authorization,
+   short-lived tokens, explicit media activation and rate limits are implemented;
+   private TLS remains required before public exposure.
 
 ## Residual risks
 

@@ -609,6 +609,49 @@ class WebSecurityTests(IsolatedDatabaseTest):
 
         asyncio.run(scenario())
 
+    def test_voice_join_is_muted_by_default_and_tokens_are_rate_limited(self):
+        javascript = (
+            Path(__file__).resolve().parent.parent / "web_app" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        join_source = javascript.split(
+            "async function joinVoiceRoom", 1
+        )[1].split("async function leaveVoiceRoom", 1)[0]
+        self.assertNotIn("setMicrophoneEnabled(true)", join_source)
+        self.assertIn("state.voice.muted = true", join_source)
+        self.assertIn("Подключено без микрофона", join_source)
+
+        web_app_store.upsert_web_user(55, "voice-player")
+        session_id = web_app_store.create_session(55)
+        room_id = voice_store.list_voice_rooms(0, user_id=55)[0]["id"]
+
+        async def scenario():
+            with patch.object(web_server, "VOICE_TOKEN_RATE_LIMITS", ((1, 60),)):
+                app = web_server.create_app()
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, "127.0.0.1", 0)
+                await site.start()
+                port = site._server.sockets[0].getsockname()[1]
+                base = f"http://127.0.0.1:{port}"
+                headers = {"Cookie": f"vipik_session={session_id}", "Origin": base}
+                async with ClientSession() as session:
+                    async with session.post(
+                        f"{base}/api/voice/token",
+                        json={"room_id": room_id},
+                        headers=headers,
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                    async with session.post(
+                        f"{base}/api/voice/token",
+                        json={"room_id": room_id},
+                        headers=headers,
+                    ) as response:
+                        self.assertEqual(response.status, 429)
+                        self.assertGreaterEqual(int(response.headers["Retry-After"]), 1)
+                await runner.cleanup()
+
+        asyncio.run(scenario())
+
     def test_oauth_tokens_are_scrubbed_and_sessions_are_hashed(self):
         web_app_store.ensure_web_tables()
         web_app_store.upsert_web_user(5, "user", access_token="secret-a", refresh_token="secret-r")

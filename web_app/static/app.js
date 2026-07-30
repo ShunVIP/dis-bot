@@ -1056,11 +1056,11 @@ async function joinVoiceRoom(roomId, invite = "") {
   try {
     await room.connect(payload.livekit_url, payload.token);
     state.voice.livekit = room;
-    await room.localParticipant.setMicrophoneEnabled(true);
     state.voice.connected = true;
-    state.voice.muted = false;
+    state.voice.muted = true;
     state.voice.deafened = false;
-    setVoiceStatus("Подключено. Микрофон и показ экрана работают внутри приватной сети.");
+    setVoiceStatus("Подключено без микрофона. Включи его отдельной кнопкой, когда будешь готов.");
+    $("voiceMute").title = "Включить микрофон";
     if (invite) {
       const url = new URL(location.href);
       url.searchParams.delete("voice_invite");
@@ -1103,8 +1103,8 @@ async function leaveVoiceRoom(options = {}) {
 }
 
 async function toggleMute() {
-  if (!state.voice.connected) return;
-  state.voice.muted = !state.voice.muted;
+    if (!state.voice.connected) return;
+    state.voice.muted = !state.voice.muted;
   await state.voice.livekit.localParticipant.setMicrophoneEnabled(!state.voice.muted);
   $("voiceMute").title = state.voice.muted ? "Включить микрофон" : "Выключить микрофон";
   setVoiceControls(true);

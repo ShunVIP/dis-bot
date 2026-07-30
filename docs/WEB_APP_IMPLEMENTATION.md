@@ -41,7 +41,8 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
   - members screen with local roles, badges, statuses and cosmetics
   - compatibility chat view backed by the same `general` platform channel
   - League of Legends game section with Riot ID linking, refresh, unlink and stored profile view
-  - Native Discord-like voice shell with rooms, join by link, mute, deafen and disconnect controls
+- Native Discord-like voice shell with rooms, join by link, mute, deafen and disconnect controls
+- Voice joins start muted; microphone capture and screen sharing require an explicit click
   - settings editor for platform profile, banner preset, role catalog and feature channel policies
   - friendly `social_chat` consent/chance editor; an empty guild field resolves to the configured allowed guild instead of writing settings for guild `0`
   - SSE live updates for the shared `general` channel and the selected platform channel/DM

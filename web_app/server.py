@@ -143,6 +143,9 @@ MESSAGE_RATE_LIMITS = ((6, 10), (30, 60))
 REACTION_RATE_LIMITS = ((20, 10), (80, 60))
 DM_CREATE_RATE_LIMITS = ((5, 60),)
 UPLOAD_RATE_LIMITS = ((10, 60),)
+VOICE_ROOM_RATE_LIMITS = ((3, 60), (10, 3600))
+VOICE_INVITE_RATE_LIMITS = ((10, 60), (60, 3600))
+VOICE_TOKEN_RATE_LIMITS = ((8, 10), (60, 60))
 
 
 def _id_set(value: str) -> frozenset[int]:
@@ -1259,6 +1262,9 @@ async def api_voice_rooms(request: web.Request):
 
 async def api_voice_room_create(request: web.Request):
     user = _require_user(request)
+    limited = _rate_limit_response(user["id"], "voice_room_create", VOICE_ROOM_RATE_LIMITS)
+    if limited is not None:
+        return limited
     data = await request.json()
     guild_id = 0
     name = str(data.get("name") or "").strip()
@@ -1273,6 +1279,9 @@ async def api_voice_room_create(request: web.Request):
 
 async def api_voice_invite(request: web.Request):
     user = _require_user(request)
+    limited = _rate_limit_response(user["id"], "voice_invite", VOICE_INVITE_RATE_LIMITS)
+    if limited is not None:
+        return limited
     data = await request.json()
     guild_id = 0
     room_id = int(data.get("room_id") or 0)
@@ -1292,6 +1301,9 @@ async def api_voice_invite(request: web.Request):
 
 async def api_voice_token(request: web.Request):
     user = _require_user(request)
+    limited = _rate_limit_response(user["id"], "voice_token", VOICE_TOKEN_RATE_LIMITS)
+    if limited is not None:
+        return limited
     data = await request.json()
     guild_id = 0
     room_id = int(data.get("room_id") or 0)

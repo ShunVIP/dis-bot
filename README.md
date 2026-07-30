@@ -276,6 +276,12 @@ journalctl -u vipik-web-app --no-pager -n 100
 scripts/smoke_livekit.sh
 ```
 
+Если Tailscale отвечает `Serve is not enabled on your tailnet`, владелец tailnet
+должен один раз открыть выданную им approval-ссылку. После включения повторный
+запуск создаёт только tailnet-доступные HTTPS/WSS endpoints; `tailscale funnel`
+проект не использует. Установщик ограничивает ожидание Serve 30 секундами, поэтому
+не зависает бесконечно при отсутствии разрешения.
+
 Приватный web/app и signaling LiveKit публикуются через Tailscale Serve после однократного включения Serve владельцем tailnet. Media-порты разрешены только через `tailscale0`; публичное размещение без отдельного security review запрещено.
 
 Production-миграция основного набора feature-настроек завершена: проверенные старые config-таблицы выведены из runtime-пути в `*_legacy_backup`. Пассивные награды и исключения статистики также мигрируют в `core.settings_store`; оставшиеся модульные конфигурации переносятся поэтапно после отдельного prod-аудита.
