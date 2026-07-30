@@ -19,6 +19,10 @@ The user web application must remain private and Tailscale-only. It is not appro
 - Responses include CSP, frame denial, MIME sniffing protection, referrer policy and permissions policy.
 - Uploads are limited by size and count; executable web formats such as HTML, SVG and JavaScript are rejected.
 - Uploaded files are no longer public static routes: a valid ViPik session is required to read them, and new message attachments must reference a ViPik-owned upload path.
+- Upload ownership is registered before a URL is returned. Draft files are
+  visible only to their owner; attached files inherit channel/DM membership,
+  cannot be attached by another user, and close when their message is deleted.
+- Both chat and platform SSE streams require an authenticated session.
 - The PWA service worker explicitly excludes `/uploads/`, `/api/` and `/auth/` from browser Cache Storage.
 - Message posting, reactions, DM creation and upload requests use persistent per-user rate limits with `429` and `Retry-After` responses.
 - Voice room creation, invite issuance and LiveKit token issuance have separate
@@ -46,5 +50,4 @@ The user web application must remain private and Tailscale-only. It is not appro
 
 - HTTP inside Tailscale is private but does not provide browser TLS guarantees. Tailscale HTTPS or a private TLS reverse proxy is preferred before long-term use.
 - SQLite is appropriate for the current small private community, but long-running writes must continue using the shared connection helper and short transactions.
-- Uploaded files require authentication and use unguessable names, but access is not yet bound to a specific channel/DM membership. Per-message file authorization is required for public deployment.
 - Dependency and container/host patch management remain operational responsibilities of the VPS.

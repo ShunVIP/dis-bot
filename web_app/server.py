@@ -59,6 +59,7 @@ from core.community_store import (
     upsert_role,
 )
 from core.profile_service import forget_ai_personalization, get_unified_profile, update_unified_profile
+from core.platform_upload_service import can_download_upload, register_upload
 from core.conversation_service import conversation_runtime_status
 from core.conversation_store import (
     claim_web_conversation_requests,
@@ -976,6 +977,7 @@ async def api_chat_list(request: web.Request):
 
 
 async def api_chat_stream(request: web.Request):
+    _require_user(request)
     limit = _positive_int(request.query.get("limit")) or 80
     return await _sse_json(request, lambda: {"messages": list_general_chat_messages(limit)})
 
@@ -1046,19 +1048,33 @@ async def api_upload(request: web.Request):
         if size == 0:
             target.unlink(missing_ok=True)
             return _json({"error": "empty_file"}, 400)
-        uploaded.append({
-            "url": f"/uploads/{stored_name}",
-            "name": original_name,
-            "content_type": mimetypes.guess_type(original_name)[0] or "application/octet-stream",
-            "size": size,
-        })
+        try:
+            uploaded.append(register_upload(
+                stored_name=stored_name,
+                owner_id=user["id"],
+                original_name=original_name,
+                content_type=mimetypes.guess_type(original_name)[0] or "application/octet-stream",
+                size=size,
+            ))
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
     return _json({"ok": True, "files": uploaded})
 
 
 async def api_upload_file(request: web.Request):
-    _require_user(request)
-    target = _owned_upload_path(request.match_info.get("filename", ""))
-    if not target or not target.is_file():
+    user = _require_user(request)
+    filename = request.match_info.get("filename", "")
+    target = _owned_upload_path(filename)
+    if (
+        not target
+        or not target.is_file()
+        or not can_download_upload(
+            filename,
+            user["id"],
+            can_admin=has_admin_access(user["id"]),
+        )
+    ):
         raise web.HTTPNotFound()
     return web.FileResponse(target)
 

@@ -127,6 +127,27 @@ def ensure_platform_tables():
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at    TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS platform_uploads (
+                stored_name  TEXT PRIMARY KEY,
+                owner_id     INTEGER NOT NULL,
+                original_name TEXT NOT NULL DEFAULT 'file',
+                content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                size         INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS platform_message_uploads (
+                message_id  INTEGER NOT NULL,
+                stored_name TEXT NOT NULL,
+                attached_at TEXT NOT NULL,
+                PRIMARY KEY(message_id, stored_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS platform_schema_migrations (
+                name       TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
             """
         )
         _ensure_column(conn, "platform_messages", "edited_at", "TEXT NOT NULL DEFAULT ''")
@@ -164,6 +185,9 @@ def ensure_platform_tables():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_platform_audit_created ON platform_audit_log(created_at, id)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_platform_message_upload_name ON platform_message_uploads(stored_name, message_id)"
+        )
         now = _now()
         conn.execute(
             """
@@ -192,6 +216,7 @@ def ensure_platform_tables():
                 (category, name, topic, position, now, now, name),
             )
         _migrate_legacy_web_chat(conn)
+        _migrate_attachment_ownership(conn)
         conn.commit()
 
 
@@ -215,6 +240,77 @@ def _archive_table(conn: sqlite3.Connection, table: str) -> None:
     if _table_exists(conn, backup):
         raise RuntimeError(f"cannot archive {table}: {backup} already exists")
     conn.execute(f"ALTER TABLE {table} RENAME TO {backup}")
+
+
+def _upload_name_from_url(url: str) -> str:
+    prefix = "/uploads/"
+    if not str(url).startswith(prefix):
+        return ""
+    name = str(url)[len(prefix):]
+    if (
+        not name
+        or "/" in name
+        or "\\" in name
+        or ".." in name
+        or not re.fullmatch(r"[A-Za-z0-9._-]{1,180}", name)
+    ):
+        return ""
+    return name
+
+
+def _migrate_attachment_ownership(conn: sqlite3.Connection) -> None:
+    """Index pre-registry attachments once without changing message payloads."""
+
+    migration_name = "platform_upload_ownership_v1"
+    if conn.execute(
+        "SELECT 1 FROM platform_schema_migrations WHERE name=?",
+        (migration_name,),
+    ).fetchone():
+        return
+    rows = conn.execute(
+        """
+        SELECT id, author_id, attachment_json, created_at
+        FROM platform_messages
+        WHERE attachment_json<>'' AND attachment_json<>'[]'
+        """
+    ).fetchall()
+    for message_id, author_id, raw_attachments, created_at in rows:
+        try:
+            attachments = json.loads(raw_attachments or "[]")
+        except (TypeError, json.JSONDecodeError):
+            attachments = []
+        for item in attachments if isinstance(attachments, list) else []:
+            if not isinstance(item, dict):
+                continue
+            stored_name = _upload_name_from_url(str(item.get("url") or ""))
+            if not stored_name:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO platform_uploads(
+                    stored_name, owner_id, original_name, content_type, size, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stored_name,
+                    int(author_id),
+                    str(item.get("name") or "file")[:180],
+                    str(item.get("content_type") or "application/octet-stream")[:120],
+                    max(0, int(item.get("size") or 0)),
+                    str(created_at or _now()),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO platform_message_uploads(message_id, stored_name, attached_at)
+                VALUES(?, ?, ?)
+                """,
+                (int(message_id), stored_name, str(created_at or _now())),
+            )
+    conn.execute(
+        "INSERT INTO platform_schema_migrations(name, applied_at) VALUES(?, ?)",
+        (migration_name, _now()),
+    )
 
 
 def _migrate_legacy_web_chat(conn: sqlite3.Connection) -> None:
@@ -670,6 +766,11 @@ def add_platform_message(
     if not text and not clean_attachments:
         raise ValueError("empty message")
     with db_connection(SOCIAL_DB) as conn:
+        clean_attachments = _registered_uploads_for_author(
+            conn,
+            int(author_id),
+            clean_attachments,
+        )
         clean_source = str(source or "platform")[:32]
         clean_reply_to = max(0, int(reply_to_message_id))
         cur = conn.execute(
@@ -723,6 +824,15 @@ def add_platform_message(
             )
         if inserted and clean_scope == "dm":
             conn.execute("UPDATE platform_dm_threads SET updated_at=? WHERE id=?", (_now(), int(target_id)))
+        if inserted:
+            for item in clean_attachments:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO platform_message_uploads(message_id, stored_name, attached_at)
+                    VALUES(?, ?, ?)
+                    """,
+                    (message_id, _upload_name_from_url(item["url"]), _now()),
+                )
         conn.commit()
         return message_id
 
@@ -747,17 +857,106 @@ def _clean_attachments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _is_owned_upload_url(url: str) -> bool:
-    prefix = "/uploads/"
-    if not str(url).startswith(prefix):
-        return False
-    name = str(url)[len(prefix):]
-    return bool(
-        name
-        and "/" not in name
-        and "\\" not in name
-        and ".." not in name
-        and re.fullmatch(r"[A-Za-z0-9._-]{1,180}", name)
-    )
+    return bool(_upload_name_from_url(url))
+
+
+def _registered_uploads_for_author(
+    conn: sqlite3.Connection,
+    author_id: int,
+    attachments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    registered = []
+    for item in attachments:
+        stored_name = _upload_name_from_url(item["url"])
+        row = conn.execute(
+            """
+            SELECT owner_id, original_name, content_type, size
+            FROM platform_uploads WHERE stored_name=?
+            """,
+            (stored_name,),
+        ).fetchone()
+        if not row:
+            raise ValueError("attachment upload is not registered")
+        if int(row[0]) != int(author_id):
+            raise ValueError("attachment belongs to another user")
+        registered.append({
+            "url": f"/uploads/{stored_name}",
+            "name": str(row[1] or "file")[:180],
+            "content_type": str(row[2] or "application/octet-stream")[:120],
+            "size": max(0, int(row[3] or 0)),
+        })
+    return registered
+
+
+def register_platform_upload(
+    stored_name: str,
+    owner_id: int,
+    original_name: str,
+    content_type: str,
+    size: int,
+) -> dict[str, Any]:
+    ensure_platform_tables()
+    clean_name = _upload_name_from_url(f"/uploads/{stored_name}")
+    if not clean_name:
+        raise ValueError("invalid upload name")
+    clean_size = max(0, int(size))
+    with db_connection(SOCIAL_DB) as conn:
+        conn.execute(
+            """
+            INSERT INTO platform_uploads(
+                stored_name, owner_id, original_name, content_type, size, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (
+                clean_name,
+                int(owner_id),
+                str(original_name or "file")[:180],
+                str(content_type or "application/octet-stream")[:120],
+                clean_size,
+                _now(),
+            ),
+        )
+    return {
+        "url": f"/uploads/{clean_name}",
+        "name": str(original_name or "file")[:180],
+        "content_type": str(content_type or "application/octet-stream")[:120],
+        "size": clean_size,
+    }
+
+
+def get_platform_upload_access(stored_name: str) -> dict[str, Any] | None:
+    """Return ownership and active attachment targets for one stored file."""
+
+    ensure_platform_tables()
+    clean_name = _upload_name_from_url(f"/uploads/{stored_name}")
+    if not clean_name:
+        return None
+    with db_connection(SOCIAL_DB) as conn:
+        upload = conn.execute(
+            "SELECT owner_id FROM platform_uploads WHERE stored_name=?",
+            (clean_name,),
+        ).fetchone()
+        if not upload:
+            return None
+        rows = conn.execute(
+            """
+            SELECT m.scope, m.target_id, m.deleted_at
+            FROM platform_message_uploads u
+            JOIN platform_messages m ON m.id=u.message_id
+            WHERE u.stored_name=?
+            ORDER BY m.id
+            """,
+            (clean_name,),
+        ).fetchall()
+    return {
+        "owner_id": int(upload[0]),
+        "attached": bool(rows),
+        "targets": [
+            {"scope": str(row[0]), "target_id": int(row[1])}
+            for row in rows
+            if not str(row[2] or "")
+        ],
+    }
 
 
 def consume_platform_rate_limit(

@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from aiohttp import ClientSession, web
+from aiohttp import ClientSession, FormData, web
 from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
@@ -552,6 +552,22 @@ class WebSecurityTests(IsolatedDatabaseTest):
         routes = {(route.method, route.resource.canonical) for route in app.router.routes()}
         self.assertIn(("POST", "/api/profile/forget-ai"), routes)
 
+    def test_chat_event_stream_requires_session(self):
+        async def scenario():
+            app = web_server.create_app()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            async with ClientSession() as session:
+                async with session.get(f"http://127.0.0.1:{port}/api/chat/stream") as response:
+                    self.assertEqual(response.status, 401)
+                    self.assertEqual((await response.json())["error"], "auth_required")
+            await runner.cleanup()
+
+        asyncio.run(scenario())
+
     def test_chat_explicit_vipik_request_gets_async_reply_and_feedback(self):
         web_app_store.upsert_web_user(5, "player")
         session_id = web_app_store.create_session(5)
@@ -732,13 +748,16 @@ class WebSecurityTests(IsolatedDatabaseTest):
 
         asyncio.run(scenario())
 
-    def test_uploaded_files_require_session_and_reject_traversal(self):
-        web_app_store.upsert_web_user(5, "user")
-        session_id = web_app_store.create_session(5)
+    def test_uploaded_files_follow_owner_and_dm_membership(self):
+        for user_id, name in ((5, "owner"), (6, "peer"), (7, "outsider"), (99, "admin")):
+            web_app_store.upsert_web_user(user_id, name)
+        community_store.set_user_roles(99, ["admin"], source="test")
+        sessions = {
+            user_id: web_app_store.create_session(user_id)
+            for user_id in (5, 6, 7, 99)
+        }
         upload_root = Path(self.temp_dir.name) / "uploads"
         upload_root.mkdir()
-        filename = "20260714_0123456789abcdef01234567.txt"
-        (upload_root / filename).write_text("private", encoding="utf-8")
 
         async def scenario():
             with patch.object(web_server, "UPLOADS_DIR", upload_root):
@@ -750,17 +769,67 @@ class WebSecurityTests(IsolatedDatabaseTest):
                 port = site._server.sockets[0].getsockname()[1]
                 base = f"http://127.0.0.1:{port}"
                 async with ClientSession() as session:
+                    upload_form = FormData()
+                    upload_form.add_field(
+                        "file", b"private", filename="private.txt", content_type="text/plain"
+                    )
+                    async with session.post(
+                        f"{base}/api/uploads",
+                        data=upload_form,
+                        headers={
+                            "Cookie": f"vipik_session={sessions[5]}",
+                            "Origin": base,
+                        },
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        attachment = (await response.json())["files"][0]
+                    filename = attachment["url"].rsplit("/", 1)[-1]
+                    self.assertTrue((upload_root / filename).is_file())
+
                     async with session.get(f"{base}/uploads/{filename}") as response:
                         self.assertEqual(response.status, 401)
                     async with session.get(
                         f"{base}/uploads/{filename}",
-                        headers={"Cookie": f"vipik_session={session_id}"},
+                        headers={"Cookie": f"vipik_session={sessions[7]}"},
+                    ) as response:
+                        self.assertEqual(response.status, 404)
+                    async with session.get(
+                        f"{base}/uploads/{filename}",
+                        headers={"Cookie": f"vipik_session={sessions[5]}"},
                     ) as response:
                         self.assertEqual(response.status, 200)
                         self.assertEqual(await response.text(), "private")
+
+                    dm = platform_store.get_or_create_dm(5, 6)
+                    with self.assertRaisesRegex(ValueError, "another user"):
+                        platform_store.add_platform_message(
+                            "dm", dm["id"], 6, "peer", "", attachments=[attachment]
+                        )
+                    message_id = platform_store.add_platform_message(
+                        "dm", dm["id"], 5, "owner", "", attachments=[attachment]
+                    )
+                    for allowed_user in (5, 6):
+                        async with session.get(
+                            f"{base}/uploads/{filename}",
+                            headers={"Cookie": f"vipik_session={sessions[allowed_user]}"},
+                        ) as response:
+                            self.assertEqual(response.status, 200)
+                    for denied_user in (7, 99):
+                        async with session.get(
+                            f"{base}/uploads/{filename}",
+                            headers={"Cookie": f"vipik_session={sessions[denied_user]}"},
+                        ) as response:
+                            self.assertEqual(response.status, 404)
+
+                    self.assertTrue(platform_store.delete_platform_message(message_id, 5))
+                    async with session.get(
+                        f"{base}/uploads/{filename}",
+                        headers={"Cookie": f"vipik_session={sessions[5]}"},
+                    ) as response:
+                        self.assertEqual(response.status, 404)
                     async with session.get(
                         f"{base}/uploads/not-owned.exe",
-                        headers={"Cookie": f"vipik_session={session_id}"},
+                        headers={"Cookie": f"vipik_session={sessions[5]}"},
                     ) as response:
                         self.assertEqual(response.status, 404)
                 await runner.cleanup()
@@ -1183,7 +1252,11 @@ class ChatStorageConsolidationTests(IsolatedDatabaseTest):
                 INSERT INTO web_chat_messages(
                     guild_id, channel_id, discord_user_id, author_name, content,
                     attachment_json, source, status, edited_at, deleted_at, created_at
-                ) VALUES(10, 20, 30, 'Legacy', 'hello', '[]', 'discord', 'stored', '', '', 'now');
+                ) VALUES(
+                    10, 20, 30, 'Legacy', 'hello',
+                    '[{"url":"/uploads/legacy_file.txt","name":"legacy.txt","content_type":"text/plain","size":6}]',
+                    'discord', 'stored', '', '', 'now'
+                );
                 INSERT INTO web_chat_reactions VALUES(1, '👍', 40, 'now');
                 INSERT INTO web_bot_outbox(
                     guild_id, channel_id, discord_user_id, author_name, content, status, created_at
@@ -1201,6 +1274,10 @@ class ChatStorageConsolidationTests(IsolatedDatabaseTest):
         self.assertEqual(messages[0]["discord_user_id"], 30)
         self.assertEqual(messages[0]["source"], "discord")
         self.assertEqual(messages[0]["reactions"], [{"emoji": "👍", "count": 1}])
+        upload_access = platform_store.get_platform_upload_access("legacy_file.txt")
+        self.assertEqual(upload_access["owner_id"], 30)
+        self.assertTrue(upload_access["attached"])
+        self.assertEqual(upload_access["targets"][0]["scope"], "channel")
         self.assertEqual(len(outbox), 1)
         with db_connection(self.db_path) as conn:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}

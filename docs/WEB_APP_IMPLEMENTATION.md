@@ -49,6 +49,7 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
   - message reactions, edit/delete, clickable links and image/link previews
   - local file uploads and attachment rendering for images, video, audio and generic files
   - authenticated upload downloads, owned-upload URL validation and persistent per-user anti-spam limits
+  - attachment downloads follow active channel/DM membership; draft uploads remain owner-only
   - chat search for the shared `general` channel and selected platform channel/DM
   - PWA install button when the browser exposes the install prompt
   - PWA shell with manifest, service worker and installable app metadata
@@ -71,6 +72,7 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
 - `core/web_app_store.py`: sessions, web users, chat, outbox.
 - `core/community_store.py`: local roles, member cards, badges, statuses and profile cosmetics.
 - `core/platform_store.py`: local servers, text channels, DM threads, platform messages, rate events, moderation audit and game activity.
+- `core/platform_upload_service.py`: ownership and channel/DM authorization for private attachments.
 - `core/conversation_service.py`: local Ollama routing, persisted runtime health and exponential circuit breaker.
 - `core/moderation_service.py`: toxicity review projection and audited human feedback.
 - `fun_slesh/web_bridge.py`: Discord bot bridge for web chat outbox.
