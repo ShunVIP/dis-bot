@@ -117,6 +117,9 @@
   `core.summary_store` (идемпотентность публикаций), `core.summary_service`
   (чистые границы периодов, фильтрация и текстовая проекция) и
   `fun_slesh.daily_summary` (Discord embeds, scheduler и interactions).
+- Каталог `/команды` разделён на `core.menu_catalog_service` (чистая
+  классификация, фильтрация и сортировка команд) и `fun_slesh.menu`
+  (сбор метаданных discord.py, embeds, modals и interactions).
 
 ## Следующий порядок работ
 

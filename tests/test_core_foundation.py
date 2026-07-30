@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiohttp import ClientSession, web
-from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
+from core import activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -1400,6 +1400,82 @@ class VoiceRoomTests(IsolatedDatabaseTest):
         self.assertEqual(claims["video"]["room"], "room-1")
         self.assertTrue(claims["video"]["roomJoin"])
         self.assertLessEqual(claims["exp"] - claims["nbf"], 15 * 60 + 5)
+
+
+class MenuCatalogServiceTests(unittest.TestCase):
+    @staticmethod
+    def _command(
+        name: str,
+        *,
+        module: str = "fun_slesh.test",
+        callback: str = "",
+        is_admin: bool = False,
+    ) -> dict:
+        return {
+            "qualified_name": name,
+            "root_name": name.split()[0],
+            "module_name": module,
+            "callback_name": callback,
+            "description": f"Описание {name}",
+            "root_id": 123,
+            "is_admin": is_admin,
+        }
+
+    def test_classification_keeps_special_top_and_markov_parody_boundaries(self):
+        self.assertEqual(
+            menu_catalog_service.category_for_command("топ_баланс", "fun_slesh.daily"),
+            "📊 Топы и итоги",
+        )
+        self.assertEqual(
+            menu_catalog_service.category_for_command("пародия", "fun_slesh.parody_engine"),
+            "🎭 Пародия",
+        )
+        self.assertEqual(
+            menu_catalog_service.category_for_command("неизвестная", "fun_slesh.unknown"),
+            "🧩 Прочее",
+        )
+
+    def test_user_projection_filters_internal_and_replaced_commands(self):
+        rows = [
+            self._command("баланс", module="fun_slesh.daily", callback="баланс"),
+            self._command("дэйлик", module="fun_slesh.daily", callback="дэйлик"),
+            self._command("болтовня", module="fun_slesh.social_chat"),
+            self._command("штраф", is_admin=True),
+        ]
+        catalog = menu_catalog_service.build_catalog_projection(
+            rows,
+            admin_only=False,
+            hidden_command_names={"баланс"},
+            callbacks_by_category={"💰 Кошелек и магазин": {"дэйлик"}},
+            menu_only_items=[{
+                "category": "💰 Кошелек и магазин",
+                "qualified_name": "Проверить кошелёк",
+                "root_name": "wallet",
+                "description": "Кнопка",
+                "root_id": None,
+                "is_admin": False,
+                "menu_only": True,
+            }],
+        )
+        wallet = catalog["💰 Кошелек и магазин"]
+        self.assertEqual(
+            [item["qualified_name"] for item in wallet],
+            ["Проверить кошелёк", "баланс"],
+        )
+        self.assertTrue(wallet[1]["hidden_from_slash"])
+        self.assertNotIn("💬 Болтовня", catalog)
+        self.assertFalse("hidden_from_slash" in rows[0], "service must not mutate command metadata")
+
+    def test_admin_projection_normalizes_every_admin_command_to_admin_category(self):
+        catalog = menu_catalog_service.build_catalog_projection(
+            [self._command("дообучить", module="fun_slesh.parody_engine", is_admin=True)],
+            admin_only=True,
+            hidden_command_names=set(),
+        )
+        self.assertEqual(list(catalog), ["🛡️ Админ"])
+        self.assertEqual(catalog["🛡️ Админ"][0]["qualified_name"], "дообучить")
+        self.assertEqual(menu_catalog_service.mention_for("итоги неделя", 42), "</итоги неделя:42>")
+        self.assertEqual(menu_catalog_service.mention_for("итоги неделя", None), "`/итоги неделя`")
 
 
 class SummaryServiceTests(unittest.TestCase):
