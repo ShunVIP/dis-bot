@@ -12,7 +12,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import ClientSession, FormData, web
 from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
@@ -37,7 +37,7 @@ from scripts.build_ml_manifest import build_manifest
 from scripts import audit_settings, finalize_settings_migration, report_chat_storage
 from scripts.report_learning_readiness import build_report as build_learning_readiness_report
 from scripts.train_toxicity_model import train_model
-from fun_slesh import raid_schedule, social_chat
+from fun_slesh import raid_schedule, social_chat, toxicity
 
 
 class IsolatedDatabaseTest(unittest.TestCase):
@@ -938,6 +938,9 @@ class WebSecurityTests(IsolatedDatabaseTest):
         self.assertIn('data-toxicity-level', javascript)
         self.assertIn('id="conversationModelStatus"', html)
         self.assertIn('/api/ml/conversation-status', javascript)
+        self.assertIn('id="mlInsightRecommendations"', html)
+        self.assertIn('id="mlCompatiblePlayers"', html)
+        self.assertIn('/api/ml/insights', javascript)
 
     def test_conversation_model_status_api_requires_admin(self):
         web_app_store.upsert_web_user(7, "member")
@@ -947,7 +950,11 @@ class WebSecurityTests(IsolatedDatabaseTest):
         admin_session = web_app_store.create_session(99)
 
         async def scenario():
-            with patch.dict(conversation_service.os.environ, {"LOCAL_CHAT_API_URL": ""}):
+            with patch.dict(conversation_service.os.environ, {"LOCAL_CHAT_API_URL": ""}), patch.object(
+                web_server,
+                "build_ml_insights",
+                return_value={"mode": "advisory", "learning": {}, "recommendations": []},
+            ):
                 app = web_server.create_app()
                 runner = web.AppRunner(app)
                 await runner.setup()
@@ -969,6 +976,17 @@ class WebSecurityTests(IsolatedDatabaseTest):
                         model = (await response.json())["conversation_model"]
                         self.assertEqual(model["state"], "disabled")
                         self.assertFalse(model["configured"])
+                    async with session.get(
+                        f"{base}/api/ml/insights",
+                        headers={"Cookie": f"vipik_session={member_session}"},
+                    ) as response:
+                        self.assertEqual(response.status, 403)
+                    async with session.get(
+                        f"{base}/api/ml/insights?guild_id=7",
+                        headers={"Cookie": f"vipik_session={admin_session}"},
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual((await response.json())["mode"], "advisory")
                 await runner.cleanup()
 
         asyncio.run(scenario())
@@ -2517,6 +2535,72 @@ class ToxicityLayerTests(IsolatedDatabaseTest):
         self.assertIn("@user", response)
         self.assertIn("марков", response)
 
+    def test_lucy_guard_distinguishes_aliases_and_ambiguous_woman_reference(self):
+        self.assertEqual(
+            toxicity_service.detect_lucy_target("Люся тупая", target_user_id=99),
+            "definite",
+        )
+        self.assertEqual(
+            toxicity_service.detect_lucy_target("lucykramer, ты дура", target_user_id=99),
+            "definite",
+        )
+        self.assertEqual(
+            toxicity_service.detect_lucy_target("эта женщина тупая", target_user_id=99),
+            "ambiguous",
+        )
+        self.assertEqual(
+            toxicity_service.detect_lucy_target(
+                "ты тупая",
+                target_user_id=99,
+                reply_author_id=99,
+            ),
+            "definite",
+        )
+        self.assertEqual(
+            toxicity_service.detect_lucy_target("обычный разговор", target_user_id=99),
+            "none",
+        )
+        response = toxicity_service.build_lucy_guard_response(
+            "<@1>",
+            "ambiguous",
+            rng=random.Random(1),
+        )
+        self.assertIn("если ты про Люсю", response)
+        self.assertIn("сломаю ноги", response)
+        self.assertIn("игр", response.lower())
+        self.assertEqual(toxicity_model_service.detect_rule_level("Люся тупая"), 1)
+        self.assertEqual(toxicity_model_service.detect_rule_level("женщина мразь"), 2)
+
+    def test_lucy_guard_replies_below_general_threshold_without_markov(self):
+        settings_store.set_feature_payload(
+            7,
+            "toxicity",
+            {"threshold": 3, "lucy_guard_enabled": True, "lucy_guard_user_id": 99},
+            enabled=True,
+        )
+        runtime_config = toxicity_store.get_toxicity_runtime_config(7)
+        self.assertEqual(runtime_config.lucy_guard_user_id, 99)
+        self.assertEqual(runtime_config.threshold, 3)
+        message = SimpleNamespace(
+            id=500,
+            content="Люсь, ты тупая",
+            guild=SimpleNamespace(id=7),
+            channel=SimpleNamespace(id=70),
+            author=SimpleNamespace(id=1, bot=False, mention="<@1>"),
+            mentions=[],
+            reference=None,
+            reply=AsyncMock(),
+        )
+        cog = toxicity.Toxicity(SimpleNamespace())
+        with patch.object(toxicity, "generate_markov_troll") as markov:
+            asyncio.run(cog.on_message(message))
+        markov.assert_not_called()
+        message.reply.assert_awaited_once()
+        response = message.reply.await_args.args[0]
+        self.assertIn("Люс", response)
+        self.assertIn("сломаю ноги", response)
+        self.assertEqual(toxicity_store.get_toxicity_top(7, "week"), [(1, 1)])
+
 
 class MlInsightsTests(IsolatedDatabaseTest):
     def test_advisory_insights_find_anomalies_pairs_and_quality_issues(self):
@@ -2535,6 +2619,26 @@ class MlInsightsTests(IsolatedDatabaseTest):
                 CREATE TABLE steam_profiles(user_id INTEGER PRIMARY KEY);
                 CREATE TABLE steam_owned_games_cache(user_id INTEGER, appid INTEGER);
                 INSERT INTO steam_owned_games_cache VALUES(99,1);
+                CREATE TABLE conversation_turns(
+                    bot_message_id INTEGER PRIMARY KEY, guild_id INTEGER, user_id INTEGER,
+                    provider TEXT
+                );
+                CREATE TABLE conversation_feedback(
+                    bot_message_id INTEGER, reviewer_user_id INTEGER, score INTEGER
+                );
+                CREATE TABLE conversation_preferences(user_id INTEGER PRIMARY KEY, training_opt_in INTEGER);
+                INSERT INTO conversation_turns VALUES(10,7,1,'ollama');
+                INSERT INTO conversation_turns VALUES(11,8,2,'ollama');
+                INSERT INTO conversation_preferences VALUES(1,1);
+                INSERT INTO conversation_preferences VALUES(2,1);
+                INSERT INTO conversation_feedback VALUES(10,1,1);
+                INSERT INTO conversation_feedback VALUES(11,2,1);
+                CREATE TABLE toxicity_ml_shadow(message_id INTEGER PRIMARY KEY, guild_id INTEGER);
+                CREATE TABLE toxicity_ml_feedback(message_id INTEGER PRIMARY KEY, corrected_level INTEGER);
+                INSERT INTO toxicity_ml_shadow VALUES(20,7);
+                INSERT INTO toxicity_ml_shadow VALUES(21,8);
+                INSERT INTO toxicity_ml_feedback VALUES(20,2);
+                INSERT INTO toxicity_ml_feedback VALUES(21,3);
                 """
             )
         result = ml_insights.build_ml_insights(database=self.db_path, guild_id=7)
@@ -2544,6 +2648,13 @@ class MlInsightsTests(IsolatedDatabaseTest):
         self.assertEqual(result["activity"]["compatible_players"][0]["shared_games"], ["Game A"])
         self.assertEqual(result["data_quality"]["checks"]["orphan_steam_games"], 1)
         self.assertFalse(result["data_quality"]["healthy"])
+        self.assertEqual(result["learning"]["conversation"]["approved_examples"], 1)
+        self.assertEqual(result["learning"]["conversation"]["remaining_examples"], 49)
+        self.assertEqual(result["learning"]["toxicity"]["reviewed_samples"], 1)
+        self.assertEqual(result["learning"]["toxicity"]["coverage_by_level"]["2"], 1)
+        self.assertEqual(result["learning"]["toxicity"]["enforcement"], "rules_only")
+        self.assertTrue(any(item["area"] == "conversation" for item in result["recommendations"]))
+        self.assertTrue(any(item["area"] == "economy" for item in result["recommendations"]))
 
 
 if __name__ == "__main__":

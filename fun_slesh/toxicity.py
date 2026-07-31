@@ -17,11 +17,18 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from core.toxicity_model_service import detect_toxicity
-from core.toxicity_service import ToxicityCooldowns, build_troll_response, generate_markov_troll
+from core.toxicity_service import (
+    ToxicityCooldowns,
+    build_lucy_guard_response,
+    build_troll_response,
+    detect_lucy_target,
+    generate_markov_troll,
+)
 from core.toxicity_store import (
     ensure_toxicity_storage,
     exclude_toxicity_channel,
     get_toxicity_config,
+    get_toxicity_runtime_config,
     get_toxicity_top,
     include_toxicity_channel,
     record_toxic_event,
@@ -42,16 +49,20 @@ class Toxicity(commands.Cog):
         self.bot = bot
         ensure_toxicity_storage()
         self._cooldowns = ToxicityCooldowns(seconds=24 * 3600)
-
-    def _check_cooldown(self, guild_id: int, user_id: int) -> bool:
-        """True = можно отвечать."""
-        return self._cooldowns.allow(guild_id, user_id)
+        self._lucy_guard_cooldowns = ToxicityCooldowns(seconds=6 * 3600)
 
     async def _send_troll_reply(self, message: discord.Message, response: str):
         try:
             await message.reply(response, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             pass
+
+    @staticmethod
+    def _reply_author_id(message: discord.Message) -> int | None:
+        reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None) or getattr(reference, "cached_message", None)
+        author = getattr(resolved, "author", None)
+        return int(author.id) if getattr(author, "id", None) else None
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -63,14 +74,14 @@ class Toxicity(commands.Cog):
         guild_id = message.guild.id
         user_id  = message.author.id
 
-        enabled, threshold, ch_filter, excluded_channels = get_toxicity_config(guild_id)
-        if not enabled:
+        config = get_toxicity_runtime_config(guild_id)
+        if not config.enabled:
             return
-        if message.channel.id in excluded_channels:
+        if message.channel.id in config.excluded_channel_ids:
             return
 
         # Фильтр по каналам
-        if ch_filter and message.channel.id not in ch_filter:
+        if config.allowed_channel_ids and message.channel.id not in config.allowed_channel_ids:
             return
 
         # Детектируем
@@ -84,14 +95,38 @@ class Toxicity(commands.Cog):
             prediction=prediction,
         )
         level = prediction["effective_level"]
-        if level < threshold:
+        lucy_user_id = config.lucy_guard_user_id
+        mentioned_user_ids = tuple(int(member.id) for member in getattr(message, "mentions", ()))
+        lucy_target = (
+            detect_lucy_target(
+                message.content,
+                target_user_id=lucy_user_id,
+                mentioned_user_ids=mentioned_user_ids,
+                reply_author_id=self._reply_author_id(message),
+            )
+            if lucy_user_id
+            else "none"
+        )
+        if message.author.id == lucy_user_id:
+            lucy_target = "none"
+        lucy_guard = lucy_target != "none" and level > 0
+        if level < config.threshold and not lucy_guard:
             return
 
         # Кулдаун
-        if not self._check_cooldown(guild_id, user_id):
+        cooldowns = self._lucy_guard_cooldowns if lucy_guard else self._cooldowns
+        if not cooldowns.allow(guild_id, user_id):
             return
 
         count = record_toxic_event(guild_id, user_id, message.channel.id, level, message.content)
+        if lucy_guard:
+            response = build_lucy_guard_response(
+                message.author.mention,
+                lucy_target,
+            )
+            await self._send_troll_reply(message, response)
+            return
+
         parody = None
 
         # Пытаемся сгенерировать пародию (не блокируем основной поток)

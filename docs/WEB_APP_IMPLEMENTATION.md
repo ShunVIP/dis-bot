@@ -80,6 +80,10 @@ The local web/app MVP lives in `web_app/` and is tied to the bot through the sam
 ## Conversational model status
 
 - `GET /api/ml/conversation-status` is admin-only and reports whether the private Ollama endpoint is configured, online, or in cooldown.
+- `GET /api/ml/insights` is admin-only and powers the visible advisory panel:
+  consent-gated Qwen training readiness, toxicity-label coverage, economy
+  anomalies, wallet/ledger checks, data-quality checks and compatible-player
+  pairs. It never changes balances, applies sanctions or starts training.
 - Bot and web app share `conversation_runtime_status`, so failures remain visible across process restarts.
 - The fallback chat queues only explicit `@ViPik`/`ViPik`/`Випик` requests in
   `conversation_web_jobs`. A background worker writes one idempotent answer into

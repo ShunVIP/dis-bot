@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,15 @@ FEATURE_TOXICITY = "toxicity"
 UTC = timezone.utc
 MSK = ZoneInfo("Europe/Moscow")
 _INITIALIZED_DATABASES: set[str] = set()
+
+
+@dataclass(frozen=True)
+class ToxicityRuntimeConfig:
+    enabled: bool
+    threshold: int
+    allowed_channel_ids: frozenset[int]
+    excluded_channel_ids: frozenset[int]
+    lucy_guard_user_id: int = 0
 
 
 def ensure_toxicity_storage() -> None:
@@ -75,18 +85,36 @@ def ensure_toxicity_storage() -> None:
     _INITIALIZED_DATABASES.add(SOCIAL_DB)
 
 
-def get_toxicity_config(guild_id: int) -> tuple[bool, int, set[int], set[int]]:
+def get_toxicity_runtime_config(guild_id: int) -> ToxicityRuntimeConfig:
     policy = get_feature_policy(guild_id, FEATURE_TOXICITY)
-    payload = get_feature_payload(guild_id, FEATURE_TOXICITY)
+    payload = policy.extra or {}
     try:
         threshold = int(payload.get("threshold") or 1)
     except (TypeError, ValueError):
         threshold = 1
+    guard_enabled = str(payload.get("lucy_guard_enabled", "true")).strip().lower()
+    try:
+        lucy_guard_user_id = int(payload.get("lucy_guard_user_id") or 0)
+    except (TypeError, ValueError):
+        lucy_guard_user_id = 0
+    if guard_enabled in {"0", "false", "off", "no"}:
+        lucy_guard_user_id = 0
+    return ToxicityRuntimeConfig(
+        enabled=policy.enabled,
+        threshold=max(1, min(threshold, 3)),
+        allowed_channel_ids=frozenset(policy.allowed_channel_ids),
+        excluded_channel_ids=frozenset(policy.excluded_channel_ids),
+        lucy_guard_user_id=max(0, lucy_guard_user_id),
+    )
+
+
+def get_toxicity_config(guild_id: int) -> tuple[bool, int, set[int], set[int]]:
+    config = get_toxicity_runtime_config(guild_id)
     return (
-        policy.enabled,
-        max(1, min(threshold, 3)),
-        set(policy.allowed_channel_ids),
-        set(policy.excluded_channel_ids),
+        config.enabled,
+        config.threshold,
+        set(config.allowed_channel_ids),
+        set(config.excluded_channel_ids),
     )
 
 

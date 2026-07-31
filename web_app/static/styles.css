@@ -1067,6 +1067,44 @@ input, textarea, select {
 .model-status span { color: var(--muted); font-size: 12px; }
 .model-status strong { overflow-wrap: anywhere; }
 
+.status-card {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 7px;
+  padding: 12px;
+}
+
+.status-card span { color: var(--muted); font-size: 12px; }
+.status-card strong { font-size: 18px; overflow-wrap: anywhere; }
+
+.ml-insight-summary { margin: 14px 0; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.ml-insight-layout {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.ml-insight-layout h3 { margin: 0 0 9px; font-size: 14px; }
+.ml-insight-list { display: grid; gap: 8px; }
+
+.ml-insight-item {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--surface-2);
+  border-radius: 7px;
+  padding: 10px;
+}
+
+.ml-insight-item span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.ml-insight-item.level-warning { border-left-color: var(--danger); }
+.ml-insight-item.level-ready,
+.ml-insight-item.level-ok { border-left-color: #66c58f; }
+
 .server-preview {
   min-height: 138px;
   display: flex;
@@ -1138,6 +1176,8 @@ input, textarea, select {
     grid-template-columns: 1fr;
   }
   .moderation-layout { grid-template-columns: 1fr; }
+  .ml-insight-layout,
+  .ml-insight-summary { grid-template-columns: 1fr; }
   .model-status { grid-template-columns: 1fr; }
   .settings-wide { grid-column: auto; }
   .profile-form .wide { grid-column: auto; }

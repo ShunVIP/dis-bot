@@ -1180,11 +1180,12 @@ async function unlinkLol() {
 async function loadSettings() {
   if (!state.me?.authenticated) return;
   const guild = $("settingsGuild").value || "0";
-  const [settingsData, serverData, memberData, conversationData] = await Promise.all([
+  const [settingsData, serverData, memberData, conversationData, insightData] = await Promise.all([
     api(`/api/settings?guild_id=${encodeURIComponent(guild)}`),
     api("/api/platform/server"),
     api("/api/community/members"),
     api("/api/ml/conversation-status"),
+    api(`/api/ml/insights?guild_id=${encodeURIComponent(guild)}`),
   ]);
   $("settingsOutput").textContent = JSON.stringify(settingsData, null, 2);
   $("settingsGuild").value = String(settingsData.guild_id || "");
@@ -1197,6 +1198,7 @@ async function loadSettings() {
   renderServerSettings(serverData.server);
   renderRoles(memberData.roles || [], "settingsRoleCatalog");
   renderConversationModelStatus(conversationData.conversation_model || {});
+  renderMlInsights(insightData || {});
 }
 
 function renderConversationModelStatus(status) {
@@ -1219,6 +1221,69 @@ function renderConversationModelStatus(status) {
   $("conversationModelStatus").innerHTML = rows.map(([label, value]) => `
     <div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>
   `).join("");
+}
+
+function renderMlInsights(data) {
+  const conversation = data.learning?.conversation || {};
+  const toxicity = data.learning?.toxicity || {};
+  const economy = data.economy || {};
+  const activity = data.activity || {};
+  const quality = data.data_quality || {};
+  const anomalyCount = (economy.anomalies || []).length;
+  const mismatchCount = (economy.wallet_mismatches || []).length;
+  const pairs = activity.compatible_players || [];
+  const cards = [
+    ["Qwen: одобрено", `${Number(conversation.approved_examples || 0)} / ${Number(conversation.target_examples || 50)}`],
+    ["Токсичность: размечено", `${Number(toxicity.reviewed_samples || 0)} / ${Number(toxicity.target_samples || 500)}`],
+    ["Экономика", anomalyCount + mismatchCount ? `${anomalyCount + mismatchCount} сигналов` : "без сигналов"],
+    ["Совместимые пары", Number(pairs.length || 0)],
+  ];
+  $("mlInsightSummary").innerHTML = cards.map(([label, value]) => `
+    <article class="status-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>
+  `).join("");
+
+  const recommendations = data.recommendations || [];
+  $("mlInsightRecommendations").classList.toggle("muted", recommendations.length === 0);
+  $("mlInsightRecommendations").innerHTML = recommendations.length ? recommendations.map((item) => `
+    <article class="ml-insight-item level-${escapeHtml(item.level || "info")}">
+      <strong>${escapeHtml(item.title || item.area || "Рекомендация")}</strong>
+      <span>${escapeHtml(item.detail || "")}</span>
+    </article>
+  `).join("") : "Рекомендаций пока нет.";
+
+  $("mlCompatiblePlayers").classList.toggle("muted", pairs.length === 0);
+  $("mlCompatiblePlayers").innerHTML = pairs.length ? pairs.slice(0, 8).map((pair) => `
+    <article class="ml-insight-item">
+      <strong>${Number(pair.user_a)} + ${Number(pair.user_b)} · ${Math.round(Number(pair.score || 0) * 100)}%</strong>
+      <span>${escapeHtml((pair.shared_games || []).join(", ") || "общая игровая активность")}</span>
+    </article>
+  `).join("") : "Пока недостаточно пересекающейся игровой истории.";
+
+  const alerts = [
+    ...(economy.wallet_mismatches || []).slice(0, 5).map((item) => ({
+      title: `Кошелёк ${Number(item.user_id)}`,
+      detail: `баланс ${Number(item.wallet)} · ledger ${Number(item.ledger)}`,
+    })),
+    ...(economy.anomalies || []).slice(0, 5).map((item) => ({
+      title: `Операция ${Number(item.ledger_id)} · ${item.reason || "без причины"}`,
+      detail: `пользователь ${Number(item.user_id)} · изменение ${Number(item.delta)}`,
+    })),
+  ];
+  const qualityChecks = Object.entries(quality.checks || {}).map(([name, value]) => ({
+    title: name,
+    detail: String(Number(value)),
+  }));
+  const economyItems = [...alerts, ...qualityChecks];
+  $("mlEconomyAlerts").classList.toggle("muted", economyItems.length === 0);
+  $("mlEconomyAlerts").innerHTML = economyItems.length ? economyItems.map((item) => `
+    <article class="ml-insight-item">
+      <strong>${escapeHtml(item.title)}</strong>
+      <span>${escapeHtml(item.detail)}</span>
+    </article>
+  `).join("") : "Расхождений и проверок для отображения нет.";
+
+  const generated = data.generated_at ? new Date(data.generated_at).toLocaleString("ru-RU") : "сейчас";
+  $("mlInsightStatus").textContent = `${data.mode === "advisory" ? "только рекомендации" : "анализ"} · ${generated}`;
 }
 
 function renderModeration(data) {

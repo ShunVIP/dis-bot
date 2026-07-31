@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 from datetime import datetime, timezone
 
 
@@ -23,6 +24,34 @@ SHAME_TEMPLATES = {
     ),
 }
 
+LUCY_GUARD_TEMPLATES = {
+    "definite": (
+        "🛡️ {mention}, Люсю (lucykramer), любимую котю shunvip, не трогать. "
+        "Ещё выпад — и я сломаю ноги твоему персонажу. В игре, модераторы, спокойно.",
+        "🐈 {mention}, руки прочь от Люси — коти и любви shunvip. "
+        "Продолжишь — сломаю ноги твоему игровому герою и отправлю ползти до костра.",
+    ),
+    "ambiguous": (
+        "🛡️ {mention}, если ты про Люсю (lucykramer), любимую котю shunvip, — тормози. "
+        "Ещё выпад — и я сломаю ноги твоему персонажу. Разумеется, только в игре.",
+        "🐈 {mention}, если под «женщиной» ты имеешь в виду Люсю, то Люсю не трогать. "
+        "Иначе сломаю ноги твоему игровому герою и отправлю его отдыхать у костра.",
+    ),
+}
+
+_LUCY_ALIASES = re.compile(
+    r"(?<![\w])(?:lucykramer|люся|люсю|люсе|люси|люка|люку|люке|люсь)(?![\w])",
+    re.IGNORECASE | re.UNICODE,
+)
+_WOMAN_ALIAS = re.compile(
+    r"(?<![\w])женщин(?:а|у|е|ой|ы)(?![\w])",
+    re.IGNORECASE | re.UNICODE,
+)
+_REPLY_TARGET_WORDS = re.compile(
+    r"(?<![\w])(?:ты|тебя|тебе|тобой|твоя|твой|твои|женщин(?:а|у|е|ой|ы))(?![\w])",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 class ToxicityCooldowns:
     def __init__(self, seconds: int = 24 * 3600):
@@ -37,6 +66,38 @@ class ToxicityCooldowns:
             return False
         self._last_reply[key] = timestamp
         return True
+
+
+def detect_lucy_target(
+    text: str,
+    *,
+    target_user_id: int = 0,
+    mentioned_user_ids: tuple[int, ...] = (),
+    reply_author_id: int | None = None,
+) -> str:
+    """Return definite/ambiguous/none without treating every 'woman' as Lucy."""
+    value = str(text or "")
+    if _LUCY_ALIASES.search(value):
+        return "definite"
+    target_id = int(target_user_id or 0)
+    if target_id and target_id in {int(user_id) for user_id in mentioned_user_ids}:
+        return "definite"
+    if target_id and reply_author_id == target_id and _REPLY_TARGET_WORDS.search(value):
+        return "definite"
+    if _WOMAN_ALIAS.search(value):
+        return "ambiguous"
+    return "none"
+
+
+def build_lucy_guard_response(
+    mention: str,
+    target_kind: str,
+    *,
+    rng: random.Random | None = None,
+) -> str:
+    picker = rng or random
+    templates = LUCY_GUARD_TEMPLATES.get(str(target_kind), LUCY_GUARD_TEMPLATES["definite"])
+    return picker.choice(templates).format(mention=mention)
 
 
 def generate_markov_troll(user_id: int) -> str | None:

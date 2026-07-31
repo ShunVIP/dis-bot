@@ -438,6 +438,29 @@
           </section>
 
           <section class="panel settings-wide">
+            <div class="section-head">
+              <h2>ML-инсайты и готовность данных</h2>
+              <span id="mlInsightStatus" class="muted">не загружено</span>
+            </div>
+            <p class="muted">Только рекомендации: ML не меняет баланс, не наказывает участников и не запускает обучение без решения администратора.</p>
+            <div id="mlInsightSummary" class="status-grid ml-insight-summary"></div>
+            <div class="ml-insight-layout">
+              <div>
+                <h3>Что делать дальше</h3>
+                <div id="mlInsightRecommendations" class="ml-insight-list muted">Рекомендации не загружены.</div>
+              </div>
+              <div>
+                <h3>Совместимые игроки</h3>
+                <div id="mlCompatiblePlayers" class="ml-insight-list muted">Пары не загружены.</div>
+              </div>
+              <div>
+                <h3>Экономика и качество</h3>
+                <div id="mlEconomyAlerts" class="ml-insight-list muted">Проверки не загружены.</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel settings-wide">
             <h2>Каналы функций бота</h2>
             <form id="settingsForm" class="settings-form">
               <input id="settingsGuild" inputmode="numeric" placeholder="Guild ID">
