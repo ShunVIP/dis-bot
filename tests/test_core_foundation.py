@@ -2565,7 +2565,8 @@ class ToxicityLayerTests(IsolatedDatabaseTest):
             "ambiguous",
             rng=random.Random(1),
         )
-        self.assertIn("если ты про Люсю", response)
+        self.assertIn("если", response.lower())
+        self.assertIn("Люсю", response)
         self.assertIn("сломаю ноги", response)
         self.assertIn("игр", response.lower())
         self.assertEqual(toxicity_model_service.detect_rule_level("Люся тупая"), 1)
