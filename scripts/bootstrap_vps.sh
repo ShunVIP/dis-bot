@@ -45,7 +45,7 @@ run_as_user() {
 if command -v apt-get >/dev/null 2>&1; then
   log "installing system packages via apt"
   run_root apt-get update
-  run_root apt-get install -y git python3 python3-venv python3-pip
+  run_root apt-get install -y git python3 python3-venv python3-pip ffmpeg
 fi
 
 if ! id "$RUN_USER" >/dev/null 2>&1; then

@@ -38,7 +38,7 @@ set -e
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
-apt-get install -y python3 python3-venv python3-pip git tar
+apt-get install -y python3 python3-venv python3-pip git tar ffmpeg
 
 if ! id "$RunUser" >/dev/null 2>&1; then
   useradd --system --create-home --shell /bin/bash "$RunUser"
