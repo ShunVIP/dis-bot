@@ -75,6 +75,7 @@ class InstagramServiceTests(unittest.TestCase):
             config,
             yt_dlp_command=("yt-dlp",),
             ffmpeg_command=("ffmpeg",),
+            ffprobe_command=("ffprobe",),
             temp_root=temp_root,
         )
 
@@ -98,6 +99,39 @@ class InstagramServiceTests(unittest.TestCase):
                         async with service.prepare(metadata.source_url, user_id=1):
                             pass
                     download.assert_not_awaited()
+
+        asyncio.run(scenario())
+
+    def test_missing_metadata_duration_is_probed_after_download(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as directory:
+                service = self._service(Path(directory), max_duration_seconds=300)
+                metadata = InstagramMetadata(
+                    source_url="https://www.instagram.com/reel/Probe01/",
+                    shortcode="Probe01",
+                    duration=0,
+                    uploader="tester",
+                    caption="",
+                )
+                source = Path(directory) / "source.mp4"
+                source.write_bytes(b"video")
+                normalized = Path(directory) / "discord.mp4"
+
+                async def fake_transcode(_source: Path, target: Path):
+                    target.write_bytes(b"video")
+
+                with patch.object(service, "_fetch_metadata", AsyncMock(return_value=metadata)), patch.object(
+                    service,
+                    "_download",
+                    AsyncMock(return_value=source),
+                ), patch.object(service, "_probe_duration", AsyncMock(return_value=42)) as probe, patch.object(
+                    service,
+                    "_transcode",
+                    side_effect=fake_transcode,
+                ):
+                    media = await service._build_media(metadata.source_url, Path(directory), 1024)
+                probe.assert_awaited_once_with(source)
+                self.assertEqual(media.metadata.duration, 42)
 
         asyncio.run(scenario())
 

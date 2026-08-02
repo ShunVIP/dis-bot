@@ -12,7 +12,7 @@ import tempfile
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import AsyncIterator, Callable
 from urllib.parse import urlsplit
@@ -199,12 +199,14 @@ class InstagramMediaService:
         *,
         yt_dlp_command: tuple[str, ...] | None = None,
         ffmpeg_command: tuple[str, ...] | None = None,
+        ffprobe_command: tuple[str, ...] | None = None,
         temp_root: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
     ):
         self.config = config or InstagramConfig.from_env()
         self.yt_dlp_command = yt_dlp_command or _locate_executable("yt-dlp")
         self.ffmpeg_command = ffmpeg_command or _locate_executable("ffmpeg")
+        self.ffprobe_command = ffprobe_command or _locate_executable("ffprobe")
         self.temp_root = temp_root
         self._clock = clock
         self._state_lock = asyncio.Lock()
@@ -214,7 +216,7 @@ class InstagramMediaService:
 
     @property
     def available(self) -> bool:
-        return bool(self.yt_dlp_command and self.ffmpeg_command)
+        return bool(self.yt_dlp_command and self.ffmpeg_command and self.ffprobe_command)
 
     def fallback_upload_limit_bytes(self) -> int:
         return self.config.fallback_upload_limit_mb * 1024 * 1024
@@ -290,6 +292,10 @@ class InstagramMediaService:
         if metadata.duration > self.config.max_duration_seconds:
             raise InstagramTooLong(self.config.max_duration_seconds)
         source = await self._download(url, temp_dir)
+        if metadata.duration <= 0:
+            metadata = replace(metadata, duration=await self._probe_duration(source))
+        if metadata.duration > self.config.max_duration_seconds:
+            raise InstagramTooLong(self.config.max_duration_seconds)
         normalized = temp_dir / "discord.mp4"
         await self._transcode(source, normalized)
         output = normalized
@@ -326,8 +332,6 @@ class InstagramMediaService:
             duration = float(data.get("duration") or 0)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise InstagramError() from exc
-        if duration <= 0:
-            raise InstagramError()
         availability = str(data.get("availability") or "").strip().lower()
         if availability and availability not in {"public", "unlisted"}:
             raise InstagramError()
@@ -339,6 +343,22 @@ class InstagramMediaService:
             uploader=str(data.get("uploader") or data.get("channel") or "неизвестен")[:100],
             caption=str(data.get("description") or data.get("title") or "").strip()[:700],
         )
+
+    async def _probe_duration(self, source: Path) -> float:
+        stdout = await self._run_process([
+            *self.ffprobe_command,
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(source),
+        ], stage="probe")
+        try:
+            duration = float(stdout.strip())
+        except (TypeError, ValueError) as exc:
+            raise InstagramError() from exc
+        if duration <= 0:
+            raise InstagramError()
+        return duration
 
     async def _download(self, url: str, temp_dir: Path) -> Path:
         template = temp_dir / "source.%(ext)s"
