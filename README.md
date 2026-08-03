@@ -98,16 +98,11 @@ deploy/systemd/          шаблоны systemd
 
 Проверка production/backup для этого слоя: `python -m scripts.report_reputation_storage --database datebase/social.db`.
 
-Границы игровых и репутационных ролей:
+Границы Steam-интеграции:
 
-- `core/heroes_store.py` сохраняет Heroes-сессии и канал `heroes_troll`, а `core/heroes_service.py` распознаёт игры и формирует шутливый текст;
-- `core/reputation_store.py` — единственный записывающий владелец `reputation` и `mood`; ручные оценки, игровые события, activity rewards и Размер-роли используют его API;
-- `core/reputation_service.py` содержит cooldown игровых наград и представление настроения без Discord/SQLite;
-- `core/rep_roles_store.py` хранит пороги и выданные роли, флаг `rep_roles` находится в `settings_store`;
-- `core/rep_roles_service.py` генерирует название роли из Markov-корпуса без переноса GPT в пародии;
-- Discord cogs больше не создают и не читают собственные config-таблицы этих функций.
-
-Проверка production/backup для этого слоя: `python -m scripts.report_reputation_storage --database datebase/social.db`.
+- `core/steam_store.py` — один владелец Steam-профилей, watchlist, кэша игр, пользовательских автопинков и идемпотентных логов;
+- `core/steam_service.py` — Steam Web API, синхронизация библиотеки, выбор и сравнение игр, форматирование;
+- `fun_slesh/steam.py` — Discord-команды, embeds и scheduler без прямого SQLite.
 
 ## ML/AI вне пародий
 
