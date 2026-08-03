@@ -34,6 +34,8 @@ The user web application must remain private and Tailscale-only. It is not appro
 - DM read/post/edit/reaction access is checked at the HTTP boundary; admin status never grants access to another pair's DM.
 - Editing or deleting another user's channel message as an admin creates a `platform_audit_log` event exposed through an admin-only endpoint.
 - Profile and authorization tests cover user/admin separation, hashed sessions, token scrubbing and same-origin writes.
+- JSON responses and SSE stringify integers outside JavaScript's safe range, so Discord user/message snowflakes are not rounded in DM selection, moderation feedback or audit views.
+- A reusable isolated two-account smoke covers unified profile update, exact snowflake transport, canonical DM, outsider denial, unread/read state and private voice invite/token issuance.
 
 ## Required before broader or public exposure
 
@@ -41,7 +43,7 @@ The user web application must remain private and Tailscale-only. It is not appro
 2. OAuth is optional. If enabled, configure a dedicated callback and set `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` and `DISCORD_REDIRECT_URI`.
 3. Set a strong `BOT_API_TOKEN` before enabling direct HTTP ingestion from the bot. Shared-database chat/outbox operation does not require it.
 4. Bind the service only to the VPS Tailscale address, never `0.0.0.0` or the public interface.
-5. Verify login, logout, profile update, chat and DM using a non-admin account and an admin account. Automated HTTP tests cover the access boundary; a live two-account UI check remains required before public exposure.
+5. Automated and isolated live HTTP smoke now cover profile, DM/unread, outsider denial and voice invite with two real-size Discord identities. A visual two-account browser check on a machine with Tailscale access remains required before public exposure.
 6. Keep LiveKit/voice on its current private Tailscale boundary. Room authorization,
    short-lived tokens, explicit media activation and rate limits are implemented;
    private TLS remains required before public exposure.

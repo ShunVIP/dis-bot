@@ -32,6 +32,7 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const snowflake = (value) => String(value ?? "").trim();
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/static/service-worker.js").catch(console.error);
@@ -521,8 +522,8 @@ function renderPlatformBootstrap(data) {
 
   const dmSelect = $("dmPeerId");
   if (dmSelect) {
-    const currentUserId = Number(state.me?.user?.id || 0);
-    const peers = (data.members || []).filter((member) => Number(member.id) !== currentUserId);
+    const currentUserId = snowflake(state.me?.user?.id);
+    const peers = (data.members || []).filter((member) => snowflake(member.id) !== currentUserId);
     dmSelect.innerHTML = `<option value="">Выбрать участника</option>${peers.map((member) => {
       const profile = member.profile || {};
       const name = profile.display_name || member.global_name || member.username || String(member.id);
@@ -570,7 +571,7 @@ function renderPresence(members) {
     return;
   }
   box.classList.remove("muted");
-  const currentUserId = Number(state.me?.user?.id || 0);
+  const currentUserId = snowflake(state.me?.user?.id);
   box.innerHTML = members.map((member) => {
     const profile = member.profile || {};
     const name = profile.display_name || member.global_name || member.username || String(member.id);
@@ -579,13 +580,13 @@ function renderPresence(members) {
       <div class="presence-item">
         <strong style="color:${escapeHtml(profile.accent_color || "#f4f7f8")}">${escapeHtml(name)}</strong>
         <span>${roles.map((role) => role.name).join(", ") || "участник"}</span>
-        ${Number(member.id) === currentUserId ? "" : `<button type="button" class="presence-dm" data-start-dm="${member.id}">Написать</button>`}
+        ${snowflake(member.id) === currentUserId ? "" : `<button type="button" class="presence-dm" data-start-dm="${member.id}">Написать</button>`}
       </div>
     `;
   }).join("");
   box.querySelectorAll("[data-start-dm]").forEach((button) => {
     button.addEventListener("click", () => {
-      startDmWithPeer(Number(button.dataset.startDm)).catch(console.error);
+      startDmWithPeer(snowflake(button.dataset.startDm)).catch(console.error);
     });
   });
 }
@@ -710,7 +711,7 @@ async function createPlatformChannel() {
 }
 
 async function createPlatformDm() {
-  const peerId = Number($("dmPeerId").value || 0);
+  const peerId = snowflake($("dmPeerId").value);
   if (!peerId) return;
   await startDmWithPeer(peerId);
   $("dmPeerId").value = "";
@@ -1261,12 +1262,12 @@ function renderMlInsights(data) {
 
   const alerts = [
     ...(economy.wallet_mismatches || []).slice(0, 5).map((item) => ({
-      title: `Кошелёк ${Number(item.user_id)}`,
+      title: `Кошелёк ${snowflake(item.user_id)}`,
       detail: `баланс ${Number(item.wallet)} · ledger ${Number(item.ledger)}`,
     })),
     ...(economy.anomalies || []).slice(0, 5).map((item) => ({
       title: `Операция ${Number(item.ledger_id)} · ${item.reason || "без причины"}`,
-      detail: `пользователь ${Number(item.user_id)} · изменение ${Number(item.delta)}`,
+      detail: `пользователь ${snowflake(item.user_id)} · изменение ${Number(item.delta)}`,
     })),
   ];
   const qualityChecks = Object.entries(quality.checks || {}).map(([name, value]) => ({
@@ -1310,7 +1311,7 @@ function renderModeration(data) {
         <span>${escapeHtml(sample.model_version || "модель")}</span>
       </div>
       <div class="level-actions">
-        ${levels.map((item) => `<button class="button ghost" type="button" data-toxicity-message="${Number(sample.message_id)}" data-toxicity-level="${Number(item.level)}">${Number(item.level)} · ${escapeHtml(item.label)}</button>`).join("")}
+        ${levels.map((item) => `<button class="button ghost" type="button" data-toxicity-message="${snowflake(sample.message_id)}" data-toxicity-level="${Number(item.level)}">${Number(item.level)} · ${escapeHtml(item.label)}</button>`).join("")}
       </div>
     </article>
   `).join("") : "Нет сообщений, ожидающих проверки.";
@@ -1320,7 +1321,7 @@ function renderModeration(data) {
   $("moderationAudit").innerHTML = events.length ? events.map((event) => `
     <article class="audit-item">
       <strong>${escapeHtml(event.action)}</strong>
-      <span>админ ${Number(event.actor_id)} · ${escapeHtml(event.target_type)} ${Number(event.target_id)}</span>
+      <span>админ ${snowflake(event.actor_id)} · ${escapeHtml(event.target_type)} ${snowflake(event.target_id)}</span>
       <small>${escapeHtml(new Date(event.created_at).toLocaleString("ru-RU"))}</small>
     </article>
   `).join("") : "Действий модераторов пока нет.";
@@ -1430,7 +1431,7 @@ $("toxicityReviewQueue").addEventListener("click", (event) => {
   const button = event.target.closest("[data-toxicity-message]");
   if (!button) return;
   button.disabled = true;
-  submitToxicityFeedback(Number(button.dataset.toxicityMessage), Number(button.dataset.toxicityLevel))
+  submitToxicityFeedback(snowflake(button.dataset.toxicityMessage), Number(button.dataset.toxicityLevel))
     .catch((error) => {
       button.disabled = false;
       $("moderationStatus").textContent = error?.message || "Не удалось сохранить";

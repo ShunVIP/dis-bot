@@ -140,6 +140,7 @@ except ValueError:
 ALLOWED_UPLOAD_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".txt", ".pdf", ".zip"}
 LOGIN_WINDOW_SECONDS = 5 * 60
 LOGIN_ATTEMPT_LIMIT = 10
+JS_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MESSAGE_RATE_LIMITS = ((6, 10), (30, 60))
 REACTION_RATE_LIMITS = ((20, 10), (80, 60))
 DM_CREATE_RATE_LIMITS = ((5, 60),)
@@ -175,9 +176,26 @@ def _has_allowed_guild(raw_guilds: object) -> bool:
     return bool(ALLOWED_GUILD_IDS.intersection(member_guild_ids))
 
 
+def _json_safe(data):
+    """Keep Discord snowflakes exact when JSON is parsed by JavaScript."""
+    if isinstance(data, bool) or data is None:
+        return data
+    if isinstance(data, int):
+        return str(data) if abs(data) > JS_MAX_SAFE_INTEGER else data
+    if isinstance(data, dict):
+        return {key: _json_safe(value) for key, value in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [_json_safe(value) for value in data]
+    return data
+
+
+def _json_text(data) -> str:
+    return json.dumps(_json_safe(data), ensure_ascii=False)
+
+
 def _json(data, status: int = 200):
     return web.Response(
-        text=json.dumps(data, ensure_ascii=False),
+        text=_json_text(data),
         status=status,
         content_type="application/json",
     )
@@ -736,7 +754,7 @@ async def _sse_json(request: web.Request, producer):
     try:
         while True:
             payload = producer()
-            encoded = json.dumps(payload, ensure_ascii=False)
+            encoded = _json_text(payload)
             if encoded != last_payload:
                 await response.write(f"data: {encoded}\n\n".encode("utf-8"))
                 last_payload = encoded
