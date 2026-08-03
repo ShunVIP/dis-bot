@@ -22,13 +22,20 @@ from core.economy import add_coins, get_balance
 from core.economy_profile import currency_amount
 from core.game_service import (
     CHOICES,
+    blackjack_duel_winner,
+    blackjack_outcome,
+    can_double_blackjack,
     card_value as _card_value,
+    guess_number_reward,
+    guess_temperature,
     hand_text as _hand_str,
     hand_total as _hand_total,
     mask_hangman_word as _mask_word,
     new_deck as _new_deck,
     normalize_hangman_word,
     rps_result as _rps_result,
+    settle_blackjack_duel,
+    settle_solo_blackjack,
 )
 from core.game_store import ensure_game_tables, guess_hangman_letter, start_hangman_game
 from utils.events_bus import emit
@@ -49,9 +56,6 @@ HANGMAN_WORDS = [
 
 def _money(user_id: int, amount: int) -> str:
     return currency_amount(user_id, amount)
-
-def _balance_money(user_id: int) -> str:
-    return currency_amount(user_id, get_balance(user_id))
 
 # ── Виселица helpers ──────────────────────────────────────────────────────────
 HANGMAN_STAGES = [
@@ -166,8 +170,7 @@ class Games(commands.Cog):
             return
         target = random.randint(1, до)
         if число == target:
-            bonus = 40 if до >= 1000 else (20 if до >= 200 else (10 if до >= 50 else 0))
-            delta = 10 + bonus
+            delta = guess_number_reward(до)
             nb    = add_coins(interaction.user.id, delta, "game_win", {"game":"guess"})
             await emit("game_win", user_id=interaction.user.id, game="guess")
             emb = discord.Embed(
@@ -176,7 +179,7 @@ class Games(commands.Cog):
                 color=discord.Color.green())
         else:
             diff = abs(число - target)
-            hint = "🔥 Горячо!" if diff <= 2 else ("♨️ Тепло" if diff <= 5 else "🧊 Холодно")
+            hint = guess_temperature(diff)
             emb = discord.Embed(
                 title="🎯 Не угадал",
                 description=f"Было **{target}**, ты назвал **{число}** — {hint}",
@@ -340,14 +343,26 @@ class Games(commands.Cog):
             if d_total == 21:
                 result_txt = "🤝 Оба с блэкджеком — ничья! Ставка возвращена."
             else:
-                win = int(ставка * 1.5)
-                nb  = add_coins(interaction.user.id, win, "game_win", {"game":"bj"})
-                result_txt = f"🃏 Блэкджек! +{_money(interaction.user.id, win)} → **{_money(interaction.user.id, nb)}**"
+                settled = settle_solo_blackjack(
+                    interaction.user.id,
+                    ставка,
+                    "win",
+                    natural=True,
+                )
+                win = int(settled["amount"])
+                result_txt = f"🃏 Блэкджек! +{_money(interaction.user.id, win)} → **{_money(interaction.user.id, settled['balance'])}**"
+                await emit("game_win", user_id=interaction.user.id, game="blackjack")
             emb = discord.Embed(title="🃏 Блэкджек", color=discord.Color.gold())
             emb.add_field(name=f"Твои карты ({p_total})", value=_hand_str(p_hand))
             emb.add_field(name=f"Карты бота ({d_total})", value=_hand_str(d_hand))
             emb.add_field(name="Результат", value=result_txt, inline=False)
             await interaction.response.send_message(embed=emb)
+            await emit(
+                "game_played",
+                user_id=interaction.user.id,
+                guild_id=interaction.guild.id,
+                game="blackjack",
+            )
             return
 
         view = BlackjackView(
@@ -647,25 +662,17 @@ class BlackjackView(discord.ui.View):
             self.d_hand.append(self.deck.pop())
         d_total = _hand_total(self.d_hand)
 
-        if p_total > 21:
-            result = "bust"
-        elif d_total > 21 or p_total > d_total:
-            result = "win"
-        elif p_total == d_total:
-            result = "push"
-        else:
-            result = "lose"
+        result = blackjack_outcome(p_total, d_total)
+        settled = settle_solo_blackjack(self.user_id, self.bet, result)
 
         if result == "win":
-            nb  = add_coins(self.user_id, self.bet, "game_win", {"game":"bj"})
-            txt = f"🏆 Победа! +{_money(self.user_id, self.bet)} → **{_money(self.user_id, nb)}**"
+            txt = f"🏆 Победа! +{_money(self.user_id, settled['amount'])} → **{_money(self.user_id, settled['balance'])}**"
             color = discord.Color.green()
         elif result == "push":
             txt   = "🤝 Ничья — ставка возвращена."
             color = discord.Color.blurple()
         else:
-            nb  = add_coins(self.user_id, -self.bet, "game_lose", {"game":"bj"})
-            txt = f"💸 Поражение. -{_money(self.user_id, self.bet)} → **{_balance_money(self.user_id)}**"
+            txt = f"💸 Поражение. -{_money(self.user_id, settled['amount'])} → **{_money(self.user_id, settled['balance'])}**"
             color = discord.Color.red()
             if result == "bust":
                 txt = "💥 Перебор! " + txt
@@ -710,7 +717,7 @@ class BlackjackView(discord.ui.View):
             await interaction.response.send_message(
                 "❌ Удвоить можно только на первых двух картах.", ephemeral=True)
             return
-        if get_balance(self.user_id) < self.bet:
+        if not can_double_blackjack(self.user_id, self.bet):
             await interaction.response.send_message("❌ Недостаточно валюты.", ephemeral=True)
             return
         self.bet *= 2
@@ -719,7 +726,12 @@ class BlackjackView(discord.ui.View):
 
     async def on_timeout(self):
         if not self.done:
-            add_coins(self.user_id, -self.bet, "game_lose", {"game":"bj","reason":"timeout"})
+            settle_solo_blackjack(
+                self.user_id,
+                self.bet,
+                "lose",
+                timeout=True,
+            )
         self.stop()
 
 
@@ -742,6 +754,19 @@ class BJDuelView(discord.ui.View):
             await interaction.response.send_message(
                 "❌ Вызов адресован не тебе.", ephemeral=True)
             return
+        for player in (self.p1, self.p2):
+            if get_balance(player.id) < self.bet:
+                self.stop()
+                await interaction.response.edit_message(
+                    content=None,
+                    embed=discord.Embed(
+                        title="❌ Дуэль отменена",
+                        description=f"У {player.mention} уже недостаточно валюты для ставки.",
+                        color=discord.Color.red(),
+                    ),
+                    view=None,
+                )
+                return
         self.accepted = True
         self.stop()
         for child in self.children:
@@ -760,45 +785,6 @@ class BJDuelView(discord.ui.View):
         self.stop()
         await interaction.response.edit_message(
             content="❌ Дуэль отменена.", embed=None, view=None)
-
-    async def _run_duel(self, interaction: discord.Interaction):
-        deck   = _new_deck()
-        hands  = {
-            self.p1.id: [deck.pop(), deck.pop()],
-            self.p2.id: [deck.pop(), deck.pop()],
-        }
-        # Каждый добирает до 17 (автоматически)
-        for uid in (self.p1.id, self.p2.id):
-            while _hand_total(hands[uid]) < 17:
-                hands[uid].append(deck.pop())
-
-        t1 = _hand_total(hands[self.p1.id])
-        t2 = _hand_total(hands[self.p2.id])
-
-        def score(t):
-            return t if t <= 21 else 0  # перебор = 0
-
-        s1, s2 = score(t1), score(t2)
-        emb = discord.Embed(title="🃏 Итог блэкджек дуэли", color=discord.Color.gold())
-        emb.add_field(name=f"{self.p1.display_name} ({t1})",
-                      value=_hand_str(hands[self.p1.id]), inline=False)
-        emb.add_field(name=f"{self.p2.display_name} ({t2})",
-                      value=_hand_str(hands[self.p2.id]), inline=False)
-
-        if s1 > s2:
-            nb = add_coins(self.p1.id,  self.bet, "game_win",  {"game":"bj_duel"})
-            add_coins(self.p2.id, -self.bet, "game_lose", {"game":"bj_duel"})
-            emb.add_field(name="🏆 Победитель",
-                          value=f"{self.p1.mention} +{_money(self.p1.id, self.bet)} → **{_money(self.p1.id, nb)}**")
-        elif s2 > s1:
-            nb = add_coins(self.p2.id,  self.bet, "game_win",  {"game":"bj_duel"})
-            add_coins(self.p1.id, -self.bet, "game_lose", {"game":"bj_duel"})
-            emb.add_field(name="🏆 Победитель",
-                          value=f"{self.p2.mention} +{_money(self.p2.id, self.bet)} → **{_money(self.p2.id, nb)}**")
-        else:
-            emb.add_field(name="🤝 Ничья", value="Ставки возвращены.")
-
-        await self.channel.send(embed=emb)
 
     async def on_timeout(self):
         if not self.accepted:
@@ -860,26 +846,30 @@ class BJDuelPlayView(discord.ui.View):
             return False
         return True
 
-    def _score(self, uid: int) -> int:
-        total = _hand_total(self.hands[uid])
-        return total if total <= 21 else 0
-
     def _should_finish(self) -> bool:
         ids = self._participants()
         return all(uid in self.stood or _hand_total(self.hands[uid]) > 21 for uid in ids)
 
     async def _finish(self, interaction: discord.Interaction):
         self.done = True
-        p1_score = self._score(self.p1.id)
-        p2_score = self._score(self.p2.id)
-        if p1_score > p2_score:
-            nb = add_coins(self.p1.id, self.bet, "game_win", {"game": "bj_duel"})
-            add_coins(self.p2.id, -self.bet, "game_lose", {"game": "bj_duel"})
-            result = f"🏆 Победитель: {self.p1.mention} +{_money(self.p1.id, self.bet)} → **{_money(self.p1.id, nb)}**"
-        elif p2_score > p1_score:
-            nb = add_coins(self.p2.id, self.bet, "game_win", {"game": "bj_duel"})
-            add_coins(self.p1.id, -self.bet, "game_lose", {"game": "bj_duel"})
-            result = f"🏆 Победитель: {self.p2.mention} +{_money(self.p2.id, self.bet)} → **{_money(self.p2.id, nb)}**"
+        winner_code = blackjack_duel_winner(
+            _hand_total(self.hands[self.p1.id]),
+            _hand_total(self.hands[self.p2.id]),
+        )
+        winner = self.p1 if winner_code > 0 else (self.p2 if winner_code < 0 else None)
+        loser = self.p2 if winner_code > 0 else (self.p1 if winner_code < 0 else None)
+        if winner and loser:
+            settled = settle_blackjack_duel(winner.id, loser.id, self.bet)
+            if settled["status"] == "settled":
+                result = (
+                    f"🏆 Победитель: {winner.mention} +{_money(winner.id, self.bet)} "
+                    f"→ **{_money(winner.id, settled['winner_balance'])}**"
+                )
+            else:
+                result = (
+                    f"🏆 Победитель: {winner.mention}. Валюта не переведена: "
+                    f"у проигравшего осталось **{settled.get('loser_balance', 0)}**."
+                )
         else:
             result = "🤝 Ничья. Ставки остаются на месте."
 
@@ -888,6 +878,8 @@ class BJDuelPlayView(discord.ui.View):
         embed = self.build_embed(result)
         embed.color = discord.Color.gold()
         await interaction.response.edit_message(embed=embed, view=self)
+        if winner:
+            await emit("game_win", user_id=winner.id, game="blackjack_duel")
         await emit("game_played", user_id=self.p1.id, guild_id=interaction.guild.id, game="bj_duel")
         await emit("game_played", user_id=self.p2.id, guild_id=interaction.guild.id, game="bj_duel")
         self.stop()

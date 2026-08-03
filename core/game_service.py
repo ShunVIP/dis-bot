@@ -3,6 +3,8 @@ from __future__ import annotations
 import random
 import re
 
+from core.economy import add_coins, debit_coins, get_balance, settle_wager
+
 
 CHOICES = ("камень", "ножницы", "бумага")
 SUITS = ("♠", "♥", "♦", "♣")
@@ -66,3 +68,92 @@ def normalize_hangman_word(value: str, *, minimum: int = 2) -> str:
 
 def mask_hangman_word(word: str, guessed: set[str]) -> str:
     return " ".join(char if char in guessed or char == "-" else r"\_" for char in word)
+
+
+def guess_number_reward(maximum: int) -> int:
+    if int(maximum) >= 1000:
+        return 50
+    if int(maximum) >= 200:
+        return 30
+    if int(maximum) >= 50:
+        return 20
+    return 10
+
+
+def guess_temperature(distance: int) -> str:
+    clean = abs(int(distance))
+    if clean <= 2:
+        return "🔥 Горячо!"
+    if clean <= 5:
+        return "♨️ Тепло"
+    return "🧊 Холодно"
+
+
+def blackjack_outcome(player_total: int, dealer_total: int) -> str:
+    player = int(player_total)
+    dealer = int(dealer_total)
+    if player > 21:
+        return "bust"
+    if dealer > 21 or player > dealer:
+        return "win"
+    if player == dealer:
+        return "push"
+    return "lose"
+
+
+def blackjack_duel_winner(first_total: int, second_total: int) -> int:
+    first = int(first_total) if int(first_total) <= 21 else 0
+    second = int(second_total) if int(second_total) <= 21 else 0
+    return 1 if first > second else (-1 if second > first else 0)
+
+
+def can_double_blackjack(user_id: int, current_bet: int) -> bool:
+    """No stake is reserved, so the wallet must cover the full doubled loss."""
+    return get_balance(int(user_id)) >= int(current_bet) * 2
+
+
+def settle_solo_blackjack(
+    user_id: int,
+    bet: int,
+    outcome: str,
+    *,
+    natural: bool = False,
+    timeout: bool = False,
+) -> dict[str, int | str]:
+    clean_bet = max(1, int(bet))
+    if outcome == "win":
+        profit = int(clean_bet * 1.5) if natural else clean_bet
+        balance = add_coins(
+            int(user_id),
+            profit,
+            "game_win",
+            {"game": "blackjack", "natural": bool(natural)},
+        )
+        return {"status": "won", "amount": profit, "balance": balance}
+    if outcome == "push":
+        return {"status": "push", "amount": 0, "balance": get_balance(int(user_id))}
+    debit = debit_coins(
+        int(user_id),
+        clean_bet,
+        "game_lose",
+        {"game": "blackjack", "outcome": outcome, "timeout": bool(timeout)},
+        allow_partial=True,
+    )
+    return {
+        "status": "lost",
+        "amount": int(debit.get("actual", 0)),
+        "balance": int(debit.get("balance", 0)),
+    }
+
+
+def settle_blackjack_duel(
+    winner_id: int,
+    loser_id: int,
+    bet: int,
+) -> dict[str, int | str]:
+    return settle_wager(
+        int(winner_id),
+        int(loser_id),
+        int(bet),
+        game="blackjack_duel",
+    )

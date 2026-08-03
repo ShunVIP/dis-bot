@@ -2209,9 +2209,50 @@ class GameLayerTests(IsolatedDatabaseTest):
         self.assertEqual(game_service.hand_total(["A♠", "A♥", "9♦"]), 21)
         self.assertEqual(game_service.hand_total(["K♠", "Q♥", "2♦"]), 22)
         self.assertEqual(len(set(game_service.new_deck())), 52)
+        self.assertEqual(game_service.blackjack_outcome(22, 18), "bust")
+        self.assertEqual(game_service.blackjack_outcome(20, 22), "win")
+        self.assertEqual(game_service.blackjack_outcome(18, 18), "push")
+        self.assertEqual(game_service.blackjack_duel_winner(20, 19), 1)
+        self.assertEqual(game_service.blackjack_duel_winner(22, 23), 0)
+        self.assertEqual(game_service.guess_number_reward(49), 10)
+        self.assertEqual(game_service.guess_number_reward(1000), 50)
+        self.assertEqual(game_service.guess_temperature(2), "🔥 Горячо!")
         self.assertEqual(game_service.normalize_hangman_word("  Тест-слово "), "тест-слово")
         with self.assertRaises(ValueError):
             game_service.normalize_hangman_word("x")
+
+    def test_blackjack_settlements_are_atomic_and_never_overdraw(self):
+        for user_id in (10, 20):
+            economy_profile.set_economy_profile(
+                user_id,
+                economy_profile.GENDER_MALE,
+                True,
+            )
+        economy.add_coins(10, 100, "seed")
+        economy.add_coins(20, 50, "seed")
+
+        settled = game_service.settle_blackjack_duel(10, 20, 40)
+        rejected = game_service.settle_blackjack_duel(10, 20, 20)
+
+        self.assertEqual(settled["status"], "settled")
+        self.assertEqual(settled["winner_balance"], 140)
+        self.assertEqual(settled["loser_balance"], 10)
+        self.assertEqual(rejected["status"], "insufficient")
+        self.assertEqual(economy.get_balance(10), 140)
+        self.assertEqual(economy.get_balance(20), 10)
+
+        loss = game_service.settle_solo_blackjack(20, 50, "lose")
+        self.assertEqual(loss, {"status": "lost", "amount": 10, "balance": 0})
+        self.assertFalse(game_service.can_double_blackjack(20, 5))
+        self.assertEqual(economy.get_balance(20), 0)
+
+    def test_discord_games_delegate_blackjack_rules_and_settlement(self):
+        source = (Path(__file__).parents[1] / "fun_slesh" / "games.py").read_text(encoding="utf-8")
+        self.assertNotIn("import sqlite3", source)
+        self.assertIn("blackjack_outcome(", source)
+        self.assertIn("settle_solo_blackjack(", source)
+        self.assertIn("settle_blackjack_duel(", source)
+        self.assertNotIn('add_coins(self.p2.id, -self.bet', source)
 
     def test_hangman_store_replaces_channel_game_and_applies_atomic_turns(self):
         first = game_store.start_hangman_game(
