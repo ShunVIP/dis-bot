@@ -191,6 +191,53 @@ def transfer_coins(
     }
 
 
+def settle_wager(
+    winner_id: int,
+    loser_id: int,
+    amount: int,
+    *,
+    game: str,
+) -> dict[str, int | str]:
+    """Atomically move an already-agreed wager between two players."""
+    _ensure_tables()
+    winner = int(winner_id)
+    loser = int(loser_id)
+    clean_amount = int(amount)
+    if winner == loser or clean_amount <= 0:
+        return {"status": "invalid_wager"}
+    now_utc = datetime.now(timezone.utc).isoformat()
+    with db_connection(DB_PATH) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        loser_balance = _balance_in_connection(conn, loser)
+        if loser_balance < clean_amount:
+            return {
+                "status": "insufficient",
+                "loser_balance": loser_balance,
+                "required": clean_amount,
+            }
+        loser_balance = _write_wallet_delta(
+            conn,
+            loser,
+            -clean_amount,
+            "game_lose",
+            {"game": str(game), "to": winner},
+            now_utc,
+        )
+        winner_balance = _write_wallet_delta(
+            conn,
+            winner,
+            clean_amount,
+            "game_win",
+            {"game": str(game), "from": loser},
+            now_utc,
+        )
+    return {
+        "status": "settled",
+        "winner_balance": winner_balance,
+        "loser_balance": loser_balance,
+    }
+
+
 def list_ledger_entries(user_id: int, limit: int = 5) -> list[dict[str, Any]]:
     _ensure_tables()
     with db_connection(DB_PATH) as conn:
