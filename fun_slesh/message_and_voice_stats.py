@@ -19,11 +19,8 @@ Cog: message_and_voice_stats (fixed)
 ⚠ Требуется intents.message_content=True для слов/эмодзи.
 """
 
-import re
-import sqlite3
 import asyncio
-from datetime import datetime, timedelta, timezone, date
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 from typing import Optional
 
 import discord
@@ -39,12 +36,10 @@ from core.activity_rewards_store import (
     is_activity_channel_excluded as _is_activity_channel_excluded,
     list_activity_channel_exclusions,
 )
-from core.paths import SOCIAL_DB
+from core import message_stats_service, message_stats_store
 
-# === Путь к общей БД проекта ===
-DB_PATH = SOCIAL_DB
-UTC = timezone.utc
-MSK = ZoneInfo("Europe/Moscow")
+UTC = message_stats_service.UTC
+MSK = message_stats_service.MSK
 
 # -------------------------
 # Безопасные ответы для slash-команд
@@ -77,244 +72,13 @@ async def _safe_reply(
             except Exception:
                 pass
 
-# -------------------------
-# DB helpers / schema
-# -------------------------
-SCHEMA_SQL = [
-    # суточные агрегаты по текстовым сообщениям
-    """
-    CREATE TABLE IF NOT EXISTS msg_stats_daily (
-        user_id     INTEGER NOT NULL,
-        guild_id    INTEGER NOT NULL,
-        channel_id  INTEGER NOT NULL,
-        date        TEXT    NOT NULL,  -- YYYY-MM-DD (UTC)
-        messages    INTEGER NOT NULL DEFAULT 0,
-        words       INTEGER NOT NULL DEFAULT 0,
-        emojis      INTEGER NOT NULL DEFAULT 0,
-        chars       INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (user_id, guild_id, channel_id, date)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS msg_word_freq_daily (
-        guild_id    INTEGER NOT NULL,
-        channel_id  INTEGER NOT NULL,
-        date        TEXT    NOT NULL,  -- YYYY-MM-DD (MSK)
-        word        TEXT    NOT NULL,
-        count       INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (guild_id, channel_id, date, word)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS msg_emoji_freq_daily (
-        guild_id    INTEGER NOT NULL,
-        channel_id  INTEGER NOT NULL,
-        date        TEXT    NOT NULL,  -- YYYY-MM-DD (MSK)
-        emoji       TEXT    NOT NULL,
-        count       INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (guild_id, channel_id, date, emoji)
-    )
-    """,
-    # чекпоинт по каждому текстовому каналу
-    """
-    CREATE TABLE IF NOT EXISTS msg_index_checkpoints (
-        channel_id       INTEGER PRIMARY KEY,
-        last_message_id  INTEGER
-    )
-    """,
-    # сессии голосовых
-    """
-    CREATE TABLE IF NOT EXISTS voice_sessions (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id    INTEGER NOT NULL,
-        guild_id   INTEGER NOT NULL,
-        channel_id INTEGER NOT NULL,
-        started_at TEXT    NOT NULL,  -- ISO UTC
-        ended_at   TEXT,              -- ISO UTC
-        seconds    INTEGER NOT NULL DEFAULT 0
-    )
-    """,
-    # суточные агрегаты по голосовым
-    """
-    CREATE TABLE IF NOT EXISTS voice_totals_daily (
-        user_id  INTEGER NOT NULL,
-        guild_id INTEGER NOT NULL,
-        date     TEXT    NOT NULL,  -- YYYY-MM-DD (UTC)
-        seconds  INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (user_id, guild_id, date)
-    )
-    """,
-]
-
-
 def _ensure_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        for sql in SCHEMA_SQL:
-            cur.execute(sql)
-        conn.commit()
+    message_stats_store.ensure_tables()
     ensure_activity_rewards_storage()
 
 
 def _excluded_channel_ids(guild_id: int) -> list[int]:
     return [int(row["channel_id"]) for row in list_activity_channel_exclusions(guild_id)]
-
-# -------------------------
-# Text utils
-# -------------------------
-_def_splitter = re.compile(r"\s+", re.UNICODE)
-_emoji_unic = re.compile(
-    r"[\U0001F300-\U0001F5FF]|[\U0001F600-\U0001F64F]|[\U0001F680-\U0001F6FF]|"
-    r"[\U0001F700-\U0001F77F]|[\U0001F780-\U0001F7FF]|[\U0001F800-\U0001F8FF]|"
-    r"[\U0001F900-\U0001F9FF]|[\U0001FA00-\U0001FA6F]|[\U0001FA70-\U0001FAFF]|"
-    r"[\u2600-\u26FF]|[\u2700-\u27BF]",
-    re.UNICODE,
-)
-_custom_emoji = re.compile(r"<a?:[A-Za-z0-9_~]+:[0-9]+>")
-_word_token = re.compile(r"[A-Za-zА-Яа-яЁё0-9]{3,}", re.UNICODE)
-_custom_emoji_name = re.compile(r"<a?:([A-Za-z0-9_~]+):[0-9]+>")
-
-
-def _count_words(text: str) -> int:
-    text = (text or "").strip()
-    if not text:
-        return 0
-    return len([t for t in _def_splitter.split(text) if t])
-
-
-def _count_emojis(text: str) -> int:
-    if not text:
-        return 0
-    return len(_emoji_unic.findall(text)) + len(_custom_emoji.findall(text))
-
-
-def _extract_words(text: str) -> list[str]:
-    if not text:
-        return []
-    words = []
-    for token in _word_token.findall(text.lower()):
-        if token.isdigit():
-            continue
-        words.append(token)
-    return words
-
-
-def _extract_emojis(text: str) -> list[str]:
-    if not text:
-        return []
-    custom = [f":{name}:" for name in _custom_emoji_name.findall(text)]
-    return custom + _emoji_unic.findall(text)
-
-# -------------------------
-# Core aggregations
-# -------------------------
-
-def _utc_date_from_ts(ts: datetime) -> str:
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=UTC)
-    return ts.astimezone(UTC).date().isoformat()
-
-
-def _msk_date_from_ts(ts: datetime) -> str:
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=UTC)
-    return ts.astimezone(MSK).date().isoformat()
-
-
-def _accumulate_msg_row(cur: sqlite3.Cursor, *, user_id: int, guild_id: int, channel_id: int,
-                        d_iso: str, messages: int, words: int, emojis: int, chars: int) -> None:
-    cur.execute(
-        """
-        INSERT INTO msg_stats_daily(user_id,guild_id,channel_id,date,messages,words,emojis,chars)
-        VALUES (?,?,?,?,?,?,?,?)
-        ON CONFLICT(user_id,guild_id,channel_id,date) DO UPDATE SET
-            messages = messages + excluded.messages,
-            words    = words    + excluded.words,
-            emojis   = emojis   + excluded.emojis,
-            chars    = chars    + excluded.chars
-        """,
-        (user_id, guild_id, channel_id, d_iso, messages, words, emojis, chars)
-    )
-
-
-def _accumulate_freq_row(
-    cur: sqlite3.Cursor,
-    *,
-    table: str,
-    guild_id: int,
-    channel_id: int,
-    d_iso: str,
-    value_column: str,
-    values: list[str],
-) -> None:
-    if not values:
-        return
-    counts: dict[str, int] = {}
-    for value in values:
-        clean = (value or "").strip()
-        if not clean:
-            continue
-        counts[clean] = counts.get(clean, 0) + 1
-    for value, count in counts.items():
-        cur.execute(
-            f"""
-            INSERT INTO {table}(guild_id,channel_id,date,{value_column},count)
-            VALUES (?,?,?,?,?)
-            ON CONFLICT(guild_id,channel_id,date,{value_column}) DO UPDATE SET
-                count = count + excluded.count
-            """,
-            (guild_id, channel_id, d_iso, value, count),
-        )
-
-
-def _accumulate_message_stats(cur: sqlite3.Cursor, message: discord.Message, guild_id: int, channel_id: int) -> None:
-    content = message.content or ""
-    words = _count_words(content)
-    emojis = _count_emojis(content)
-    chars = len(content)
-    _accumulate_msg_row(
-        cur,
-        user_id=message.author.id,
-        guild_id=guild_id,
-        channel_id=channel_id,
-        d_iso=_utc_date_from_ts(message.created_at),
-        messages=1,
-        words=words,
-        emojis=emojis,
-        chars=chars,
-    )
-    msk_date = _msk_date_from_ts(message.created_at)
-    _accumulate_freq_row(
-        cur,
-        table="msg_word_freq_daily",
-        guild_id=guild_id,
-        channel_id=channel_id,
-        d_iso=msk_date,
-        value_column="word",
-        values=_extract_words(content),
-    )
-    _accumulate_freq_row(
-        cur,
-        table="msg_emoji_freq_daily",
-        guild_id=guild_id,
-        channel_id=channel_id,
-        d_iso=msk_date,
-        value_column="emoji",
-        values=_extract_emojis(content),
-    )
-
-
-def _accumulate_voice_row(cur: sqlite3.Cursor, *, user_id: int, guild_id: int, seconds: int, dt: Optional[date] = None) -> None:
-    d_iso = (dt or datetime.now(UTC).date()).isoformat()
-    cur.execute(
-        """
-        INSERT INTO voice_totals_daily(user_id,guild_id,date,seconds)
-        VALUES (?,?,?,?)
-        ON CONFLICT(user_id,guild_id,date) DO UPDATE SET
-            seconds = seconds + excluded.seconds
-        """,
-        (user_id, guild_id, d_iso, int(seconds))
-    )
 
 # -------------------------
 # Cog
@@ -324,6 +88,25 @@ class MessageAndVoiceStats(commands.Cog):
         self.bot = bot
         _ensure_db()
         self._voice_sessions: dict[tuple[int, int], tuple[int, datetime]] = {}
+
+    async def _finish_voice_segment(
+        self,
+        user_id: int,
+        guild_id: int,
+        channel_id: int,
+        started_at: datetime,
+        ended_at: datetime,
+    ) -> int:
+        seconds = message_stats_store.record_voice_session(
+            user_id,
+            guild_id,
+            channel_id,
+            started_at,
+            ended_at,
+        )
+        if seconds:
+            await self._award_voice(user_id, guild_id, seconds)
+        return seconds
 
     # ========= ТЕКСТ: индексация истории =========
     @app_commands.command(name="индекс_сообщений", description="Индексирует историю канала батчами и пишет суточные агрегаты")
@@ -354,13 +137,8 @@ class MessageAndVoiceStats(commands.Cog):
         processed = 0
         new_rows = 0
         last_processed_id: Optional[int] = None
-
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            # загрузим чекпоинт (если есть)
-            cur.execute("SELECT last_message_id FROM msg_index_checkpoints WHERE channel_id = ?", (channel.id,))
-            row = cur.fetchone()
-            checkpoint_last_id = int(row[0]) if row and row[0] else None
+        pending: list[dict[str, object]] = []
+        checkpoint_last_id = message_stats_store.get_checkpoint(channel.id)
 
         # идём по истории
         async for message in channel.history(limit=None, oldest_first=True, after=after_dt):
@@ -370,27 +148,33 @@ class MessageAndVoiceStats(commands.Cog):
             if message.author.bot:
                 continue
 
-            with sqlite3.connect(DB_PATH) as conn:
-                cur = conn.cursor()
-                _accumulate_message_stats(cur, message, guild_id, channel.id)
-                new_rows += 1
-                processed += 1
-                last_processed_id = message.id
-                if processed % BATCH == 0:
-                    cur.execute("REPLACE INTO msg_index_checkpoints(channel_id,last_message_id) VALUES (?,?)",
-                                (channel.id, last_processed_id))
-                conn.commit()
-
-            if processed % BATCH == 0:
+            pending.append(
+                message_stats_service.build_message_record(
+                    message_id=message.id,
+                    user_id=message.author.id,
+                    guild_id=guild_id,
+                    channel_id=channel.id,
+                    content=message.content or "",
+                    created_at=message.created_at,
+                )
+            )
+            processed += 1
+            last_processed_id = message.id
+            if len(pending) >= BATCH:
+                new_rows += message_stats_store.record_message_batch(
+                    pending,
+                    checkpoint_channel_id=channel.id,
+                    checkpoint_message_id=last_processed_id,
+                )
+                pending.clear()
                 await asyncio.sleep(1.0)
 
-        # финальный чекпоинт (если что-то обработали)
-        if last_processed_id is not None:
-            with sqlite3.connect(DB_PATH) as conn:
-                cur = conn.cursor()
-                cur.execute("REPLACE INTO msg_index_checkpoints(channel_id,last_message_id) VALUES (?,?)",
-                            (channel.id, last_processed_id))
-                conn.commit()
+        if pending and last_processed_id is not None:
+            new_rows += message_stats_store.record_message_batch(
+                pending,
+                checkpoint_channel_id=channel.id,
+                checkpoint_message_id=last_processed_id,
+            )
 
         await _safe_reply(
             interaction,
@@ -409,41 +193,15 @@ class MessageAndVoiceStats(commands.Cog):
         await _safe_defer(interaction)
         guild_id = interaction.guild_id
         assert guild_id is not None
-        since = (datetime.now(UTC).date() - timedelta(days=int(дней) - 1)).isoformat()
+        since = (datetime.now(MSK).date() - timedelta(days=int(дней) - 1)).isoformat()
 
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            if канал is None:
-                excluded = _excluded_channel_ids(guild_id)
-                channel_filter = ""
-                params: list = [guild_id, since]
-                if excluded:
-                    channel_filter = f" AND channel_id NOT IN ({','.join('?' for _ in excluded)})"
-                    params.extend(excluded)
-                cur.execute(
-                    f"""
-                    SELECT user_id, SUM(messages) AS total
-                    FROM msg_stats_daily
-                    WHERE guild_id = ? AND date >= ?{channel_filter}
-                    GROUP BY user_id
-                    ORDER BY total DESC
-                    LIMIT 15
-                    """,
-                    params
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT user_id, SUM(messages) AS total
-                    FROM msg_stats_daily
-                    WHERE guild_id = ? AND channel_id = ? AND date >= ?
-                    GROUP BY user_id
-                    ORDER BY total DESC
-                    LIMIT 15
-                    """,
-                    (guild_id, канал.id, since)
-                )
-            rows = cur.fetchall()
+        rows = message_stats_store.list_user_metric(
+            guild_id,
+            since,
+            "messages",
+            channel_id=канал.id if канал else None,
+            excluded_channel_ids=_excluded_channel_ids(guild_id) if канал is None else (),
+        )
 
         if not rows:
             await _safe_reply(interaction, content="📭 Нет данных за выбранный период. Сначала проиндексируй историю.")
@@ -462,25 +220,15 @@ class MessageAndVoiceStats(commands.Cog):
         await _safe_defer(interaction)
         guild_id = interaction.guild_id
         assert guild_id is not None
-        since = (datetime.now(UTC).date() - timedelta(days=int(дней) - 1)).isoformat()
+        since = (datetime.now(MSK).date() - timedelta(days=int(дней) - 1)).isoformat()
 
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            if канал is None:
-                excluded = _excluded_channel_ids(guild_id)
-                channel_filter = ""
-                params: list = [guild_id, since]
-                if excluded:
-                    channel_filter = f" AND channel_id NOT IN ({','.join('?' for _ in excluded)})"
-                    params.extend(excluded)
-                cur.execute(
-                    f"SELECT user_id, SUM(words) AS total FROM msg_stats_daily WHERE guild_id=? AND date>=?{channel_filter} GROUP BY user_id ORDER BY total DESC LIMIT 15",
-                    params)
-            else:
-                cur.execute(
-                    "SELECT user_id, SUM(words) AS total FROM msg_stats_daily WHERE guild_id=? AND channel_id=? AND date>=? GROUP BY user_id ORDER BY total DESC LIMIT 15",
-                    (guild_id, канал.id, since))
-            rows = cur.fetchall()
+        rows = message_stats_store.list_user_metric(
+            guild_id,
+            since,
+            "words",
+            channel_id=канал.id if канал else None,
+            excluded_channel_ids=_excluded_channel_ids(guild_id) if канал is None else (),
+        )
 
         if not rows:
             await _safe_reply(interaction, content="📭 Нет данных. Убедись, что включён message_content и выполнена индексация.")
@@ -497,25 +245,15 @@ class MessageAndVoiceStats(commands.Cog):
         await _safe_defer(interaction)
         guild_id = interaction.guild_id
         assert guild_id is not None
-        since = (datetime.now(UTC).date() - timedelta(days=int(дней) - 1)).isoformat()
+        since = (datetime.now(MSK).date() - timedelta(days=int(дней) - 1)).isoformat()
 
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            if канал is None:
-                excluded = _excluded_channel_ids(guild_id)
-                channel_filter = ""
-                params: list = [guild_id, since]
-                if excluded:
-                    channel_filter = f" AND channel_id NOT IN ({','.join('?' for _ in excluded)})"
-                    params.extend(excluded)
-                cur.execute(
-                    f"SELECT user_id, SUM(emojis) AS total FROM msg_stats_daily WHERE guild_id=? AND date>=?{channel_filter} GROUP BY user_id ORDER BY total DESC LIMIT 15",
-                    params)
-            else:
-                cur.execute(
-                    "SELECT user_id, SUM(emojis) AS total FROM msg_stats_daily WHERE guild_id=? AND channel_id=? AND date>=? GROUP BY user_id ORDER BY total DESC LIMIT 15",
-                    (guild_id, канал.id, since))
-            rows = cur.fetchall()
+        rows = message_stats_store.list_user_metric(
+            guild_id,
+            since,
+            "emojis",
+            channel_id=канал.id if канал else None,
+            excluded_channel_ids=_excluded_channel_ids(guild_id) if канал is None else (),
+        )
 
         if not rows:
             await _safe_reply(interaction, content="📭 Нет данных за период.")
@@ -568,12 +306,18 @@ class MessageAndVoiceStats(commands.Cog):
         if _is_activity_channel_excluded(guild_id, channel_id):
             return
 
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            _accumulate_message_stats(cur, message, guild_id, channel_id)
-            conn.commit()
-
-        reward_message(user_id, guild_id)
+        recorded = message_stats_store.record_message(
+            message_stats_service.build_message_record(
+                message_id=message.id,
+                user_id=user_id,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                content=message.content or "",
+                created_at=message.created_at,
+            )
+        )
+        if recorded:
+            reward_message(user_id, guild_id)
 
     # ========= ВОЙС: онлайн‑трекер =========
     @commands.Cog.listener()
@@ -589,18 +333,9 @@ class MessageAndVoiceStats(commands.Cog):
             sess = self._voice_sessions.pop(key, None)
             if sess:
                 ch_id, started_at = sess
-                seconds = int((now - started_at).total_seconds())
-                if seconds > 0:
-                    with sqlite3.connect(DB_PATH) as conn:
-                        cur = conn.cursor()
-                        cur.execute(
-                            "INSERT INTO voice_sessions(user_id,guild_id,channel_id,started_at,ended_at,seconds) VALUES (?,?,?,?,?,?)",
-                            (member.id, guild_id, ch_id, started_at.isoformat(), now.isoformat(), seconds)
-                        )
-                        _accumulate_voice_row(cur, user_id=member.id, guild_id=guild_id, seconds=seconds)
-                        conn.commit()
-                    # Пассивные награды за голос
-                    await self._award_voice(member.id, guild_id, seconds)
+                await self._finish_voice_segment(
+                    member.id, guild_id, ch_id, started_at, now
+                )
             return
 
         # вошёл в войс
@@ -613,16 +348,9 @@ class MessageAndVoiceStats(commands.Cog):
             sess = self._voice_sessions.pop(key, None)
             if sess:
                 ch_id, started_at = sess
-                seconds = int((now - started_at).total_seconds())
-                if seconds > 0:
-                    with sqlite3.connect(DB_PATH) as conn:
-                        cur = conn.cursor()
-                        cur.execute(
-                            "INSERT INTO voice_sessions(user_id,guild_id,channel_id,started_at,ended_at,seconds) VALUES (?,?,?,?,?,?)",
-                            (member.id, guild_id, ch_id, started_at.isoformat(), now.isoformat(), seconds)
-                        )
-                        _accumulate_voice_row(cur, user_id=member.id, guild_id=guild_id, seconds=seconds)
-                        conn.commit()
+                await self._finish_voice_segment(
+                    member.id, guild_id, ch_id, started_at, now
+                )
             self._voice_sessions[key] = (after.channel.id, now)
 
     @app_commands.command(name="voice_топ", description="Топ по времени в голосе за N дней")
@@ -630,20 +358,15 @@ class MessageAndVoiceStats(commands.Cog):
         await _safe_defer(interaction)
         guild_id = interaction.guild_id
         assert guild_id is not None
-        since = (datetime.now(UTC).date() - timedelta(days=int(дней) - 1)).isoformat()
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT user_id, SUM(seconds) AS s FROM voice_totals_daily WHERE guild_id=? AND date>=? GROUP BY user_id ORDER BY s DESC LIMIT 15",
-                (guild_id, since))
-            rows = cur.fetchall()
+        since = (datetime.now(MSK).date() - timedelta(days=int(дней) - 1)).isoformat()
+        rows = message_stats_store.list_voice_totals(guild_id, since)
         if not rows:
             await _safe_reply(interaction, content="📭 Пока нет данных. Трекинг начнётся после загрузки этого cog.")
             return
-        def fmt(sec: int) -> str:
-            h = sec // 3600; m = (sec % 3600) // 60
-            return f"{h}ч {m}м"
-        lines = [f"**{i}.** <@{uid}> — {fmt(int(s))}" for i, (uid, s) in enumerate(rows, start=1)]
+        lines = [
+            f"**{i}.** <@{uid}> — {message_stats_service.format_duration(seconds)}"
+            for i, (uid, seconds) in enumerate(rows, start=1)
+        ]
         await _safe_reply(interaction, embed=discord.Embed(title=f"🎙️ Топ войса за {дней} дн.", description="\n".join(lines), color=discord.Color.gold()))
 
     @app_commands.command(name="voice_я", description="Моя статистика по войсу за N дней")
@@ -651,16 +374,18 @@ class MessageAndVoiceStats(commands.Cog):
         await _safe_defer(interaction, ephemeral=True)
         guild_id = interaction.guild_id
         assert guild_id is not None
-        since = (datetime.now(UTC).date() - timedelta(days=int(дней) - 1)).isoformat()
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT SUM(seconds) FROM voice_totals_daily WHERE guild_id=? AND user_id=? AND date>=?",
-                (guild_id, interaction.user.id, since))
-            row = cur.fetchone()
-        total = int(row[0] or 0)
-        h = total // 3600; m = (total % 3600) // 60
-        await _safe_reply(interaction, content=f"За {дней} дн. ты провёл в войсе **{h}ч {m}м**", ephemeral=True)
+        since = (datetime.now(MSK).date() - timedelta(days=int(дней) - 1)).isoformat()
+        total = message_stats_store.get_user_voice_total(
+            guild_id, interaction.user.id, since
+        )
+        await _safe_reply(
+            interaction,
+            content=(
+                f"За {дней} дн. ты провёл в войсе "
+                f"**{message_stats_service.format_duration(total)}**"
+            ),
+            ephemeral=True,
+        )
 
 
     async def _award_voice(self, user_id: int, guild_id: int, seconds: int):

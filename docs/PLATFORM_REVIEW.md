@@ -135,6 +135,11 @@
   `core.game_service` для правил/settlement; `fun_slesh.games` оставляет только
   Discord interactions. Ставки блэкджека больше не списываются двумя независимыми
   операциями и не могут увести кошелёк ниже нуля.
+- Message/voice stats разделены на `core.message_stats_store` (один владелец
+  агрегатов, message-id dedupe, checkpoints и voice-сессии),
+  `core.message_stats_service` (текстовый анализ и календарь МСК) и Discord UI.
+  Историческая индексация больше не открывает SQLite на каждое сообщение, а
+  live-события и backfill не могут повторно начислить один message ID.
 
 ## Проверенное состояние 2026-08-03
 

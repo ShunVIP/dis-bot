@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aiohttp import ClientSession, FormData, web
-from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, daily_service, daily_store, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, steam_service, steam_store, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
+from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, daily_service, daily_store, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, message_stats_service, message_stats_store, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, steam_service, steam_store, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -51,6 +51,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(economy, "DB_PATH", self.db_path),
             patch.object(economy_profile, "DB_PATH", self.db_path),
             patch.object(daily_store, "SOCIAL_DB", self.db_path),
+            patch.object(message_stats_store, "SOCIAL_DB", self.db_path),
             patch.object(settings_migration, "SOCIAL_DB", self.db_path),
             patch.object(settings_migration, "BIRTHDAYS_DB", self.db_path),
             patch.object(birthday_store, "BIRTHDAYS_DB", self.db_path),
@@ -87,6 +88,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
         toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
         steam_store._INITIALIZED_DATABASES.discard(self.db_path)
         daily_store._INITIALIZED_DATABASES.discard(self.db_path)
+        message_stats_store._INITIALIZED_DATABASES.discard(self.db_path)
 
     def tearDown(self):
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
@@ -96,6 +98,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
         toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
         steam_store._INITIALIZED_DATABASES.discard(self.db_path)
         daily_store._INITIALIZED_DATABASES.discard(self.db_path)
+        message_stats_store._INITIALIZED_DATABASES.discard(self.db_path)
         for item in reversed(self.patches):
             item.stop()
         self.temp_dir.cleanup()
@@ -216,6 +219,110 @@ class DailySharedLayerTests(IsolatedDatabaseTest):
         source = (Path(__file__).parents[1] / "fun_slesh" / "daily.py").read_text(encoding="utf-8")
         self.assertNotIn("import sqlite3", source)
         self.assertNotIn("sqlite3.connect", source)
+
+
+class MessageStatsSharedLayerTests(IsolatedDatabaseTest):
+    def test_message_analysis_and_batch_store_use_moscow_day(self):
+        first = message_stats_service.build_message_record(
+            message_id=100,
+            user_id=10,
+            guild_id=7,
+            channel_id=50,
+            content="Привет мир 😄 <:party:123>",
+            created_at=datetime(2026, 8, 3, 21, 30, tzinfo=timezone.utc),
+        )
+        second = message_stats_service.build_message_record(
+            message_id=101,
+            user_id=10,
+            guild_id=7,
+            channel_id=50,
+            content="Привет снова",
+            created_at=datetime(2026, 8, 3, 22, 0, tzinfo=timezone.utc),
+        )
+
+        written = message_stats_store.record_message_batch(
+            [first, second],
+            checkpoint_channel_id=50,
+            checkpoint_message_id=101,
+        )
+        duplicate = message_stats_store.record_message_batch([first])
+
+        self.assertEqual(written, 2)
+        self.assertEqual(duplicate, 0)
+        self.assertEqual(first["date"], "2026-08-04")
+        self.assertEqual(first["emojis"], 2)
+        self.assertEqual(
+            message_stats_service.split_duration_by_local_day(
+                datetime(2026, 8, 3, 20, 30, tzinfo=timezone.utc),
+                datetime(2026, 8, 3, 21, 30, tzinfo=timezone.utc),
+            ),
+            {"2026-08-03": 1800, "2026-08-04": 1800},
+        )
+        self.assertEqual(message_stats_store.get_checkpoint(50), 101)
+        with db_connection(self.db_path) as conn:
+            totals = conn.execute(
+                """
+                SELECT messages,words,emojis,chars,date
+                FROM msg_stats_daily
+                WHERE user_id=10 AND guild_id=7 AND channel_id=50
+                """
+            ).fetchone()
+            words = dict(conn.execute(
+                "SELECT word,count FROM msg_word_freq_daily WHERE guild_id=7 AND channel_id=50"
+            ).fetchall())
+            emojis = dict(conn.execute(
+                "SELECT emoji,count FROM msg_emoji_freq_daily WHERE guild_id=7 AND channel_id=50"
+            ).fetchall())
+        self.assertEqual(totals[:3], (2, 6, 2))
+        self.assertEqual(totals[4], "2026-08-04")
+        self.assertEqual(words["привет"], 2)
+        self.assertEqual(emojis, {":party:": 1, "😄": 1})
+
+    def test_reports_filter_channels_and_voice_store_is_atomic(self):
+        for user_id, channel_id, count in ((10, 50, 3), (20, 60, 5)):
+            record = message_stats_service.build_message_record(
+                message_id=user_id,
+                user_id=user_id,
+                guild_id=7,
+                channel_id=channel_id,
+                content="одно два три",
+                created_at=datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc),
+            )
+            record["messages"] = count
+            message_stats_store.record_message(record)
+
+        rows = message_stats_store.list_user_metric(
+            7,
+            "2026-08-04",
+            "messages",
+            excluded_channel_ids=[60],
+        )
+        self.assertEqual(rows, [(10, 3)])
+        with self.assertRaises(ValueError):
+            message_stats_store.list_user_metric(7, "2026-08-04", "balance")
+
+        seconds = message_stats_store.record_voice_session(
+            10,
+            7,
+            99,
+            datetime(2026, 8, 3, 21, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 3, 21, 30, tzinfo=timezone.utc),
+        )
+        self.assertEqual(seconds, 1800)
+        self.assertEqual(message_stats_store.list_voice_totals(7, "2026-08-04"), [(10, 1800)])
+        self.assertEqual(message_stats_store.get_user_voice_total(7, 10, "2026-08-04"), 1800)
+        self.assertEqual(message_stats_service.format_duration(3661), "1ч 1м")
+        with db_connection(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM voice_sessions").fetchone()[0], 1)
+
+    def test_discord_stats_ui_has_no_direct_sqlite(self):
+        source = (
+            Path(__file__).parents[1] / "fun_slesh" / "message_and_voice_stats.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("import sqlite3", source)
+        self.assertNotIn("sqlite3.connect", source)
+        self.assertIn("record_message_batch(", source)
+        self.assertIn("_finish_voice_segment(", source)
 
 
 class SteamSharedLayerTests(IsolatedDatabaseTest):
