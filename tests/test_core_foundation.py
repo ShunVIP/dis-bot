@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aiohttp import ClientSession, FormData, web
-from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
+from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, steam_service, steam_store, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -68,6 +68,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(voice_store, "SOCIAL_DB", self.db_path),
             patch.object(summary_store, "SOCIAL_DB", self.db_path),
             patch.object(summary_stats_store, "SOCIAL_DB", self.db_path),
+            patch.object(steam_store, "SOCIAL_DB", self.db_path),
             patch.object(audit_settings, "SOCIAL_DB", self.db_path),
             patch.object(audit_settings, "BIRTHDAYS_DB", self.db_path),
             patch.object(finalize_settings_migration, "SOCIAL_DB", self.db_path),
@@ -82,6 +83,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
         rep_roles_store._INITIALIZED_DATABASES.discard(self.db_path)
         reputation_store._INITIALIZED_DATABASES.discard(self.db_path)
         toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
+        steam_store._INITIALIZED_DATABASES.discard(self.db_path)
 
     def tearDown(self):
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
@@ -89,9 +91,71 @@ class IsolatedDatabaseTest(unittest.TestCase):
         rep_roles_store._INITIALIZED_DATABASES.discard(self.db_path)
         reputation_store._INITIALIZED_DATABASES.discard(self.db_path)
         toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
+        steam_store._INITIALIZED_DATABASES.discard(self.db_path)
         for item in reversed(self.patches):
             item.stop()
         self.temp_dir.cleanup()
+
+
+class SteamSharedLayerTests(IsolatedDatabaseTest):
+    def test_profile_settings_watchlist_and_logs_share_one_store(self):
+        steam_store.upsert_profile(42, "76561198000000000")
+        self.assertEqual(steam_store.get_steam_id(42), "76561198000000000")
+        self.assertEqual(steam_store.list_profiles(), [(42, "76561198000000000")])
+
+        defaults = steam_store.get_auto_settings(42)
+        self.assertTrue(defaults["random_enabled"])
+        updated = steam_store.update_auto_settings(
+            42, random_enabled=False, challenge_enabled=True, backlog_tone="hard"
+        )
+        self.assertFalse(updated["random_enabled"])
+        self.assertTrue(updated["challenge_enabled"])
+        self.assertEqual(updated["backlog_tone"], "hard")
+
+        steam_store.upsert_manual_watch(42, 1245620, "ELDEN RING")
+        self.assertEqual(steam_store.list_manual_watchlist(42), [(1245620, "ELDEN RING")])
+        self.assertFalse(steam_store.auto_log_exists(42, "daily_prompt", "2026-08-03"))
+        self.assertTrue(steam_store.mark_auto_log(42, "daily_prompt", "2026-08-03", 1245620))
+        self.assertFalse(steam_store.mark_auto_log(42, "daily_prompt", "2026-08-03", 1245620))
+        self.assertTrue(steam_store.auto_log_exists(42, "daily_prompt", "2026-08-03"))
+
+        self.assertTrue(steam_store.unlink_profile(42))
+        self.assertIsNone(steam_store.get_steam_id(42))
+        self.assertEqual(steam_store.list_manual_watchlist(42), [])
+        self.assertFalse(steam_store.unlink_profile(42))
+
+    def test_service_projects_common_games_and_formats_time(self):
+        first = [
+            {"appid": 1, "name": "One", "playtime_forever": 120},
+            {"appid": 2, "name": "Two", "playtime_forever": 30},
+        ]
+        second = [
+            {"appid": 1, "name": "One", "playtime_forever": 60},
+            {"appid": 3, "name": "Three", "playtime_forever": 999},
+        ]
+        count, common = steam_service.common_games(first, second)
+        self.assertEqual(count, 1)
+        self.assertEqual(common[0][0]["appid"], 1)
+        self.assertEqual(steam_service.format_minutes(0), "0м")
+        self.assertEqual(steam_service.format_minutes(125), "2ч 5м")
+        self.assertIsNone(steam_service.choose_game([{"appid": 0}]))
+        self.assertEqual(
+            asyncio.run(steam_service.resolve_steam_id("76561198000000000", "unused")),
+            "76561198000000000",
+        )
+
+    def test_service_sync_writes_owned_games_through_store(self):
+        games = [{"appid": 10, "name": "Ten", "playtime_forever": 90}]
+        with patch.object(steam_service, "get_owned_games", new=AsyncMock(return_value=games)):
+            self.assertEqual(
+                asyncio.run(steam_service.sync_owned_games(7, "76561198000000000", "key")),
+                games,
+            )
+        with db_connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT name, playtime_forever FROM steam_owned_games_cache WHERE user_id=7 AND appid=10"
+            ).fetchone()
+        self.assertEqual(row, ("Ten", 90))
 
 
 class AdminPanelServiceTests(unittest.TestCase):
