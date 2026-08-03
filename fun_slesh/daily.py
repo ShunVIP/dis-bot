@@ -18,17 +18,25 @@
   /налог_статус    — текущие настройки налога
 """
 
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+
+import asyncio
 
 import discord
 from discord.ext import commands
 from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from core.paths import SOCIAL_DB
-from core.economy import add_coins, get_balance
+from core import daily_service, daily_store
+from core.economy import (
+    add_coins,
+    debit_coins,
+    get_balance,
+    list_ledger_entries,
+    list_wallets,
+    transfer_coins,
+)
 from core.economy_profile import (
     GENDER_FEMALE,
     GENDER_MALE,
@@ -36,87 +44,22 @@ from core.economy_profile import (
     currency_amount,
     currency_name,
     economy_profile_required_text,
-    get_economy_profile,
     set_economy_profile,
 )
-from core.settings_store import (
-    get_feature_payload,
-    get_feature_runtime_state,
-    set_feature_payload,
-    set_feature_runtime_state,
-)
+from core.settings_store import set_feature_payload
 from utils.events_bus import emit
 
 MSK  = ZoneInfo("Europe/Moscow")
 UTC  = timezone.utc
 
-DB_PATH  = SOCIAL_DB
-ECO_PATH = DB_PATH  # всё в одном файле
 FEATURE_ECONOMY = "economy"
 
 scheduler = AsyncIOScheduler(timezone=MSK)
 
-# ── БД ────────────────────────────────────────────────────────────────────────
-def _ensure_tables():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS daily_rewards (
-                user_id        INTEGER PRIMARY KEY,
-                last_claim_msk TEXT    NOT NULL,
-                streak         INTEGER NOT NULL DEFAULT 0
-            );
-
-            -- Магазин ролей
-            CREATE TABLE IF NOT EXISTS role_shop (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                role_id     INTEGER NOT NULL UNIQUE,
-                role_name   TEXT    NOT NULL,
-                price       INTEGER NOT NULL,
-                duration_h  INTEGER NOT NULL DEFAULT 0,  -- 0 = навсегда
-                added_by    INTEGER NOT NULL,
-                added_at    TEXT    NOT NULL
-            );
-
-            -- Купленные временные роли (для автоудаления)
-            CREATE TABLE IF NOT EXISTS temp_roles (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     INTEGER NOT NULL,
-                role_id     INTEGER NOT NULL,
-                expires_at  TEXT    NOT NULL
-            );
-
-        """)
-
-
-# ── Вспомогательные ───────────────────────────────────────────────────────────
-def _milestone_bonus(streak: int) -> int:
-    return 25 if streak in (7, 14, 30, 60, 100) else 0
-
-def _compute_reward(streak: int) -> int:
-    base   = 25
-    series = 5 * min(max(streak - 1, 0), 7)
-    return base + series + _milestone_bonus(streak)
-
-def _tax_config(guild_id: int | None = None) -> dict:
-    cfg = {"enabled": 0, "rate_pct": 10, "interval_h": 168, "last_run": ""}
-    if guild_id is None:
-        return cfg
-    payload = get_feature_payload(guild_id, FEATURE_ECONOMY)
-    if "tax_enabled" in payload:
-        cfg["enabled"] = int(bool(payload["tax_enabled"]))
-    if "tax_rate_pct" in payload:
-        try:
-            cfg["rate_pct"] = max(1, min(50, int(payload["tax_rate_pct"])))
-        except (TypeError, ValueError):
-            pass
-    if "tax_interval_h" in payload:
-        try:
-            cfg["interval_h"] = max(1, min(720, int(payload["tax_interval_h"])))
-        except (TypeError, ValueError):
-            pass
-    state = get_feature_runtime_state(guild_id, FEATURE_ECONOMY)
-    cfg["last_run"] = str(state.get("tax_last_run") or "")
-    return cfg
+# Compatibility aliases for callers that reload this cog directly.
+_ensure_tables = daily_store.ensure_tables
+_compute_reward = daily_service.compute_reward
+_tax_config = daily_service.tax_config
 
 
 def _primary_guild_id(bot: commands.Bot) -> int | None:
@@ -126,32 +69,46 @@ def _primary_guild_id(bot: commands.Bot) -> int | None:
 
 # ── Налог (запускается планировщиком) ─────────────────────────────────────────
 async def _run_tax(bot: commands.Bot):
-    cfg = _tax_config(_primary_guild_id(bot))
-    if not cfg["enabled"]:
-        return
-
-    with sqlite3.connect(DB_PATH) as conn:
-        wallets = conn.execute(
-            "SELECT user_id, balance FROM coins_wallet WHERE balance > 0"
-        ).fetchall()
-
-    total_collected = 0
-    for user_id, balance in wallets:
-        tax = max(1, int(balance * cfg["rate_pct"] / 100))
-        add_coins(user_id, -tax, reason="tax", meta={"rate": cfg["rate_pct"]})
-        total_collected += tax
-
-    guild_id = _primary_guild_id(bot)
-    if guild_id is not None:
-        set_feature_runtime_state(guild_id, FEATURE_ECONOMY, {"tax_last_run": datetime.now(UTC).isoformat()})
+    daily_service.collect_tax(_primary_guild_id(bot))
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class Daily(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._restore_task: asyncio.Task | None = None
         _ensure_tables()
         self._start_scheduler()
+
+    async def cog_load(self):
+        self._restore_task = asyncio.create_task(
+            self._restore_temp_roles_after_ready(),
+            name="daily-temp-role-restore",
+        )
+
+    def cog_unload(self):
+        if self._restore_task and not self._restore_task.done():
+            self._restore_task.cancel()
+
+    async def _restore_temp_roles_after_ready(self):
+        await self.bot.wait_until_ready()
+        fallback_guild_id = _primary_guild_id(self.bot)
+        now = datetime.now(UTC)
+        for item in daily_store.list_temp_roles():
+            guild_id = int(item["guild_id"] or fallback_guild_id or 0)
+            if not guild_id:
+                continue
+            run_date = item["expires_at"]
+            if run_date <= now:
+                run_date = now + timedelta(seconds=1)
+            scheduler.add_job(
+                self._remove_temp_role,
+                "date",
+                run_date=run_date,
+                args=[item["user_id"], item["role_id"], guild_id],
+                replace_existing=True,
+                id=f"temprole_{item['user_id']}_{item['role_id']}",
+            )
 
     def _start_scheduler(self):
         cfg = _tax_config(_primary_guild_id(self.bot))
@@ -211,13 +168,7 @@ class Daily(commands.Cog):
         target = пользователь or interaction.user
         bal = get_balance(target.id)
 
-        # История последних операций
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                "SELECT delta, reason, created_at FROM coin_ledger"
-                " WHERE user_id=? ORDER BY created_at DESC LIMIT 5",
-                (target.id,)
-            ).fetchall()
+        rows = list_ledger_entries(target.id, limit=5)
 
         emb = discord.Embed(
             title=f"💰 Баланс: {target.display_name}",
@@ -226,9 +177,11 @@ class Daily(commands.Cog):
         )
         if rows:
             lines = []
-            for delta, reason, ts in rows:
+            for row in rows:
+                delta = row["delta"]
+                reason = row["reason"]
                 sign  = "+" if delta >= 0 else ""
-                dt    = datetime.fromisoformat(ts).astimezone(MSK).strftime("%d.%m %H:%M")
+                dt    = datetime.fromisoformat(row["created_at"]).astimezone(MSK).strftime("%d.%m %H:%M")
                 label = {"daily": "дэйлик", "tax": "налог", "transfer_out": "перевод →",
                          "transfer_in": "← перевод", "fine": "штраф",
                          "shop": "магазин", "rep": "репутация",
@@ -241,51 +194,20 @@ class Daily(commands.Cog):
     # ── /дэйлик ───────────────────────────────────────────────────────────────
     @app_commands.command(name="дэйлик", description="Забрать ежедневную награду (по МСК)")
     async def дэйлик(self, interaction: discord.Interaction):
-        _ensure_tables()
-        if not can_receive_currency(interaction.user.id):
+        result = daily_service.claim_daily(interaction.user.id)
+        if result["status"] == "profile_required":
             await interaction.response.send_message(economy_profile_required_text(), ephemeral=True)
             return
-        today_msk     = datetime.now(MSK).date()
-        yesterday_msk = today_msk - timedelta(days=1)
-
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT last_claim_msk, streak FROM daily_rewards WHERE user_id=?",
-                (interaction.user.id,)
-            ).fetchone()
-
-            if row:
-                last_str, streak = row
-                try:
-                    last_date = datetime.fromisoformat(last_str).date()
-                except Exception:
-                    last_date = yesterday_msk - timedelta(days=1)
-                if last_date == today_msk:
-                    next_msk = datetime.now(MSK).replace(
-                        hour=0, minute=0, second=0, microsecond=0
-                    ) + timedelta(days=1)
-                    ts = int(next_msk.timestamp())
-                    await interaction.response.send_message(
-                        f"⛔ Уже забрал сегодня. Следующий дэйлик <t:{ts}:R>",
-                        ephemeral=True
-                    )
-                    return
-                streak = int(streak) + 1 if last_date == yesterday_msk else 1
-            else:
-                streak = 1
-
-            reward = _compute_reward(streak)
-            conn.execute(
-                "INSERT INTO daily_rewards(user_id, last_claim_msk, streak) VALUES(?,?,?)"
-                " ON CONFLICT(user_id) DO UPDATE SET"
-                " last_claim_msk=excluded.last_claim_msk, streak=excluded.streak",
-                (interaction.user.id, today_msk.isoformat(), streak)
+        if result["status"] == "already_claimed":
+            await interaction.response.send_message(
+                f"⛔ Уже забрал сегодня. Следующий дэйлик <t:{result['next_claim_timestamp']}:R>",
+                ephemeral=True,
             )
+            return
 
-        new_balance = add_coins(
-            interaction.user.id, reward,
-            reason="daily", meta={"streak": streak}
-        )
+        streak = int(result["streak"])
+        reward = int(result["reward"])
+        new_balance = int(result["balance"])
         await emit("daily_claimed",
                    user_id=interaction.user.id, streak=streak, amount=reward)
 
@@ -325,23 +247,23 @@ class Daily(commands.Cog):
             await interaction.response.send_message(
                 "❌ Нельзя переводить ботам.", ephemeral=True)
             return
-        if not can_receive_currency(получатель.id):
+        result = transfer_coins(interaction.user.id, получатель.id, сумма)
+        if result["status"] == "recipient_profile_required":
             await interaction.response.send_message(
                 f"❌ {получатель.display_name} ещё не заполнил профиль 18+ и не может получать валюту.",
                 ephemeral=True,
             )
             return
-
-        bal = get_balance(interaction.user.id)
-        if bal < сумма:
+        if result["status"] == "insufficient":
             await interaction.response.send_message(
-                f"❌ Недостаточно {currency_name(interaction.user.id)}. Баланс: **{bal}**.", ephemeral=True)
+                f"❌ Недостаточно {currency_name(interaction.user.id)}. "
+                f"Баланс: **{result['sender_balance']}**.",
+                ephemeral=True,
+            )
             return
-
-        add_coins(interaction.user.id, -сумма, "transfer_out",
-                  {"to": получатель.id})
-        new_bal = add_coins(получатель.id,  сумма, "transfer_in",
-                  {"from": interaction.user.id})
+        if result["status"] != "transferred":
+            await interaction.response.send_message("❌ Перевод не выполнен.", ephemeral=True)
+            return
 
         emb = discord.Embed(
             title="💸 Перевод выполнен",
@@ -351,9 +273,9 @@ class Daily(commands.Cog):
         emb.add_field(name="Кому",   value=получатель.mention,       inline=True)
         emb.add_field(name="Сумма",  value=f"**{currency_amount(получатель.id, сумма)}**",     inline=True)
         emb.add_field(name="Остаток отправителя",
-                      value=f"**{get_balance(interaction.user.id)}**", inline=True)
+                      value=f"**{result['sender_balance']}**", inline=True)
         emb.add_field(name="Баланс получателя",
-                      value=f"**{new_bal}**", inline=True)
+                      value=f"**{result['recipient_balance']}**", inline=True)
         await interaction.response.send_message(embed=emb)
 
     # ── /штраф ────────────────────────────────────────────────────────────────
@@ -368,11 +290,14 @@ class Daily(commands.Cog):
                     участник: discord.Member,
                     сумма: app_commands.Range[int, 1, 1_000_000],
                     причина: str = "Нарушение правил"):
-        bal = get_balance(участник.id)
-        actual = min(сумма, bal)   # не уходим в минус
-        if actual > 0:
-            add_coins(участник.id, -actual, "fine",
-                      {"by": interaction.user.id, "reason": причина})
+        result = daily_service.fine_user(
+            участник.id,
+            сумма,
+            moderator_id=interaction.user.id,
+            reason=причина,
+        )
+        bal = result["before"]
+        actual = result["actual"]
 
         emb = discord.Embed(
             title="⚖️ Штраф выписан",
@@ -381,7 +306,7 @@ class Daily(commands.Cog):
         emb.add_field(name="Участник",  value=участник.mention,   inline=True)
         emb.add_field(name="Штраф",     value=f"**{actual}**",    inline=True)
         emb.add_field(name="Остаток",
-                      value=f"**{get_balance(участник.id)}**",    inline=True)
+                      value=f"**{result['remaining']}**",    inline=True)
         emb.add_field(name="Причина",   value=причина,            inline=False)
         if actual < сумма:
             emb.set_footer(text=f"⚠️ Баланс был {bal}, списано по максимуму.")
@@ -391,7 +316,7 @@ class Daily(commands.Cog):
         try:
             await участник.send(
                 f"⚖️ Вам выписан штраф **{actual}** Сисек на сервере.\n"
-                f"Причина: {причина}\nОстаток: **{get_balance(участник.id)}**"
+                f"Причина: {причина}\nОстаток: **{result['remaining']}**"
             )
         except Exception:
             pass
@@ -453,10 +378,7 @@ class Daily(commands.Cog):
     # ── /магазин ──────────────────────────────────────────────────────────────
     @app_commands.command(name="магазин", description="Магазин ролей за персональную валюту")
     async def магазин(self, interaction: discord.Interaction):
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                "SELECT id, role_id, role_name, price, duration_h FROM role_shop ORDER BY price ASC"
-            ).fetchall()
+        rows = daily_store.list_shop_items()
 
         if not rows:
             await interaction.response.send_message(
@@ -467,7 +389,11 @@ class Daily(commands.Cog):
         emb = discord.Embed(title="🛒 Магазин ролей", color=discord.Color.blurple())
         bal = get_balance(interaction.user.id)
         lines = []
-        for shop_id, role_id, role_name, price, dur in rows:
+        for item in rows:
+            shop_id = item["id"]
+            role_name = item["role_name"]
+            price = item["price"]
+            dur = item["duration_h"]
             dur_str = f"{dur}ч" if dur else "навсегда"
             can     = "✅" if bal >= price else "❌"
             lines.append(f"{can} **{role_name}** — {currency_amount(interaction.user.id, price)} ({dur_str})  `ID:{shop_id}`")
@@ -480,15 +406,18 @@ class Daily(commands.Cog):
     @app_commands.describe(id="ID роли из /магазин")
     async def купить_роль(self, interaction: discord.Interaction,
                           id: app_commands.Range[int, 1, 999999]):
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT role_id, role_name, price, duration_h FROM role_shop WHERE id=?", (id,)
-            ).fetchone()
-        if not row:
+        item = daily_store.get_shop_item(id)
+        if not item:
             await interaction.response.send_message("❌ Роль не найдена в магазине.", ephemeral=True)
             return
 
-        role_id, role_name, price, dur = row
+        role_id = item["role_id"]
+        role_name = item["role_name"]
+        price = item["price"]
+        dur = item["duration_h"]
+        if not can_receive_currency(interaction.user.id):
+            await interaction.response.send_message(economy_profile_required_text(), ephemeral=True)
+            return
         bal = get_balance(interaction.user.id)
         if bal < price:
             await interaction.response.send_message(
@@ -507,13 +436,37 @@ class Daily(commands.Cog):
                 f"❌ У тебя уже есть роль **{role_name}**.", ephemeral=True)
             return
 
-        await interaction.user.add_roles(role, reason="Покупка в магазине")
-        add_coins(interaction.user.id, -price, "shop", {"role_id": role_id, "role_name": role_name})
+        debit = debit_coins(
+            interaction.user.id,
+            price,
+            "shop",
+            {"role_id": role_id, "role_name": role_name},
+        )
+        if debit["status"] != "debited":
+            await interaction.response.send_message(
+                f"❌ Баланс изменился, покупка не выполнена. Сейчас: **{debit.get('balance', bal)}**.",
+                ephemeral=True,
+            )
+            return
+        try:
+            await interaction.user.add_roles(role, reason="Покупка в магазине")
+        except discord.HTTPException:
+            add_coins(
+                interaction.user.id,
+                price,
+                "shop_refund",
+                {"role_id": role_id, "role_name": role_name},
+            )
+            await interaction.response.send_message(
+                "❌ Discord не выдал роль. Списание автоматически возвращено.",
+                ephemeral=True,
+            )
+            return
 
         dur_str = f"на {dur}ч" if dur else "навсегда"
         emb = discord.Embed(
             title="🛍️ Покупка совершена!",
-            description=f"Получена роль **{role_name}** ({dur_str})\nСписано: **{currency_amount(interaction.user.id, price)}**\nОстаток: **{currency_amount(interaction.user.id, get_balance(interaction.user.id))}**",
+            description=f"Получена роль **{role_name}** ({dur_str})\nСписано: **{currency_amount(interaction.user.id, price)}**\nОстаток: **{currency_amount(interaction.user.id, debit['balance'])}**",
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=emb)
@@ -521,11 +474,29 @@ class Daily(commands.Cog):
         # Планируем удаление временной роли
         if dur > 0:
             expires = datetime.now(UTC) + timedelta(hours=dur)
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute(
-                    "INSERT INTO temp_roles(user_id, role_id, expires_at) VALUES(?,?,?)",
-                    (interaction.user.id, role_id, expires.isoformat())
+            try:
+                daily_store.save_temp_role(
+                    interaction.user.id,
+                    role_id,
+                    interaction.guild.id,
+                    expires,
                 )
+            except Exception:
+                try:
+                    await interaction.user.remove_roles(role, reason="Откат покупки: срок не сохранён")
+                except discord.HTTPException:
+                    pass
+                add_coins(
+                    interaction.user.id,
+                    price,
+                    "shop_refund",
+                    {"role_id": role_id, "role_name": role_name, "reason": "persistence"},
+                )
+                await interaction.followup.send(
+                    "❌ Не удалось сохранить срок роли. Роль снята, списание возвращено.",
+                    ephemeral=True,
+                )
+                return
             scheduler.add_job(
                 self._remove_temp_role, "date", run_date=expires,
                 args=[interaction.user.id, role_id, interaction.guild.id],
@@ -534,9 +505,24 @@ class Daily(commands.Cog):
             )
 
     async def _remove_temp_role(self, user_id: int, role_id: int, guild_id: int):
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            scheduler.add_job(
+                self._remove_temp_role,
+                "date",
+                run_date=datetime.now(UTC) + timedelta(minutes=5),
+                args=[user_id, role_id, guild_id],
+                replace_existing=True,
+                id=f"temprole_{user_id}_{role_id}",
+            )
+            return
         try:
-            guild  = self.bot.get_guild(guild_id)
             member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except discord.NotFound:
+                    member = None
             role   = guild.get_role(role_id)
             if member and role and role in member.roles:
                 await member.remove_roles(role, reason="Временная роль истекла")
@@ -544,14 +530,17 @@ class Daily(commands.Cog):
                     await member.send(f"⏰ Временная роль **{role.name}** истекла.")
                 except Exception:
                     pass
-        except Exception:
-            pass
-        finally:
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute(
-                    "DELETE FROM temp_roles WHERE user_id=? AND role_id=?",
-                    (user_id, role_id)
-                )
+        except discord.HTTPException:
+            scheduler.add_job(
+                self._remove_temp_role,
+                "date",
+                run_date=datetime.now(UTC) + timedelta(minutes=5),
+                args=[user_id, role_id, guild_id],
+                replace_existing=True,
+                id=f"temprole_{user_id}_{role_id}",
+            )
+            return
+        daily_store.delete_temp_role(user_id, role_id)
 
     # ── /магазин_добавить ─────────────────────────────────────────────────────
     @app_commands.command(name="магазин_добавить",
@@ -566,19 +555,13 @@ class Daily(commands.Cog):
                                 роль: discord.Role,
                                 цена: app_commands.Range[int, 1, 1_000_000],
                                 длительность_ч: app_commands.Range[int, 0, 8760] = 0):
-        with sqlite3.connect(DB_PATH) as conn:
-            try:
-                conn.execute(
-                    "INSERT INTO role_shop(role_id, role_name, price, duration_h, added_by, added_at)"
-                    " VALUES(?,?,?,?,?,?)",
-                    (роль.id, роль.name, цена, длительность_ч,
-                     interaction.user.id, datetime.now(UTC).isoformat())
-                )
-            except sqlite3.IntegrityError:
-                conn.execute(
-                    "UPDATE role_shop SET price=?, duration_h=? WHERE role_id=?",
-                    (цена, длительность_ч, роль.id)
-                )
+        daily_store.upsert_shop_item(
+            роль.id,
+            роль.name,
+            цена,
+            длительность_ч,
+            interaction.user.id,
+        )
         dur_str = f"{длительность_ч}ч" if длительность_ч else "навсегда"
         await interaction.response.send_message(
             f"✅ Роль **{роль.name}** добавлена в магазин: **{цена}** валюты ({dur_str}).",
@@ -591,27 +574,19 @@ class Daily(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def магазин_убрать(self, interaction: discord.Interaction,
                               id: app_commands.Range[int, 1, 999999]):
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT role_name FROM role_shop WHERE id=?", (id,)
-            ).fetchone()
-            if not row:
-                await interaction.response.send_message(
-                    "❌ Позиция не найдена.", ephemeral=True)
-                return
-            conn.execute("DELETE FROM role_shop WHERE id=?", (id,))
+        item = daily_store.delete_shop_item(id)
+        if not item:
+            await interaction.response.send_message(
+                "❌ Позиция не найдена.", ephemeral=True)
+            return
         await interaction.response.send_message(
-            f"✅ Роль **{row[0]}** убрана из магазина.", ephemeral=True)
+            f"✅ Роль **{item['role_name']}** убрана из магазина.", ephemeral=True)
 
     # ── /топ_серии ────────────────────────────────────────────────────────────
     @app_commands.command(name="топ_серии",
                           description="Топ по сериям дэйлика среди участников сервера")
     async def топ_серии(self, interaction: discord.Interaction):
-        _ensure_tables()
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                "SELECT user_id, streak FROM daily_rewards ORDER BY streak DESC LIMIT 100"
-            ).fetchall()
+        rows = daily_store.list_daily_streaks(limit=100)
 
         present = []
         for user_id, streak in rows:
@@ -640,10 +615,7 @@ class Daily(commands.Cog):
     @app_commands.command(name="топ_баланс",
                           description="Топ богатейших участников сервера")
     async def топ_баланс(self, interaction: discord.Interaction):
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                "SELECT user_id, balance FROM coins_wallet ORDER BY balance DESC LIMIT 100"
-            ).fetchall()
+        rows = list_wallets(limit=100)
 
         present = []
         for user_id, bal in rows:

@@ -126,6 +126,11 @@
 - Steam разделён на `core.steam_store` (все SQLite-данные),
   `core.steam_service` (Steam API и чистая бизнес-логика) и
   `fun_slesh.steam` (Discord UI и scheduler).
+- Daily/economy разделены на `core.economy` (кошельки и ledger),
+  `core.daily_store` (серии, магазин и временные роли),
+  `core.daily_service` (награды, штрафы и налог) и `fun_slesh.daily`
+  (Discord UI/scheduler). Переводы и списания атомарны, а временные роли
+  восстанавливают задания после рестарта.
 
 ## Проверенное состояние 2026-08-03
 
@@ -141,5 +146,5 @@
 
 1. Выполнить живую двухаккаунтную проверку private web/app: профиль, канал, DM, unread, voice invite и screen share.
 2. Не публиковать web/app в Интернет до private TLS/HTTPS и повторного security gate; текущий Tailscale-only режим сохраняется.
-3. Продолжать разделение оставшихся монолитных Discord-модулей, начиная с `games.py`/`daily.py`, сохраняя один store-владелец на таблицу.
+3. Продолжить разделение следующего монолитного Discord-модуля `games.py`, сохраняя один store-владелец на таблицу и общую атомарную экономику.
 4. Накопить ручную toxicity-разметку и добровольный conversation feedback; обучать тяжёлые модели только на домашнем ПК, на VPS отправлять только версионированные артефакты.
