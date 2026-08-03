@@ -36,6 +36,7 @@ from web_app.server import security_middleware
 from scripts.build_ml_manifest import build_manifest
 from scripts import audit_settings, finalize_settings_migration, report_chat_storage
 from scripts.report_learning_readiness import build_report as build_learning_readiness_report
+from scripts.smoke_web_two_account import smoke as smoke_web_two_account
 from scripts.train_toxicity_model import train_model
 from fun_slesh import raid_schedule, social_chat, toxicity
 
@@ -1057,6 +1058,94 @@ class WebSecurityTests(IsolatedDatabaseTest):
 
 
 class PlatformDmTests(IsolatedDatabaseTest):
+    def test_two_account_smoke_covers_profile_dm_permissions_and_voice_invite(self):
+        async def scenario():
+            app = web_server.create_app()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            try:
+                return await smoke_web_two_account(f"http://127.0.0.1:{port}")
+            finally:
+                await runner.cleanup()
+
+        result = asyncio.run(scenario())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["checks_passed"], 7)
+        self.assertIn("unified_profile", result["checks"])
+        self.assertIn("dm_membership", result["checks"])
+        self.assertIn("voice_invite_token", result["checks"])
+
+    def test_real_discord_snowflakes_round_trip_as_strings_through_dm_api(self):
+        first_id = 170192388013293569
+        second_id = 379371451079327748
+        web_app_store.upsert_web_user(first_id, "first", global_name="First")
+        web_app_store.upsert_web_user(second_id, "second", global_name="Second")
+        first_session = web_app_store.create_session(first_id)
+        second_session = web_app_store.create_session(second_id)
+
+        async def scenario():
+            app = web_server.create_app()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            base = f"http://127.0.0.1:{port}"
+            first_headers = {"Cookie": f"vipik_session={first_session}", "Origin": base}
+            second_headers = {"Cookie": f"vipik_session={second_session}", "Origin": base}
+            async with ClientSession() as session:
+                async with session.get(f"{base}/api/me", headers=first_headers) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual((await response.json())["user"]["id"], str(first_id))
+
+                async with session.post(
+                    f"{base}/api/platform/dms",
+                    json={"peer_id": str(second_id)},
+                    headers=first_headers,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    thread = (await response.json())["thread"]
+                    self.assertEqual(thread["peer_id"], str(second_id))
+
+                async with session.post(
+                    f"{base}/api/platform/messages",
+                    json={"scope": "dm", "target_id": thread["id"], "content": "snowflake-safe"},
+                    headers=first_headers,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+
+                async with session.get(f"{base}/api/platform/bootstrap", headers=second_headers) as response:
+                    self.assertEqual(response.status, 200)
+                    payload = await response.json()
+                    self.assertEqual(payload["dms"][0]["peer_id"], str(first_id))
+                    self.assertEqual(payload["dms"][0]["unread_count"], 1)
+                    member_ids = {item["id"] for item in payload["members"]}
+                    self.assertEqual(member_ids, {str(first_id), str(second_id)})
+
+                async with session.post(
+                    f"{base}/api/platform/dms/{thread['id']}/read",
+                    json={},
+                    headers=second_headers,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                async with session.get(f"{base}/api/platform/bootstrap", headers=second_headers) as response:
+                    self.assertEqual((await response.json())["dms"][0]["unread_count"], 0)
+            await runner.cleanup()
+
+        asyncio.run(scenario())
+
+    def test_frontend_never_coerces_discord_snowflakes_to_number(self):
+        javascript = (
+            Path(__file__).resolve().parent.parent / "web_app" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn('const snowflake = (value) => String(value ?? "").trim();', javascript)
+        self.assertNotIn("Number(member.id)", javascript)
+        self.assertNotIn("Number(button.dataset.startDm)", javascript)
+        self.assertNotIn("Number(button.dataset.toxicityMessage)", javascript)
+
     def test_dm_unread_count_and_read_marker_are_member_scoped(self):
         for user_id in (1, 2, 3):
             web_app_store.upsert_web_user(user_id, f"user-{user_id}")
