@@ -88,9 +88,11 @@ deploy/systemd/          шаблоны systemd
 
 Границы статистики и пассивных наград:
 
+- `core/message_stats_store.py` — единственный записывающий владелец суточной статистики сообщений/голоса, с idempotency по Discord message ID и атомарными voice-сессиями;
+- `core/message_stats_service.py` — подсчёт слов/эмодзи, нормализация дат по МСК и форматирование времени без Discord/SQLite;
 - `core/activity_rewards_store.py` — канонические настройки `activity_rewards`, исключения `message_stats`, счётчики и безопасная legacy-миграция;
 - `core/activity_rewards_service.py` — расчёт наград и интеграция с общей экономикой;
-- `fun_slesh/message_and_voice_stats.py` — Discord-команды, события и представление без собственного config-store.
+- `fun_slesh/message_and_voice_stats.py` — Discord-команды, события и представление без прямого SQLite; историческая индексация записывает сообщения батчами вместе с checkpoint.
 
 Границы ежедневной экономики и магазина ролей:
 
