@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aiohttp import ClientSession, FormData, web
-from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, steam_service, steam_store, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
+from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, daily_service, daily_store, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, steam_service, steam_store, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -50,6 +50,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(community_store, "SOCIAL_DB", self.db_path),
             patch.object(economy, "DB_PATH", self.db_path),
             patch.object(economy_profile, "DB_PATH", self.db_path),
+            patch.object(daily_store, "SOCIAL_DB", self.db_path),
             patch.object(settings_migration, "SOCIAL_DB", self.db_path),
             patch.object(settings_migration, "BIRTHDAYS_DB", self.db_path),
             patch.object(birthday_store, "BIRTHDAYS_DB", self.db_path),
@@ -85,6 +86,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
         reputation_store._INITIALIZED_DATABASES.discard(self.db_path)
         toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
         steam_store._INITIALIZED_DATABASES.discard(self.db_path)
+        daily_store._INITIALIZED_DATABASES.discard(self.db_path)
 
     def tearDown(self):
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
@@ -93,9 +95,127 @@ class IsolatedDatabaseTest(unittest.TestCase):
         reputation_store._INITIALIZED_DATABASES.discard(self.db_path)
         toxicity_store._INITIALIZED_DATABASES.discard(self.db_path)
         steam_store._INITIALIZED_DATABASES.discard(self.db_path)
+        daily_store._INITIALIZED_DATABASES.discard(self.db_path)
         for item in reversed(self.patches):
             item.stop()
         self.temp_dir.cleanup()
+
+
+class DailySharedLayerTests(IsolatedDatabaseTest):
+    def _enable_profile(self, user_id: int) -> None:
+        economy_profile.set_economy_profile(
+            user_id,
+            economy_profile.GENDER_MALE,
+            True,
+        )
+
+    def test_daily_claim_is_one_per_msk_day_and_keeps_streak(self):
+        self._enable_profile(10)
+        first = daily_service.claim_daily(
+            10,
+            datetime(2026, 8, 1, 12, 0, tzinfo=daily_service.MSK),
+        )
+        duplicate = daily_service.claim_daily(
+            10,
+            datetime(2026, 8, 1, 23, 59, tzinfo=daily_service.MSK),
+        )
+        second = daily_service.claim_daily(
+            10,
+            datetime(2026, 8, 2, 0, 1, tzinfo=daily_service.MSK),
+        )
+        reset = daily_service.claim_daily(
+            10,
+            datetime(2026, 8, 4, 12, 0, tzinfo=daily_service.MSK),
+        )
+
+        self.assertEqual(first, {"status": "claimed", "streak": 1, "reward": 25, "balance": 25})
+        self.assertEqual(duplicate["status"], "already_claimed")
+        self.assertEqual(second["streak"], 2)
+        self.assertEqual(second["reward"], 30)
+        self.assertEqual(reset["streak"], 1)
+        self.assertEqual(economy.get_balance(10), 80)
+        self.assertEqual(daily_service.compute_reward(7), 80)
+
+    def test_transfer_is_atomic_and_records_both_ledger_sides(self):
+        self._enable_profile(10)
+        self._enable_profile(20)
+        economy.add_coins(10, 100, "seed")
+
+        moved = economy.transfer_coins(10, 20, 70)
+        rejected = economy.transfer_coins(10, 20, 40)
+
+        self.assertEqual(moved["status"], "transferred")
+        self.assertEqual(moved["sender_balance"], 30)
+        self.assertEqual(moved["recipient_balance"], 70)
+        self.assertEqual(rejected, {"status": "insufficient", "sender_balance": 30})
+        self.assertEqual(economy.get_balance(10), 30)
+        self.assertEqual(economy.get_balance(20), 70)
+        debit = economy.debit_coins(10, 31, "shop")
+        self.assertEqual(debit["status"], "insufficient")
+        self.assertEqual(economy.get_balance(10), 30)
+        self.assertEqual(
+            [entry["reason"] for entry in economy.list_ledger_entries(10)],
+            ["transfer_out", "seed"],
+        )
+        self.assertEqual(economy.list_ledger_entries(20)[0]["meta"], {"from": 10})
+
+    def test_shop_temp_roles_and_legacy_schema_use_one_store(self):
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE temp_roles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    role_id INTEGER NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+                """
+            )
+        daily_store.ensure_tables()
+        with db_connection(self.db_path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(temp_roles)")}
+        self.assertIn("guild_id", columns)
+
+        item = daily_store.upsert_shop_item(300, "Raid", 50, 24, 99)
+        updated = daily_store.upsert_shop_item(300, "Raid+", 75, 48, 99)
+        self.assertEqual(item["id"], updated["id"])
+        self.assertEqual(daily_store.list_shop_items()[0]["price"], 75)
+
+        expires = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+        daily_store.save_temp_role(10, 300, 777, expires)
+        saved = daily_store.list_temp_roles()[0]
+        self.assertEqual(saved["guild_id"], 777)
+        self.assertEqual(saved["expires_at"], expires)
+        self.assertTrue(daily_store.delete_temp_role(10, 300))
+        self.assertEqual(daily_store.delete_shop_item(item["id"])["role_name"], "Raid+")
+
+    def test_tax_reads_settings_store_and_never_overdraws(self):
+        self._enable_profile(10)
+        self._enable_profile(20)
+        economy.add_coins(10, 100, "seed")
+        economy.add_coins(20, 5, "seed")
+        settings_store.set_feature_payload(
+            777,
+            daily_service.FEATURE_ECONOMY,
+            {"tax_enabled": True, "tax_rate_pct": 10, "tax_interval_h": 24},
+        )
+
+        result = daily_service.collect_tax(
+            777,
+            datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result, {"users": 2, "collected": 11})
+        self.assertEqual(economy.get_balance(10), 90)
+        self.assertEqual(economy.get_balance(20), 4)
+        config = daily_service.tax_config(777)
+        self.assertTrue(config["enabled"])
+        self.assertTrue(config["last_run"])
+
+    def test_discord_daily_ui_does_not_open_sqlite(self):
+        source = (Path(__file__).parents[1] / "fun_slesh" / "daily.py").read_text(encoding="utf-8")
+        self.assertNotIn("import sqlite3", source)
+        self.assertNotIn("sqlite3.connect", source)
 
 
 class SteamSharedLayerTests(IsolatedDatabaseTest):
