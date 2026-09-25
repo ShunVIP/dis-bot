@@ -12,12 +12,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-import sqlite3, os, re
+import re
+
+from core import reminder_service, reminder_store
 
 MSK = ZoneInfo("Europe/Moscow")
 UTC = timezone.utc
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datebase", "reminders.db"))
 scheduler = AsyncIOScheduler(timezone=MSK)
 
 # ── Choices ───────────────────────────────────────────────────────────────────
@@ -34,88 +35,17 @@ REPEAT_CHOICES = [
     app_commands.Choice(name="Каждые 2 недели (пн)",  value="biweekly"),
 ]
 
-REPEAT_LABELS = {
-    "once": "разовое", "daily": "каждый день",
-    "weekly_mon": "каждый пн", "weekly_tue": "каждый вт",
-    "weekly_wed": "каждую ср", "weekly_thu": "каждый чт",
-    "weekly_fri": "каждую пт", "weekly_sat": "каждую сб",
-    "weekly_sun": "каждое вс", "biweekly": "каждые 2 нед",
-}
-
-WEEKDAY_MAP = {
-    "weekly_mon": "mon", "weekly_tue": "tue", "weekly_wed": "wed",
-    "weekly_thu": "thu", "weekly_fri": "fri", "weekly_sat": "sat",
-    "weekly_sun": "sun",
-}
+REPEAT_LABELS = reminder_service.REPEAT_LABELS
+WEEKDAY_MAP = reminder_service.WEEKDAY_MAP
 
 # ── БД ────────────────────────────────────────────────────────────────────────
 def _ensure_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS reminders (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id      INTEGER NOT NULL,
-                channel_id   INTEGER,
-                ping_users   TEXT    NOT NULL DEFAULT '',
-                ping_roles   TEXT    NOT NULL DEFAULT '',
-                text         TEXT    NOT NULL,
-                remind_at    TEXT    NOT NULL,
-                repeat       TEXT    NOT NULL DEFAULT 'once',
-                advance_min  INTEGER NOT NULL DEFAULT 0,
-                created_at   TEXT    NOT NULL DEFAULT ''
-            )
-        """)
-        # Миграция старых схем — добавляем колонки если нет
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(reminders)")}
-        migrations = {
-            "ping_users":  "ALTER TABLE reminders ADD COLUMN ping_users  TEXT NOT NULL DEFAULT ''",
-            "ping_roles":  "ALTER TABLE reminders ADD COLUMN ping_roles  TEXT NOT NULL DEFAULT ''",
-            "repeat":      "ALTER TABLE reminders ADD COLUMN repeat      TEXT NOT NULL DEFAULT 'once'",
-            "advance_min": "ALTER TABLE reminders ADD COLUMN advance_min INTEGER NOT NULL DEFAULT 0",
-            "created_at":  "ALTER TABLE reminders ADD COLUMN created_at  TEXT NOT NULL DEFAULT ''",
-        }
-        # Если есть старые колонки одиночного пинга — мигрируем данные и не трогаем
-        for col, sql in migrations.items():
-            if col not in existing:
-                conn.execute(sql)
-        conn.commit()
+    reminder_store.ensure_tables()
 
 # ── Вычисление следующего срабатывания ────────────────────────────────────────
 def _next_dt(repeat: str, hour: int, minute: int,
              fixed_date: datetime | None = None) -> datetime:
-    """Возвращает следующую дату срабатывания в UTC."""
-    now_msk = datetime.now(MSK)
-
-    if fixed_date is not None:
-        # Конкретная дата
-        target = fixed_date.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=MSK)
-        return target.astimezone(UTC)
-
-    target = now_msk.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-    if repeat == "once" or repeat == "daily":
-        if target <= now_msk:
-            target += timedelta(days=1)
-        return target.astimezone(UTC)
-
-    if repeat in WEEKDAY_MAP:
-        wd_map = {"mon":0,"tue":1,"wed":2,"thu":3,"fri":4,"sat":5,"sun":6}
-        target_wd = wd_map[WEEKDAY_MAP[repeat]]
-        days_ahead = (target_wd - now_msk.weekday()) % 7
-        if days_ahead == 0 and target <= now_msk:
-            days_ahead = 7
-        target += timedelta(days=days_ahead)
-        return target.astimezone(UTC)
-
-    if repeat == "biweekly":
-        days_ahead = (0 - now_msk.weekday()) % 14
-        if days_ahead == 0 and target <= now_msk:
-            days_ahead = 14
-        target += timedelta(days=days_ahead)
-        return target.astimezone(UTC)
-
-    return target.astimezone(UTC)
+    return reminder_service.next_occurrence(repeat, hour, minute, fixed_date)
 
 # ── Планирование ──────────────────────────────────────────────────────────────
 def _schedule(cog, rid: int, remind_utc: datetime,
@@ -138,7 +68,12 @@ def _schedule(cog, rid: int, remind_utc: datetime,
         scheduler.add_job(cog._fire, "interval", weeks=2, start_date=remind_utc,
                           args=[rid, False], id=job_id, replace_existing=True)
 
-    # Предупреждение заранее
+    _schedule_advance(cog, rid, remind_utc, advance_min)
+
+
+def _schedule_advance(cog, rid: int, remind_utc: datetime, advance_min: int = 0):
+    """Schedule the warning for one concrete occurrence."""
+    job_id = f"rem_{rid}"
     if advance_min > 0:
         adv_utc = remind_utc - timedelta(minutes=advance_min)
         if adv_utc > datetime.now(UTC):
@@ -194,17 +129,7 @@ def _parse_roles(text: str, guild: discord.Guild) -> tuple[list[int], list[str]]
 
 # ── Обратный отсчёт ───────────────────────────────────────────────────────────
 def _countdown(dt_utc: datetime) -> str:
-    delta = dt_utc - datetime.now(UTC)
-    if delta.total_seconds() <= 0:
-        return "прямо сейчас"
-    d, rem = divmod(int(delta.total_seconds()), 86400)
-    h, rem = divmod(rem, 3600)
-    m = rem // 60
-    parts = []
-    if d: parts.append(f"{d}д")
-    if h: parts.append(f"{h}ч")
-    if m: parts.append(f"{m}м")
-    return "через " + " ".join(parts) if parts else "меньше минуты"
+    return reminder_service.countdown(dt_utc)
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class Tools(commands.Cog):
@@ -220,66 +145,48 @@ class Tools(commands.Cog):
 
     def _load(self):
         try:
-            with sqlite3.connect(DB_PATH) as conn:
-                rows = conn.execute(
-                    "SELECT id, remind_at, repeat, advance_min FROM reminders"
-                ).fetchall()
+            rows = reminder_store.list_reminders()
         except Exception:
             return
         now_utc = datetime.now(UTC)
-        for rid, remind_at, repeat, adv in rows:
+        for row in rows:
             try:
-                dt = datetime.fromisoformat(remind_at)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
+                rid = row["id"]
+                repeat = row["repeat"]
+                adv = row["advance_min"]
+                dt = reminder_service.aware_utc(row["remind_at"])
                 dt_msk = dt.astimezone(MSK)
                 if repeat == "once":
                     if dt > now_utc:
-                        _schedule(self, rid, dt, repeat, dt_msk.hour, dt_msk.minute, adv or 0)
+                        _schedule(self, rid, dt, repeat, dt_msk.hour, dt_msk.minute, adv)
                     else:
-                        with sqlite3.connect(DB_PATH) as c:
-                            c.execute("DELETE FROM reminders WHERE id=?", (rid,))
+                        reminder_store.delete_reminder(rid)
                 else:
                     nxt = _next_dt(repeat, dt_msk.hour, dt_msk.minute)
-                    _schedule(self, rid, nxt, repeat, dt_msk.hour, dt_msk.minute, adv or 0)
+                    reminder_store.update_remind_at(rid, nxt)
+                    _schedule(self, rid, nxt, repeat, dt_msk.hour, dt_msk.minute, adv)
             except Exception:
                 continue
 
     async def _fire(self, rid: int, is_advance: bool):
         """Отправляет напоминание. is_advance=True — предупреждение заранее."""
         try:
-            with sqlite3.connect(DB_PATH) as conn:
-                row = conn.execute(
-                    "SELECT user_id, channel_id, ping_users, ping_roles, text, repeat, remind_at, advance_min"
-                    " FROM reminders WHERE id=?", (rid,)
-                ).fetchone()
+            row = reminder_store.get_reminder(rid)
         except Exception:
             return
         if not row:
             return
-        user_id, channel_id, ping_users_raw, ping_roles_raw, text, repeat, remind_at, adv = row
-
-        # Формируем пинги
-        pings = []
-        for uid in (ping_users_raw or "").split(","):
-            uid = uid.strip()
-            if uid.isdigit():
-                pings.append(f"<@{uid}>")
-        for rid_role in (ping_roles_raw or "").split(","):
-            rid_role = rid_role.strip()
-            if rid_role.isdigit():
-                pings.append(f"<@&{rid_role}>")
-        if not pings:
-            pings.append(f"<@{user_id}>")
-
-        ping_str  = " ".join(pings)
+        user_id = row["user_id"]
+        channel_id = row["channel_id"]
+        text = row["text"]
+        repeat = row["repeat"]
+        adv = row["advance_min"]
+        ping_str = reminder_service.ping_text(row)
         label     = REPEAT_LABELS.get(repeat, "")
         rep_note  = f" _(повторяется: {label})_" if repeat != "once" else ""
 
         if is_advance:
-            dt = datetime.fromisoformat(remind_at)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
+            dt = reminder_service.aware_utc(row["remind_at"])
             when_msk = dt.astimezone(MSK).strftime("%d.%m %H:%M")
             msg = f"⏰ {ping_str} **Напоминание через {adv} мин** (в {when_msk} МСК):\n{text}"
         else:
@@ -298,23 +205,33 @@ class Tools(commands.Cog):
             try:
                 user = await self.bot.fetch_user(user_id)
                 await user.send(msg)
+                sent = True
             except Exception:
                 pass
 
         # После основного срабатывания
         if not is_advance:
+            if not sent:
+                scheduler.add_job(
+                    self._fire,
+                    "date",
+                    run_date=datetime.now(UTC) + timedelta(minutes=5),
+                    args=[rid, False],
+                    id=f"rem_{rid}_retry",
+                    replace_existing=True,
+                )
+                return
+            retry_job = scheduler.get_job(f"rem_{rid}_retry")
+            if retry_job:
+                scheduler.remove_job(retry_job.id)
             if repeat == "once":
-                with sqlite3.connect(DB_PATH) as conn:
-                    conn.execute("DELETE FROM reminders WHERE id=?", (rid,))
+                reminder_store.delete_reminder(rid)
             else:
-                dt = datetime.fromisoformat(remind_at)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
+                dt = reminder_service.aware_utc(row["remind_at"])
                 dt_msk  = dt.astimezone(MSK)
                 next_dt = _next_dt(repeat, dt_msk.hour, dt_msk.minute)
-                with sqlite3.connect(DB_PATH) as conn:
-                    conn.execute("UPDATE reminders SET remind_at=? WHERE id=?",
-                                 (next_dt.isoformat(), rid))
+                reminder_store.update_remind_at(rid, next_dt)
+                _schedule_advance(self, rid, next_dt, adv)
 
     # ── /напомни ──────────────────────────────────────────────────────────────
     @reminders_group.command(name="создать", description="Установить напоминание")
@@ -389,20 +306,18 @@ class Tools(commands.Cog):
         if not user_ids and not role_ids:
             user_ids = [interaction.user.id]
 
-        channel_id = None if лично else interaction.channel.id
-
-        ping_users_str = ",".join(str(x) for x in user_ids)
-        ping_roles_str = ",".join(str(x) for x in role_ids)
-
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.execute(
-                "INSERT INTO reminders(user_id, channel_id, ping_users, ping_roles, text,"
-                " remind_at, repeat, advance_min, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (interaction.user.id, channel_id, ping_users_str, ping_roles_str,
-                 текст, remind_utc.isoformat(), повторение,
-                 за_минут, datetime.now(UTC).isoformat())
-            )
-            rid = cur.lastrowid
+        channel_id = None if лично else (канал.id if канал else interaction.channel.id)
+        created = reminder_store.create_reminder(
+            user_id=interaction.user.id,
+            channel_id=channel_id,
+            ping_users=user_ids,
+            ping_roles=role_ids,
+            text=текст,
+            remind_at=remind_utc,
+            repeat=повторение,
+            advance_min=за_минут,
+        )
+        rid = created["id"]
 
         _schedule(self, rid, remind_utc, повторение, hour, minute, за_минут)
 
@@ -435,40 +350,28 @@ class Tools(commands.Cog):
     # ── /мои_напоминания ──────────────────────────────────────────────────────
     @reminders_group.command(name="мои", description="Мои активные напоминания с обратным отсчётом")
     async def мои_напоминания(self, interaction: discord.Interaction):
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                "SELECT id, text, remind_at, channel_id, ping_users, ping_roles, repeat, advance_min"
-                " FROM reminders WHERE user_id=? ORDER BY remind_at ASC",
-                (interaction.user.id,)
-            ).fetchall()
-
-        now_utc = datetime.now(UTC)
-        active = []
-        for rid, text, ts, ch_id, pu, pr, repeat, adv in rows:
-            try:
-                dt = datetime.fromisoformat(ts)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
-                if repeat != "once" or dt > now_utc:
-                    active.append((rid, text, dt, ch_id, pu, pr, repeat, adv))
-            except Exception:
-                continue
+        active = reminder_service.active_reminders(
+            reminder_store.list_reminders(interaction.user.id)
+        )
 
         if not active:
             await interaction.response.send_message("📝 Нет активных напоминаний.", ephemeral=True)
             return
 
         lines = []
-        for rid, text, dt, ch_id, pu, pr, repeat, adv in active[:15]:
+        for row in active[:15]:
+            rid = row["id"]
+            text = row["text"]
+            dt = reminder_service.aware_utc(row["remind_at"])
+            ch_id = row["channel_id"]
+            repeat = row["repeat"]
+            adv = row["advance_min"]
             when_msk = dt.astimezone(MSK).strftime("%d.%m %H:%M")
             cd       = _countdown(dt)
             rl       = REPEAT_LABELS.get(repeat, repeat)
             dest     = f"<#{ch_id}>" if ch_id else "ЛС"
-            pings    = []
-            for uid in (pu or "").split(","):
-                if uid.strip().isdigit(): pings.append(f"<@{uid.strip()}>")
-            for rid_ in (pr or "").split(","):
-                if rid_.strip().isdigit(): pings.append(f"<@&{rid_.strip()}>")
+            pings = [f"<@{uid}>" for uid in row["ping_users"]]
+            pings.extend(f"<@&{role_id}>" for role_id in row["ping_roles"])
             adv_note = f" · ⚠️ за {adv}м" if adv else ""
             ping_str = ("  👥 " + " ".join(pings) + "\n") if pings else ""
             lines.append(
@@ -492,30 +395,8 @@ class Tools(commands.Cog):
                              description="Выбрать и удалить своё напоминание")
     async def удалить_напоминание(self, interaction: discord.Interaction):
         is_admin = interaction.user.guild_permissions.administrator
-        with sqlite3.connect(DB_PATH) as conn:
-            if is_admin:
-                rows = conn.execute(
-                    "SELECT id, text, remind_at, repeat, user_id"
-                    " FROM reminders ORDER BY remind_at ASC"
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT id, text, remind_at, repeat, user_id"
-                    " FROM reminders WHERE user_id=? ORDER BY remind_at ASC",
-                    (interaction.user.id,)
-                ).fetchall()
-
-        now_utc = datetime.now(UTC)
-        active = []
-        for rid, text, ts, repeat, uid in rows:
-            try:
-                dt = datetime.fromisoformat(ts)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
-                if repeat != "once" or dt > now_utc:
-                    active.append((rid, text, dt, repeat))
-            except Exception:
-                continue
+        rows = reminder_store.list_reminders(None if is_admin else interaction.user.id)
+        active = reminder_service.active_reminders(rows)
 
         if not active:
             await interaction.response.send_message(
@@ -524,7 +405,11 @@ class Tools(commands.Cog):
 
         cog_ref = self
         options = []
-        for rid, text, dt, repeat in active[:25]:
+        for row in active[:25]:
+            rid = row["id"]
+            text = row["text"]
+            repeat = row["repeat"]
+            dt = reminder_service.aware_utc(row["remind_at"])
             when = dt.astimezone(MSK).strftime("%d.%m %H:%M")
             rl   = REPEAT_LABELS.get(repeat, repeat)
             options.append(discord.SelectOption(
@@ -547,9 +432,10 @@ class Tools(commands.Cog):
                 deleted = []
                 for val in self.values:
                     r_id = int(val)
-                    with sqlite3.connect(DB_PATH) as conn:
-                        conn.execute("DELETE FROM reminders WHERE id=?", (r_id,))
-                    for jid in (f"rem_{r_id}", f"rem_{r_id}_adv"):
+                    owner_id = None if is_admin else interaction.user.id
+                    if not reminder_store.delete_reminder(r_id, owner_user_id=owner_id):
+                        continue
+                    for jid in (f"rem_{r_id}", f"rem_{r_id}_adv", f"rem_{r_id}_retry"):
                         if scheduler.get_job(jid):
                             scheduler.remove_job(jid)
                     deleted.append(f"#{r_id}")

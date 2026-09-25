@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aiohttp import ClientSession, FormData, web
-from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, daily_service, daily_store, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, message_stats_service, message_stats_store, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, steam_service, steam_store, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
+from core import admin_panel_service, activity_rewards_service, activity_rewards_store, activity_service, activity_store, birthday_store, community_store, conversation_service, conversation_store, conversation_training, daily_service, daily_store, economy, economy_profile, game_profiles, game_service, game_store, gamer_profile_service, gamer_profile_store, heroes_service, heroes_store, menu_catalog_service, message_stats_service, message_stats_store, ml_artifacts, ml_insights, moderation_service, parody_feedback_store, parody_message_store, parody_model_service, platform_store, profile_service, raid_schedule_service, reminder_service, reminder_store, rep_roles_service, rep_roles_store, reputation_service, reputation_store, settings_migration, settings_store, social_chat_service, steam_service, steam_store, summary_service, summary_stats_store, summary_store, toxicity_model_service, toxicity_service, toxicity_store, voice_store, web_app_store, web_conversation_service
 from core.db import connection as db_connection
 from core.data_catalog import audit_all, ml_data_manifest, repair_wwm_orphan_features
 from core.admin_panel import (
@@ -52,6 +52,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
             patch.object(economy_profile, "DB_PATH", self.db_path),
             patch.object(daily_store, "SOCIAL_DB", self.db_path),
             patch.object(message_stats_store, "SOCIAL_DB", self.db_path),
+            patch.object(reminder_store, "DB_PATH", self.db_path),
             patch.object(settings_migration, "SOCIAL_DB", self.db_path),
             patch.object(settings_migration, "BIRTHDAYS_DB", self.db_path),
             patch.object(birthday_store, "BIRTHDAYS_DB", self.db_path),
@@ -89,6 +90,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
         steam_store._INITIALIZED_DATABASES.discard(self.db_path)
         daily_store._INITIALIZED_DATABASES.discard(self.db_path)
         message_stats_store._INITIALIZED_DATABASES.discard(self.db_path)
+        reminder_store._INITIALIZED_DATABASES.discard(self.db_path)
 
     def tearDown(self):
         activity_rewards_store._INITIALIZED_DATABASES.discard(self.db_path)
@@ -99,6 +101,7 @@ class IsolatedDatabaseTest(unittest.TestCase):
         steam_store._INITIALIZED_DATABASES.discard(self.db_path)
         daily_store._INITIALIZED_DATABASES.discard(self.db_path)
         message_stats_store._INITIALIZED_DATABASES.discard(self.db_path)
+        reminder_store._INITIALIZED_DATABASES.discard(self.db_path)
         for item in reversed(self.patches):
             item.stop()
         self.temp_dir.cleanup()
@@ -323,6 +326,93 @@ class MessageStatsSharedLayerTests(IsolatedDatabaseTest):
         self.assertNotIn("sqlite3.connect", source)
         self.assertIn("record_message_batch(", source)
         self.assertIn("_finish_voice_segment(", source)
+
+
+class ReminderSharedLayerTests(IsolatedDatabaseTest):
+    def test_store_migrates_legacy_rows_and_scopes_deletion_to_owner(self):
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE reminders(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    channel_id INTEGER,
+                    ping_users TEXT NOT NULL DEFAULT '',
+                    ping_roles TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL,
+                    remind_at TEXT NOT NULL,
+                    repeat TEXT NOT NULL DEFAULT 'once',
+                    advance_min INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO reminders(
+                    user_id,channel_id,ping_users,ping_roles,text,remind_at,repeat,advance_min
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (10, 50, "10,20", "30", "legacy", "2026-09-27T18:00:00+00:00", "once", 15),
+            )
+
+        reminder_store.ensure_tables()
+        legacy = reminder_store.get_reminder(1)
+
+        self.assertEqual(legacy["text"], "legacy")
+        self.assertEqual(legacy["ping_users"], [10, 20])
+        self.assertEqual(legacy["ping_roles"], [30])
+        self.assertEqual(legacy["created_at"], "")
+        self.assertFalse(reminder_store.delete_reminder(1, owner_user_id=99))
+        self.assertIsNotNone(reminder_store.get_reminder(1))
+        self.assertTrue(reminder_store.delete_reminder(1, owner_user_id=10))
+
+    def test_store_crud_and_service_cover_all_repeat_modes(self):
+        remind_at = datetime(2026, 9, 27, 18, 30, tzinfo=timezone.utc)
+        created = reminder_store.create_reminder(
+            user_id=10,
+            channel_id=50,
+            ping_users=[20, 10, 20],
+            ping_roles=[30],
+            text="raid",
+            remind_at=remind_at,
+            repeat="daily",
+            advance_min=20,
+        )
+        self.assertEqual(created["ping_users"], [10, 20])
+        self.assertEqual(reminder_store.list_reminders(10), [created])
+        self.assertEqual(reminder_store.list_reminders(99), [])
+        self.assertEqual(reminder_service.ping_text(created), "<@10> <@20> <@&30>")
+
+        now = datetime(2026, 9, 26, 18, 0, tzinfo=timezone.utc)
+        daily = reminder_service.next_occurrence("daily", 22, 0, now=now)
+        monday = reminder_service.next_occurrence("weekly_mon", 21, 0, now=now)
+        biweekly = reminder_service.next_occurrence("biweekly", 21, 0, now=now)
+        fixed = reminder_service.next_occurrence(
+            "once", 21, 30, datetime(2026, 10, 5), now=now
+        )
+        self.assertEqual(daily.isoformat(), "2026-09-26T19:00:00+00:00")
+        self.assertEqual(monday.isoformat(), "2026-09-28T18:00:00+00:00")
+        self.assertEqual(biweekly.isoformat(), "2026-09-28T18:00:00+00:00")
+        self.assertEqual(fixed.isoformat(), "2026-10-05T18:30:00+00:00")
+        self.assertEqual(reminder_service.countdown(daily, now=now), "через 1ч")
+        with self.assertRaises(ValueError):
+            reminder_service.next_occurrence("hourly", 12, 0, now=now)
+
+        next_time = datetime(2026, 9, 28, 18, 30, tzinfo=timezone.utc)
+        self.assertTrue(reminder_store.update_remind_at(created["id"], next_time))
+        self.assertEqual(
+            reminder_store.get_reminder(created["id"])["remind_at"],
+            next_time.isoformat(),
+        )
+
+    def test_discord_reminder_ui_delegates_storage_and_keeps_failed_delivery(self):
+        source = (Path(__file__).parents[1] / "fun_slesh" / "tools.py").read_text(encoding="utf-8")
+        self.assertNotIn("import sqlite3", source)
+        self.assertNotIn("sqlite3.connect", source)
+        self.assertIn("канал.id if канал else interaction.channel.id", source)
+        self.assertIn('id=f"rem_{rid}_retry"', source)
+        self.assertIn("_schedule_advance(self, rid, next_dt, adv)", source)
+        self.assertIn("owner_user_id=owner_id", source)
 
 
 class SteamSharedLayerTests(IsolatedDatabaseTest):
