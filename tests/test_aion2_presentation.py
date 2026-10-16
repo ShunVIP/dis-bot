@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from fun_slesh.aion2_ui.characters import CharacterDataView
-from fun_slesh.aion2_ui.presentation import picture, section_pages
+from fun_slesh.aion2_ui.presentation import effect, label, picture, section_pages
 
 
 ICON='https://assets.playnccdn.com/static-aion2-gamedata/resources/bow.png'
@@ -11,6 +11,13 @@ ROW={'id':123,'name':'Spiritforged Bow','icon':ICON,'grade':'Unique','enchantLev
 
 
 class CharacterPresentationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_russian_labels_slots_and_numeric_effects(self):
+        self.assertEqual(label('SubHand'),'Левая рука')
+        self.assertEqual(label('아이템레벨'),'Уровень предметов')
+        self.assertIn('Сопротивление критическому удару',effect('Critical Hit Resist increase +0.9%'))
+        self.assertIn('+0.9%',effect('Critical Hit Resist increase +0.9%'))
+        self.assertEqual(effect('Unknown Skill +2'),'Unknown Skill +2')
+
     async def test_every_normal_section_uses_embeds_not_json(self):
         examples={
             'stat':{'statList':[{'name':'Might','value':25,'statSecondList':['Attack increase +2.5%']}]},
@@ -58,7 +65,7 @@ class CharacterPresentationTests(unittest.IsolatedAsyncioTestCase):
             'openStatEffectList':[{'desc':'HP +500'}],
             'nodeList':[{'type':'None','open':0},{'type':'Stat','name':'Power','open':1,'effectList':[{'desc':'Attack +10'}]}]})
         rendered=' '.join(str(p.to_dict()) for p in pages)
-        self.assertIn('HP +500',rendered)
+        self.assertIn('Здоровье +500',rendered)
         self.assertIn('Power',rendered)
         self.assertIn('Открыто 1 из 2',rendered)
         self.assertNotIn('nodeList',rendered)

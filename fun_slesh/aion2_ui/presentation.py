@@ -35,12 +35,32 @@ LABELS = {
     'Critical Hit': 'Критический удар', 'Evasion': 'Уклонение', 'Block': 'Блок',
     'Might': 'Сила', 'Agility': 'Ловкость', 'Wisdom': 'Мудрость',
     'Intelligence': 'Интеллект', 'Vitality': 'Выносливость', 'Will': 'Воля',
+    'Dexterity': 'Ловкость', 'Constitution': 'Телосложение', 'Precision': 'Точность', 'Willpower': 'Воля',
+    'Justice [Nezekan]': 'Справедливость [Незакан]', 'Freedom [Vaizel]': 'Свобода [Вайзел]',
+    'Illusion [Kaisinel]': 'Иллюзия [Кайсинель]', 'Life [Yustiel]': 'Жизнь [Юстиэль]',
+    'Time [Siel]': 'Время [Сиэль]', 'Destruction [Zikel]': 'Разрушение [Джикел]',
+    'Death [Triniel]': 'Смерть [Триниэль]', 'Wisdom [Lumiel]': 'Мудрость [Люмиэль]',
+    'Destiny [Marchutan]': 'Судьба [Маркутан]', 'Space [Israphel]': 'Пространство [Исрафель]',
+    '아이템레벨': 'Уровень предметов',
     'HP': 'Здоровье', 'MP': 'Мана', 'ItemLevel': 'Уровень предметов',
     'MainHand': 'Основное оружие', 'OffHand': 'Левая рука', 'Head': 'Голова',
     'Torso': 'Нагрудник', 'Shoulder': 'Плечи', 'Pants': 'Поножи', 'Gloves': 'Перчатки',
     'Shoes': 'Обувь', 'Necklace': 'Ожерелье', 'Earrings': 'Серьги', 'Ring': 'Кольцо',
     'Bracelet': 'Браслет', 'Belt': 'Пояс', 'Rune': 'Руна', 'Amulet': 'Амулет',
-    'Active': 'Активный', 'Passive': 'Пассивный',
+    'SubHand': 'Левая рука', 'Helmet': 'Голова', 'Boots': 'Обувь', 'Cape': 'Плащ',
+    'Earring1': 'Левая серьга', 'Earring2': 'Правая серьга', 'Ring1': 'Левое кольцо',
+    'Ring2': 'Правое кольцо', 'Bracelet1': 'Левый браслет', 'Bracelet2': 'Правый браслет',
+    'Rune1': 'Первая руна', 'Rune2': 'Вторая руна',
+    'Critical Hit Resist': 'Сопротивление критическому удару', 'Status Effect Resist': 'Сопротивление эффектам',
+    'Combat Speed': 'Боевая скорость', 'Move Speed': 'Скорость передвижения',
+    'Natural HP Regen': 'Восстановление здоровья', 'Natural MP Regen': 'Восстановление маны',
+    'Cooldown': 'Перезарядка', 'MP Cost': 'Расход маны', 'Penetration': 'Пробивание',
+    'Regeneration': 'Восстановление', 'Endurance': 'Стойкость',
+    'Endurance Penetration': 'Пробивание стойкости', 'Regeneration Penetration': 'Пробивание восстановления',
+    'Double Chance': 'Шанс двойного удара', 'Double Resist': 'Сопротивление двойному удару',
+    'Perfect Chance': 'Шанс идеального удара', 'Perfect Resist': 'Сопротивление идеальному удару',
+    'Multi-hit Resist': 'Сопротивление множественным ударам',
+    'Active': 'Активный', 'Passive': 'Пассивный', 'Dp': 'DP-навык',
     'Common': 'Обычное', 'Rare': 'Редкое', 'Unique': 'Уникальное',
     'Legend': 'Эпическое', 'Epic': 'Эпическое', 'Special': 'Особое', 'Mythic': 'Мифическое',
 }
@@ -61,6 +81,22 @@ def text(value, limit=900):
 
 def label(key):
     return LABELS.get(str(key), re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', str(key)).replace('_', ' '))
+
+
+def effect(value):
+    """Translate known numeric effect terms; preserve unknown skill/item names."""
+    value = str(value)
+    terms = {k:v for k,v in LABELS.items() if k in {
+        'Attack','Defense','Accuracy','Critical Hit','Evasion','Block','HP','MP',
+        'Critical Hit Resist','Status Effect Resist','Combat Speed','Move Speed',
+        'Natural HP Regen','Natural MP Regen','Cooldown','MP Cost','Penetration',
+        'Regeneration','Endurance','Endurance Penetration','Regeneration Penetration',
+        'Double Chance','Double Resist','Perfect Chance','Perfect Resist','Multi-hit Resist'}}
+    # A single replacement pass prevents replacements inside earlier translations.
+    pattern = r'\b('+'|'.join(re.escape(k) for k in sorted(terms,key=len,reverse=True))+r')\b'
+    value = re.sub(pattern, lambda match: terms[match.group()], value)
+    value = re.sub(r'\bincrease\b', 'увеличение', value)
+    return text(value)
 
 
 def picture(value):
@@ -84,7 +120,7 @@ def readable(value, depth=0):
         return '\n'.join(readable(row, depth+1) for row in value) or 'Нет данных.'
     if isinstance(value, dict):
         if 'desc' in value:
-            return text(value['desc'])
+            return effect(value['desc'])
         if 'value' in value and ('name' in value or 'type' in value):
             result = f"{text(label(value.get('name') or value.get('type')))}: **{text(value['value'])}**"
             if value.get('extra') not in (None, '', '0', '0%'):
@@ -98,7 +134,7 @@ def readable(value, depth=0):
                 continue
             lines.append(f"{text(label(key))}: {readable(entry, depth+1)}")
         return '\n'.join(lines) or 'Нет данных.'
-    return text(value)
+    return effect(value)
 
 
 def fields_pages(title, fields, icon=None, color=0x3498db, intro=None):
@@ -162,7 +198,7 @@ def section_pages(key, data, title=None):
     pages = []
     if key == 'stat':
         rows = data.get('statList') or []
-        return fields_pages(heading, [(label(row.get('name') or row.get('type', 'Параметр')), readable(row)) for row in rows])
+        return fields_pages(heading, [(label(row.get('type') if row.get('type')=='ItemLevel' else row.get('name') or row.get('type', 'Параметр')), readable(row)) for row in rows])
     if key == 'equipment':
         for collection, name in [('equipmentList', 'Экипировка'), ('skinList', 'Облик')]:
             for row in data.get(collection) or []:
