@@ -22,6 +22,7 @@ from core.game_profiles import (
 from core.paths import SOCIAL_DB
 from core.gamer_profile_service import normalize_requested_tags
 from core.gamer_profile_store import delete_gamer_profile, refresh_gamer_profile
+from core.aion2_character_store import list_links as aion2_links
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -94,6 +95,7 @@ def get_unified_profile(user_id: int) -> dict[str, Any]:
             "balance": get_balance(user_id),
         },
         "games": {
+            "aion2": aion2_links(user_id),
             "steam": _steam_profile(user_id),
             "wwm": _wwm_profile(user_id),
             "lol": {
