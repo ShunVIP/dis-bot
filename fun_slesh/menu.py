@@ -141,6 +141,7 @@ SECTION_ACTIONS: dict[str, tuple[SectionAction, ...]] = {
         SectionAction("game_lol", "League of Legends", "🧬", "game_lol_hub", row=1),
         SectionAction("wwm_hub", "WWM", "🌿", "wwm_hub", row=1),
         SectionAction("raid_schedule", "Рейд", "🗓️", "call", "RaidSchedule", "рейд", {"дата": None}, row=1),
+        SectionAction("aion2_hub", "Aion 2", "🪽", "call", "Aion2", "open_hub", row=2),
     ),
     "🔍 Поиск": (
         SectionAction("search_wwm", "WWM база", "🔎", "wwm_search_modal", row=1),
