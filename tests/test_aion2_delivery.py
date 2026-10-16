@@ -21,7 +21,7 @@ class Channel:
         return SimpleNamespace(view_channel=True,send_messages=True,embed_links=True,read_message_history=True,manage_messages=False)
 
     async def _send(self,**kwargs):
-        message = SimpleNamespace(id=len(self.messages)+1,author=SimpleNamespace(id=42),embeds=[kwargs['embed']],pinned=False,edit=AsyncMock())
+        message = SimpleNamespace(id=len(self.messages)+1,author=SimpleNamespace(id=42),embeds=[kwargs['embed']],pinned=False,edit=AsyncMock(),delete=AsyncMock())
         self.messages.insert(0,message)
         return message
 
@@ -77,3 +77,25 @@ class Aion2DeliveryTests(unittest.TestCase):
             guild=SimpleNamespace(id=2)
             await Aion2(SimpleNamespace())._publish_timers(guild,datetime.now(timezone.utc))
         asyncio.run(check())
+
+    def test_expiry_windows_and_restart_cleanup_keep_dashboard(self):
+        async def check():
+            channel=Channel()
+            bot=SimpleNamespace(user=SimpleNamespace(id=42))
+            guild=SimpleNamespace(id=1,me=object(),get_channel=lambda _:channel)
+            settings_store.set_feature_channel(1,TIMERS_FEATURE,123,'output')
+            with patch('fun_slesh.aion2.discord.TextChannel',Channel):
+                await Aion2(bot)._publish_timers(guild,datetime(2026,10,16,11,55,tzinfo=timezone.utc))
+                notice,dashboard=channel.messages
+                # Combined Shugo + Rift lasts ten minutes after the opening.
+                await Aion2(bot)._publish_timers(guild,datetime(2026,10,16,12,2,tzinfo=timezone.utc))
+                notice.delete.assert_not_awaited()
+                await Aion2(bot)._publish_timers(guild,datetime(2026,10,16,12,10,tzinfo=timezone.utc))
+                notice.delete.assert_awaited_once()
+                dashboard.delete.assert_not_awaited()
+                self.assertEqual(settings_store.get_feature_runtime_state(1,TIMERS_FEATURE)['pending_notices'],[])
+        asyncio.run(check())
+
+    def test_shugo_only_expires_two_minutes_after_start(self):
+        starts=datetime(2026,10,16,13,tzinfo=timezone.utc)
+        self.assertEqual(aion2_timers.notice_expires_at(starts).isoformat(),'2026-10-16T13:02:00+00:00')

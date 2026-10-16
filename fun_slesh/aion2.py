@@ -189,6 +189,7 @@ class Aion2View(discord.ui.View):
 class Aion2(commands.Cog):
     def __init__(self,bot):
         self.bot=bot
+        self._notice_recovered = set()
 
     async def cog_load(self):
         self.timer_posts.start()
@@ -204,19 +205,58 @@ class Aion2(commands.Cog):
                 return message
         return None
 
+    async def _cleanup_notices(self,guild_id,channel,state,now):
+        pending = {int(item["id"]):item for item in state.get("pending_notices",[])}
+        # Recover old notifications and a send-before-state-save crash after restart.
+        if channel.id not in self._notice_recovered:
+            async for message in channel.history(limit=None):
+                if message.author.id != self.bot.user.id:
+                    continue
+                for embed in message.embeds:
+                    marker = (embed.footer.text or "").split("\n")[-1]
+                    if not marker.startswith("AION2-EU notice "):
+                        continue
+                    try:
+                        starts = datetime.fromisoformat(marker.removeprefix("AION2-EU notice "))
+                        expires = aion2_timers.notice_expires_at(starts)
+                    except ValueError:
+                        continue
+                    pending[message.id] = {"id":message.id,"expires_at":expires.isoformat()}
+            self._notice_recovered.add(channel.id)
+        for message_id,item in list(pending.items()):
+            if datetime.fromisoformat(item["expires_at"]) > now:
+                continue
+            try:
+                message = await channel.fetch_message(message_id)
+                if message.author.id == self.bot.user.id:
+                    await message.delete()
+            except discord.NotFound:
+                pass
+            except discord.HTTPException:
+                log.warning("Aion2 notice deletion failed channel=%s message=%s",channel.id,message_id)
+                continue
+            del pending[message_id]
+        updated = list(pending.values())
+        if updated != state.get("pending_notices",[]):
+            state["pending_notices"] = updated
+            await asyncio.to_thread(settings_store.set_feature_runtime_state,guild_id,TIMERS_FEATURE,state)
+
     async def _publish_timers(self,guild,now):
         policy = await asyncio.to_thread(settings_store.get_feature_policy,guild.id,TIMERS_FEATURE)
-        if not policy.enabled or not policy.output_channel_id:
+        if not policy.output_channel_id:
             return
         channel = guild.get_channel(policy.output_channel_id)
         if not isinstance(channel,discord.TextChannel) or guild.me is None:
             return
         perms = channel.permissions_for(guild.me)
-        if not (perms.view_channel and perms.send_messages and perms.embed_links and perms.read_message_history):
+        if not (perms.view_channel and perms.read_message_history):
             return
         state = await asyncio.to_thread(settings_store.get_feature_runtime_state,guild.id,TIMERS_FEATURE)
         if state.get("channel_id") != channel.id:
-            state = {"channel_id":channel.id,"message_id":None,"dashboard_key":None,"last_notice_key":None}
+            state = {"channel_id":channel.id,"message_id":None,"dashboard_key":None,"last_notice_key":None,"pending_notices":[]}
+        await self._cleanup_notices(guild.id,channel,state,now)
+        if not policy.enabled or not (perms.send_messages and perms.embed_links):
+            return
         data = aion2_timers.snapshot(now)
         dashboard_key = data["shugo"].isoformat()
         if state.get("dashboard_key") != dashboard_key:
@@ -252,11 +292,14 @@ class Aion2(commands.Cog):
             starts = notice["starts_at"]
             embed = discord.Embed(title="Aion 2 — скоро начало",description="\n".join(notice["names"])+f"\n\n**{starts.astimezone(service.MSK):%H:%M} МСК** · <t:{int(starts.timestamp())}:R>",color=discord.Color.blue())
             embed.set_footer(text="Расчётное расписание EU. Техработы могут изменить время.\n"+marker)
-            await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+            previous = await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+        pending = {int(item["id"]):item for item in state.get("pending_notices",[])}
+        pending[previous.id] = {"id":previous.id,"expires_at":aion2_timers.notice_expires_at(notice["starts_at"]).isoformat()}
+        state["pending_notices"] = list(pending.values())
         state["last_notice_key"] = notice["key"]
         await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,TIMERS_FEATURE,state)
 
-    @tasks.loop(seconds=60)
+    @tasks.loop(seconds=15)
     async def timer_posts(self):
         now = datetime.now(timezone.utc)
         for guild in self.bot.guilds:
