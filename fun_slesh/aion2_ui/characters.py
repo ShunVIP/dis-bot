@@ -3,10 +3,12 @@ import io
 import json
 import time
 import zipfile
+from urllib.parse import urlsplit
 
 import discord
 
 from core import aion2_character_service as api, aion2_character_store as store
+from .presentation import section_pages
 
 _requests={}
 
@@ -43,12 +45,33 @@ def overview(bundle):
     profile=bundle['info']['profile']
     stats=bundle['info'].get('stat',{}).get('statList',[]) or []
     item_level=next((s.get('value') for s in stats if s.get('type')=='ItemLevel'),'—')
-    embed=discord.Embed(title=f"{profile.get('characterName','Персонаж')} · {profile.get('serverName','EU')}",color=discord.Color.green())
-    embed.description=(f"**{safe(profile.get('className','—'))}**, уровень **{profile.get('characterLevel','—')}**\n"
-                       f"Уровень предметов: **{item_level}** · Боевая мощь: **{profile.get('combatPower','—')}**\n"
-                       f"Раса: {safe(profile.get('raceName','—'))}\nЛегион: {safe(profile.get('regionName') or '—')}\n"
-                       f"Титул: {safe(profile.get('titleName') or '—')}")
-    embed.set_footer(text="Данные публичного сайта NC (кэш до 5 минут). Привязка не подтверждает владение аккаунтом. Odyle-энергия API не предоставлена.")
+    classes={'Ranger':'Стрелок','Gladiator':'Гладиатор','Templar':'Страж','Assassin':'Убийца',
+             'Sorcerer':'Волшебник','Spiritmaster':'Заклинатель','Cleric':'Целитель','Chanter':'Чародей'}
+    races={'Elyos':'Элийцы','Asmodian':'Асмодиане','Asmodians':'Асмодиане'}
+    genders={'Female':'Женский','Male':'Мужской'}
+    def shown(value):
+        return safe(value if value is not None and value!='' else '—')[:1024]
+    server=profile.get('serverName') or 'EU'
+    if server=='Daminu': server='Дамину'
+    embed=discord.Embed(title=f"{safe(profile.get('characterName') or 'Персонаж')} · {safe(server)}"[:256],color=discord.Color.green())
+    embed.description=(f"**{shown(classes.get(profile.get('className'),profile.get('className')))}** · "
+                       f"уровень **{shown(profile.get('characterLevel'))}**\n"
+                       f"Уровень предметов: **{shown(item_level)}**\n"
+                       f"Боевая мощь: **{shown(profile.get('combatPower'))}**")
+    embed.add_field(name="Раса",value=shown(races.get(profile.get('raceName'),profile.get('raceName'))))
+    embed.add_field(name="Пол",value=shown(genders.get(profile.get('genderName'),profile.get('genderName'))))
+    embed.add_field(name="Регион",value="Global / Европа")
+    embed.add_field(name="Легион",value=shown(profile.get('regionName')),inline=False)
+    embed.add_field(name="Титул",value=shown(profile.get('titleName')),inline=False)
+    portrait=profile.get('profileImage')
+    if isinstance(portrait,str):
+        try:
+            parsed=urlsplit(portrait)
+            if parsed.scheme=='https' and parsed.hostname=='profileimg.plaync.com' and not parsed.username and not parsed.password:
+                embed.set_thumbnail(url=portrait)
+        except ValueError:
+            pass
+    embed.set_footer(text="Публичные данные NC · кэш до 5 минут · все исходные поля — в «Полный JSON». Энергия Odyle недоступна.")
     return embed
 
 
@@ -99,14 +122,15 @@ class CharacterPicker(discord.ui.Select):
 
 class SectionPicker(discord.ui.Select):
     def __init__(self):
-        labels={'overview':'Карточка','profile':'Профиль: все поля','stat':'Характеристики: все поля','title':'Титулы','ranking':'Рейтинги','daevanion':'Daevanion','equipment':'Экипировка и облики','petwing':'Питомец и крылья','skill':'Навыки','all':'Исходные ответы API'}
+        labels={'overview':'Карточка','profile':'Профиль персонажа','stat':'Характеристики','title':'Титулы','ranking':'Рейтинги','daevanion':'Daevanion','equipment':'Экипировка и облики','petwing':'Питомец и крылья','skill':'Навыки','all':'Исходные ответы API (JSON)'}
         super().__init__(placeholder="Какой раздел посмотреть?",options=[discord.SelectOption(label=label,value=key) for key,label in labels.items()],row=0)
 
     async def callback(self,interaction):
         view=self.view
         key=self.values[0]
-        if key=='overview':
+        if key in {'overview','profile'}:
             view.pages=[]
+            view.sync_paging()
             await interaction.response.edit_message(embed=overview(view.bundle),view=view)
             return
         if key=='all':
@@ -115,7 +139,10 @@ class SectionPicker(discord.ui.Select):
             data=view.bundle['info'][key]
         else:
             data=(view.bundle.get('equipment') or {}).get(key)
-        view.set_pages(key,data)
+        if key=='all':
+            view.set_pages('Исходные ответы API',data)
+        else:
+            view.set_section(key,data)
         await interaction.response.edit_message(embed=view.page_embed(),view=view)
 
 
@@ -132,7 +159,7 @@ class DetailPicker(discord.ui.Select):
             extra={'id':row['id'],'enchantLevel':row.get('enchantLevel',0),'slotPos':row['slotPos']} if self.kind=='item' else {'boardId':row['id']}
             data=await api.section(self.view.bundle['ref'],self.kind,**extra)
             view=CharacterDataView(self.view.actor_id,self.view.target_id,self.view.bundle,self.view.account_id,self.view.can_manage(interaction))
-            view.set_pages(str(row.get('name',self.kind)),data)
+            view.set_section(self.kind,{**row,**data},str(row.get('name','Предмет' if self.kind=='item' else 'Daevanion')))
             await interaction.followup.send(embed=view.page_embed(),view=view,ephemeral=True)
         except (ValueError,RuntimeError) as exc:
             await interaction.followup.send(str(exc),ephemeral=True)
@@ -150,6 +177,15 @@ class CharacterDataView(OwnedView):
         if boards: self.add_item(DetailPicker(boards[:25],'board'))
         self.link_button.disabled=not can_manage
         self.unlink_button.disabled=not can_manage or not account_id
+        self.sync_paging()
+
+    def sync_paging(self):
+        self.prev.disabled=self.next.disabled=len(self.pages)<2
+
+    def set_section(self,key,data,title=None):
+        self.section=key; self.page=0
+        self.pages=section_pages(key,data,title)
+        self.sync_paging()
 
     def set_pages(self,title,data):
         self.section=title; self.page=0
@@ -159,8 +195,11 @@ class CharacterDataView(OwnedView):
             text=json.dumps(data,ensure_ascii=False,indent=2)
         text=discord.utils.escape_mentions(text).replace('```','`\u200b``')
         self.pages=[text[i:i+3400] for i in range(0,len(text),3400)] or ['Нет данных.']
+        self.sync_paging()
 
     def page_embed(self):
+        if isinstance(self.pages[self.page],discord.Embed):
+            return self.pages[self.page].copy().set_footer(text=f"Страница {self.page+1}/{len(self.pages)} · NC / EU · кэш до 5 минут · ◀ ▶ листать")
         return discord.Embed(title=self.section[:200],description=f"```json\n{self.pages[self.page]}\n```").set_footer(text=f"Страница {self.page+1}/{len(self.pages)} · все поля ответа NC; для скачивания — Полный JSON")
 
     @discord.ui.button(label="Привязать / сделать основным",row=3,style=discord.ButtonStyle.success)

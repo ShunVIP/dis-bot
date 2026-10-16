@@ -63,6 +63,39 @@ class CharacterStoreTests(unittest.TestCase):
 
 
 class CharacterApiTests(unittest.TestCase):
+    def test_profile_is_readable_and_uses_only_nc_portrait(self):
+        info=copy.deepcopy(INFO)
+        info['profile'].update(raceName='Elyos',genderName='Female',regionName='BlackPhoenix',
+                               titleName='Encountering Kaisinel’s Core',profileImage='https://profileimg.plaync.com/portrait.png')
+        bundle={'info':info}
+        embed=overview(bundle)
+        self.assertIn('Aliciá',embed.title)
+        self.assertIn('Дамину',embed.title)
+        self.assertIn('Стрелок',embed.description)
+        self.assertIn('67903',embed.description)
+        fields={field.name:field.value for field in embed.fields}
+        self.assertEqual(fields['Раса'],'Элийцы')
+        self.assertEqual(fields['Легион'],'BlackPhoenix')
+        self.assertEqual(embed.thumbnail.url,'https://profileimg.plaync.com/portrait.png')
+        self.assertNotIn('characterId',str(embed.to_dict()))
+        info['profile']['profileImage']='https://untrusted.example/portrait.png'
+        self.assertFalse(overview(bundle).thumbnail.url)
+
+    def test_profile_picker_does_not_render_json(self):
+        async def check():
+            bundle={'ref':REF,'info':INFO,'equipment':EQUIPMENT,'errors':{}}
+            view=CharacterDataView(1,1,bundle)
+            picker=next(child for child in view.children if child.__class__.__name__=='SectionPicker')
+            picker._values=['profile']
+            response=SimpleNamespace(edit_message=AsyncMock())
+            await picker.callback(SimpleNamespace(response=response))
+            embed=response.edit_message.call_args.kwargs['embed']
+            self.assertNotIn('```',embed.description)
+            self.assertIn('Aliciá',embed.title)
+            self.assertEqual(view.pages,[])
+            view.stop()
+        asyncio.run(check())
+
     def test_refs_decode_once_and_reject_untrusted_ids(self):
         self.assertEqual(api.character_ref(1314,CHAR_ID.replace('=','%3D'))['character_id'],CHAR_ID)
         with self.assertRaises(ValueError): api.character_ref(1314,'https://evil.example')
