@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import secrets
 import time
@@ -1482,7 +1483,19 @@ async def start_admin_panel(bot, log) -> None:
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, WEB_ADMIN_HOST, WEB_ADMIN_PORT)
-    await site.start()
+    try:
+        await site.start()
+    except OSError as exc:
+        await runner.cleanup()
+        if exc.errno not in {errno.EADDRNOTAVAIL, errno.EADDRINUSE, 10049, 10048}:
+            raise
+        bot.admin_panel_runner = None
+        bot.admin_panel_unavailable_reason = str(exc)
+        log.bind(src="admin-web").warning(
+            f"Админ-панель недоступна на {WEB_ADMIN_HOST}:{WEB_ADMIN_PORT}: {exc}. "
+            "Discord-бот продолжает запуск. Проверь приватную сеть и перезапусти бота после её восстановления."
+        )
+        return
 
     bot.admin_panel_runner = runner
     log.bind(src="admin-web").info(
