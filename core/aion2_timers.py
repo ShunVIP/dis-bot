@@ -61,3 +61,11 @@ def due_notice(now, lead_minutes=5):
     if data["weekly"] == target:
         names.append("📅 Еженедельный сброс")
     return {"key":target.isoformat(),"starts_at":target,"names":names}
+
+
+def notice_expires_at(starts_at):
+    """Combined reminders expire when the last entrance window closes."""
+    if starts_at.tzinfo is None:
+        raise ValueError("timezone-aware datetime required")
+    starts_at = starts_at.astimezone(UTC)
+    return starts_at + timedelta(minutes=10 if starts_at.hour % 3 == 0 else 2)
