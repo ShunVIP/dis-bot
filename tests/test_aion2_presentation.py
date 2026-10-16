@@ -67,7 +67,7 @@ class CharacterPresentationTests(unittest.IsolatedAsyncioTestCase):
         rendered=' '.join(str(p.to_dict()) for p in pages)
         self.assertIn('Здоровье +500',rendered)
         self.assertIn('Power',rendered)
-        self.assertIn('Открыто 1 из 2',rendered)
+        self.assertIn('Открыто 1 из 1',rendered)
         self.assertNotIn('nodeList',rendered)
 
     async def test_empty_partial_and_large_sections_fit_discord(self):

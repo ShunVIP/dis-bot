@@ -180,14 +180,16 @@ def row_pages(row, heading, *, kind=None):
     if properties:
         fields.insert(0, ('Свойства', '\n'.join(properties)))
     if kind == 'board':
-        nodes = row.get('nodeList') or []
+        nodes = [node for node in row.get('nodeList') or []
+                 if node.get('type') != 'None' or node.get('effectList') or node.get('name')]
         fields.insert(0, ('Узлы', f"Открыто {sum(bool(n.get('open')) for n in nodes)} из {len(nodes)}"))
+        node_lines = []
         for node in nodes:
-            if node.get('type') == 'None' and not node.get('effectList'):
-                continue
             node_name = node.get('name') or f"Узел {node.get('row', '?')}:{node.get('col', '?')}"
-            fields.append((('✅ ' if node.get('open') else '🔒 ')+node_name,
-                           readable(node.get('effectList')) if node.get('effectList') else 'Эффекты не указаны.'))
+            effects = readable(node.get('effectList')).replace('\n', '; ') if node.get('effectList') else 'Эффекты не указаны.'
+            node_lines.append(('✅ ' if node.get('open') else '🔒 ')+text(node_name)+': '+effects)
+        if node_lines:
+            fields.append(('Узлы и эффекты', '\n'.join(node_lines)))
     return fields_pages(title, fields, row.get('icon'), COLORS.get(row.get('grade'), 0x3498db))
 
 
