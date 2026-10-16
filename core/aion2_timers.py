@@ -44,3 +44,20 @@ def snapshot(now=None):
         "weekly": next_reset(now, weekly=True),
         "recheck_due": now.astimezone(UTC) >= DST_RECHECK,
     }
+
+
+def due_notice(now, lead_minutes=5):
+    """One combined reminder for coincident events, only in the lead window."""
+    data = snapshot(now)
+    target = data["shugo"]
+    remaining = (target-data["now"]).total_seconds()
+    if not 0 < remaining <= lead_minutes*60:
+        return None
+    names = ["🎪 Фестиваль шуго"]
+    if data["rifts"][0] == target:
+        names.append("🌀 Рифт")
+    if data["daily"] == target:
+        names.append("🌅 Ежедневный сброс")
+    if data["weekly"] == target:
+        names.append("📅 Еженедельный сброс")
+    return {"key":target.isoformat(),"starts_at":target,"names":names}

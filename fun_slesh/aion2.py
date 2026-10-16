@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from core import aion2_service as service, aion2_store as store
 from core import aion2_timers
+from core import settings_store
+
+log = logging.getLogger(__name__)
+TIMERS_FEATURE = "aion2_timers"
+DASHBOARD_MARKER = "AION2-EU timers"
 
 
 def safe(value):
@@ -184,12 +190,91 @@ class Aion2(commands.Cog):
     def __init__(self,bot):
         self.bot=bot
 
+    async def cog_load(self):
+        self.timer_posts.start()
+
+    def cog_unload(self):
+        self.timer_posts.cancel()
+
+    async def _recent_post(self,channel,marker):
+        async for message in channel.history(limit=30):
+            if message.author.id == self.bot.user.id and any(
+                (embed.footer.text or "").endswith(marker) for embed in message.embeds
+            ):
+                return message
+        return None
+
+    async def _publish_timers(self,guild,now):
+        policy = await asyncio.to_thread(settings_store.get_feature_policy,guild.id,TIMERS_FEATURE)
+        if not policy.enabled or not policy.output_channel_id:
+            return
+        channel = guild.get_channel(policy.output_channel_id)
+        if not isinstance(channel,discord.TextChannel) or guild.me is None:
+            return
+        perms = channel.permissions_for(guild.me)
+        if not (perms.view_channel and perms.send_messages and perms.embed_links and perms.read_message_history):
+            return
+        state = await asyncio.to_thread(settings_store.get_feature_runtime_state,guild.id,TIMERS_FEATURE)
+        if state.get("channel_id") != channel.id:
+            state = {"channel_id":channel.id,"message_id":None,"dashboard_key":None,"last_notice_key":None}
+        data = aion2_timers.snapshot(now)
+        dashboard_key = data["shugo"].isoformat()
+        if state.get("dashboard_key") != dashboard_key:
+            message = None
+            if state.get("message_id"):
+                try:
+                    message = await channel.fetch_message(int(state["message_id"]))
+                    if message.author.id != self.bot.user.id:
+                        message = None
+                except discord.NotFound:
+                    pass
+            if message is None:
+                message = await self._recent_post(channel,DASHBOARD_MARKER)
+            embed = timer_embed(now)
+            embed.set_footer(text=embed.footer.text+"\n"+DASHBOARD_MARKER)
+            if message:
+                await message.edit(embed=embed)
+            else:
+                message = await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+            if not message.pinned and perms.manage_messages:
+                try:
+                    await message.pin(reason="Окно таймеров Aion 2 по просьбе владельца сервера")
+                except discord.HTTPException:
+                    log.warning("Aion2 dashboard pin failed guild=%s channel=%s",guild.id,channel.id)
+            state.update(message_id=message.id,dashboard_key=dashboard_key)
+            await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,TIMERS_FEATURE,state)
+        notice = aion2_timers.due_notice(now)
+        if not notice or state.get("last_notice_key") == notice["key"]:
+            return
+        marker = "AION2-EU notice " + notice["key"]
+        previous = await self._recent_post(channel,marker)
+        if previous is None:
+            starts = notice["starts_at"]
+            embed = discord.Embed(title="Aion 2 — скоро начало",description="\n".join(notice["names"])+f"\n\n**{starts.astimezone(service.MSK):%H:%M} МСК** · <t:{int(starts.timestamp())}:R>",color=discord.Color.blue())
+            embed.set_footer(text="Расчётное расписание EU. Техработы могут изменить время.\n"+marker)
+            await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+        state["last_notice_key"] = notice["key"]
+        await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,TIMERS_FEATURE,state)
+
+    @tasks.loop(seconds=60)
+    async def timer_posts(self):
+        now = datetime.now(timezone.utc)
+        for guild in self.bot.guilds:
+            try:
+                await self._publish_timers(guild,now)
+            except Exception:
+                log.exception("Aion2 timer delivery failed guild=%s",guild.id)
+
+    @timer_posts.before_loop
+    async def before_timer_posts(self):
+        await self.bot.wait_until_ready()
+
     async def open_hub(self,interaction):
         if not interaction.guild_id:
             await interaction.response.send_message("Раздел Aion 2 доступен на сервере.",ephemeral=True)
             return
         await interaction.response.send_message(
-            "**Aion 2**\nОфициальные новости Global, техработы и события; карточки игроков Global/KR/TW; расписание вашей группы по МСК.\nПоиск и характеристики персонажей доступны на официальном сайте. Подписки и автопубликации не включены.",
+            "**Aion 2**\nОфициальные новости Global, техработы и события; карточки игроков Global/KR/TW; расписание вашей группы по МСК.\nПоиск и характеристики персонажей доступны на официальном сайте. Таймеры публикуются только в специально настроенный администрацией канал.",
             view=Aion2View(interaction.user.id),ephemeral=True)
 
 
