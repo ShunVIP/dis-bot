@@ -96,6 +96,6 @@ class Aion2DeliveryTests(unittest.TestCase):
                 self.assertEqual(settings_store.get_feature_runtime_state(1,TIMERS_FEATURE)['pending_notices'],[])
         asyncio.run(check())
 
-    def test_shugo_only_expires_two_minutes_after_start(self):
+    def test_shugo_only_expires_three_minutes_after_start(self):
         starts=datetime(2026,10,16,13,tzinfo=timezone.utc)
-        self.assertEqual(aion2_timers.notice_expires_at(starts).isoformat(),'2026-10-16T13:02:00+00:00')
+        self.assertEqual(aion2_timers.notice_expires_at(starts).isoformat(),'2026-10-16T13:03:00+00:00')

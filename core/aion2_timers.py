@@ -68,4 +68,4 @@ def notice_expires_at(starts_at):
     if starts_at.tzinfo is None:
         raise ValueError("timezone-aware datetime required")
     starts_at = starts_at.astimezone(UTC)
-    return starts_at + timedelta(minutes=10 if starts_at.hour % 3 == 0 else 2)
+    return starts_at + timedelta(minutes=10 if starts_at.hour % 3 == 0 else 3)
