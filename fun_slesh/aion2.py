@@ -9,10 +9,40 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import aion2_service as service, aion2_store as store
+from core import aion2_timers
 
 
 def safe(value):
     return discord.utils.escape_mentions(discord.utils.escape_markdown(str(value)))
+
+
+def timer_embed(now=None):
+    data = aion2_timers.snapshot(now)
+    def display(when):
+        return f"**{when.astimezone(service.MSK):%d.%m %H:%M} МСК** · <t:{int(when.timestamp())}:R>"
+    embed = discord.Embed(title="Aion 2 — таймеры Global / Европа", color=discord.Color.blue())
+    embed.add_field(name="🎪 Фестиваль шуго", value=display(data["shugo"])+"\nКаждый час, в :00. Вход короткий — будь готов заранее.",inline=False)
+    embed.add_field(name="🌀 Ближайший рифт", value=display(data["rifts"][0])+"\nДалее по МСК: "+", ".join(f"{when.astimezone(service.MSK):%d.%m %H:%M}" for when in data["rifts"][1:])+"\nКаждые 3 часа: 00, 03, 06, 09, 12, 15, 18, 21 UTC.",inline=False)
+    embed.add_field(name="🌅 Ежедневный сброс",value=display(data["daily"])+"\nКаждый день в 10:00 МСК (07:00 UTC).",inline=False)
+    embed.add_field(name="📅 Еженедельный сброс",value=display(data["weekly"])+"\nСреда, 10:00 МСК (07:00 UTC).",inline=False)
+    note = "⚠️ После перевода часов 25.10 расписание требует повторной сверки с игрой.\n" if data["recheck_due"] else "После перевода часов 25.10 сверяй расписание с игрой.\n"
+    embed.description = note + f"Расчёт по [наблюдениям игроков EU]({aion2_timers.SOURCE_URL}), проверено {aion2_timers.VERIFIED_ON}. Техработы могут изменить открытие событий."
+    embed.set_footer(text="Отсчёт Discord обновляется сам; кнопка «Обновить» пересчитывает ближайшие события. Это не live-проверка игровых серверов.")
+    embed.timestamp = data["now"]
+    return embed
+
+
+class TimerView(discord.ui.View):
+    def __init__(self,user_id):
+        super().__init__(timeout=900)
+        self.user_id=user_id
+
+    @discord.ui.button(label="Обновить таймеры",emoji="🔄")
+    async def refresh(self,interaction,button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Открой таймеры в своём окне Aion 2.",ephemeral=True)
+            return
+        await interaction.response.edit_message(embed=timer_embed(),view=self)
 
 
 class MemberModal(discord.ui.Modal, title="Мой персонаж Aion 2"):
@@ -95,6 +125,10 @@ class Aion2View(discord.ui.View):
     @discord.ui.button(label="Новости Global",emoji="📰",row=0)
     async def news_button(self, interaction, button):
         await self.news(interaction)
+
+    @discord.ui.button(label="Таймеры EU",emoji="⏱️",row=4)
+    async def timers(self,interaction,button):
+        await interaction.response.send_message(embed=timer_embed(),view=TimerView(interaction.user.id),ephemeral=True)
 
     @discord.ui.button(label="Техработы Global",emoji="🔧",row=0)
     async def maintenance(self, interaction, button):
