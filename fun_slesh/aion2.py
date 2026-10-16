@@ -12,6 +12,8 @@ from discord.ext import commands, tasks
 from core import aion2_service as service, aion2_store as store
 from core import aion2_timers
 from core import settings_store
+from core import aion2_character_store
+from fun_slesh.aion2_ui.characters import open_character_hub
 
 log = logging.getLogger(__name__)
 TIMERS_FEATURE = "aion2_timers"
@@ -144,18 +146,25 @@ class Aion2View(discord.ui.View):
     async def events_news(self, interaction, button):
         await self.news(interaction,"event")
 
-    @discord.ui.button(label="Мой персонаж",emoji="👤",row=1)
+    @discord.ui.button(label="Персонажи / API",emoji="👤",row=1)
     async def profile(self, interaction, button):
+        await open_character_hub(interaction)
+
+    @discord.ui.button(label="Ручная карточка",row=4)
+    async def manual_profile(self,interaction,button):
         await interaction.response.send_modal(MemberModal())
 
     @discord.ui.button(label="Состав",emoji="👥",row=1)
     async def roster(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
         members = await asyncio.to_thread(store.list_members,interaction.guild_id)
-        lines = [f"<@{m['user_id']}> · **{safe(m['nickname'])}** · {safe(m['class_name'])} · {service.REGIONS.get(m['region'],m['region'])} / {safe(m['server'])}" for m in members]
+        linked = await asyncio.to_thread(aion2_character_store.roster,[m.id for m in interaction.guild.members if not m.bot])
+        linked_users = {m['user_id'] for m in linked}
+        lines = [f"<@{m['user_id']}> · **{safe(m['name'])}** · EU / сервер {m['server_id']} · привязка API" for m in linked]
+        lines += [f"<@{m['user_id']}> · **{safe(m['nickname'])}** · {safe(m['class_name'])} · {service.REGIONS.get(m['region'],m['region'])} / {safe(m['server'])}" for m in members if m['user_id'] not in linked_users]
         await interaction.followup.send(embed=discord.Embed(title="Aion 2 — состав сервера",description=("\n".join(lines)[:3900] or "Пока нет карточек. Добавь свою кнопкой «Мой персонаж».")),ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
 
-    @discord.ui.button(label="Удалить мою карточку",row=1)
+    @discord.ui.button(label="Удалить ручную карточку",row=1)
     async def forget(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
         await asyncio.to_thread(store.delete_member,interaction.guild_id,interaction.user.id)
