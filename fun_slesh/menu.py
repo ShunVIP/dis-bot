@@ -1251,6 +1251,9 @@ async def _send_games_hub(bot: commands.Bot, interaction: discord.Interaction):
     async def wwm(next_interaction: discord.Interaction):
         await _send_wwm_hub(bot, next_interaction)
 
+    async def aion2(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "Aion2", "open_hub")
+
     async def raid(next_interaction: discord.Interaction):
         await _invoke_cog_action(
             bot, next_interaction, "RaidSchedule", "рейд", дата=None
@@ -1259,7 +1262,7 @@ async def _send_games_hub(bot: commands.Bot, interaction: discord.Interaction):
     await _send_action_picker(
         interaction,
         title="🎮 Игровой хаб",
-        description="Один вход для мини-игр, рейдов, Steam, LoL и WWM.",
+        description="Один вход для мини-игр, рейдов, Steam, LoL, WWM и Aion 2.",
         placeholder="Выбери игровой раздел",
         options=[
             discord.SelectOption(label="КНБ", value="rps", emoji="✊"),
@@ -1269,6 +1272,7 @@ async def _send_games_hub(bot: commands.Bot, interaction: discord.Interaction):
             discord.SelectOption(label="Steam", value="steam", emoji="🎮"),
             discord.SelectOption(label="League of Legends", value="lol", emoji="🧬"),
             discord.SelectOption(label="WWM", value="wwm", emoji="🌿"),
+            discord.SelectOption(label="Aion 2", value="aion2", emoji="🪽"),
             discord.SelectOption(label="Расписание рейда", value="raid", emoji="🗓️"),
         ],
         callbacks={
@@ -1279,6 +1283,7 @@ async def _send_games_hub(bot: commands.Bot, interaction: discord.Interaction):
             "steam": steam,
             "lol": lol,
             "wwm": wwm,
+            "aion2": aion2,
             "raid": raid,
         },
     )
