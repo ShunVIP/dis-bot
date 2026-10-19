@@ -15,10 +15,14 @@ from core.aion2_presence import has_players
 from core import settings_store
 from core import aion2_character_store
 from fun_slesh.aion2_ui.characters import open_character_hub
+from core import aion2_boss_service
+from fun_slesh.aion2_ui.bosses import open_bosses, boss_embed, BossBoardView
 
 log = logging.getLogger(__name__)
 TIMERS_FEATURE = "aion2_timers"
 DASHBOARD_MARKER = "AION2-EU timers"
+BOSSES_MARKER = "AION2-EU bosses 1314"
+BOSSES_STATE = "aion2_bosses"
 
 
 def safe(value):
@@ -156,6 +160,10 @@ class Aion2View(discord.ui.View):
     async def manual_profile(self,interaction,button):
         await interaction.response.send_modal(MemberModal())
 
+    @discord.ui.button(label="Боссы Дамину",emoji="🐉",row=4)
+    async def bosses(self,interaction,button):
+        await open_bosses(interaction)
+
     @discord.ui.button(label="Состав",emoji="👥",row=1)
     async def roster(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
@@ -204,9 +212,11 @@ class Aion2(commands.Cog):
 
     async def cog_load(self):
         self.timer_posts.start()
+        self.boss_posts.start()
 
     def cog_unload(self):
         self.timer_posts.cancel()
+        self.boss_posts.cancel()
 
     async def _recent_post(self,channel,marker):
         async for message in channel.history(limit=30):
@@ -336,6 +346,51 @@ class Aion2(commands.Cog):
 
     @timer_posts.before_loop
     async def before_timer_posts(self):
+        await self.bot.wait_until_ready()
+
+    async def _publish_bosses(self,guild):
+        policy = await asyncio.to_thread(settings_store.get_feature_policy,guild.id,TIMERS_FEATURE)
+        if not policy.enabled or not policy.output_channel_id:
+            return
+        channel = guild.get_channel(policy.output_channel_id)
+        if not isinstance(channel,discord.TextChannel) or guild.me is None:
+            return
+        perms = channel.permissions_for(guild.me)
+        if not (perms.view_channel and perms.read_message_history and perms.send_messages and perms.embed_links):
+            return
+        try:
+            snapshot = await aion2_boss_service.get_snapshot()
+            embed,_ = boss_embed(snapshot,compact=True)
+        except RuntimeError:
+            embed = discord.Embed(title="Мировые боссы · Дамину / EU",description="⚠️ Источник A2Tools временно недоступен. Время появления неизвестно. Повторная проверка через 3 минуты.",color=discord.Color.orange())
+        embed.set_footer(text=(embed.footer.text or "Данные сообщества A2Tools, не официальный API NC")+"\n"+BOSSES_MARKER)
+        state = await asyncio.to_thread(settings_store.get_feature_runtime_state,guild.id,BOSSES_STATE)
+        message = None
+        if state.get("channel_id")==channel.id and state.get("message_id"):
+            try:
+                message = await channel.fetch_message(int(state["message_id"]))
+                if message.author.id!=self.bot.user.id:
+                    message=None
+            except discord.NotFound:
+                pass
+        if message is None:
+            message = await self._recent_post(channel,BOSSES_MARKER)
+        if message:
+            await message.edit(embed=embed,view=BossBoardView(),allowed_mentions=discord.AllowedMentions.none())
+        else:
+            message = await channel.send(embed=embed,view=BossBoardView(),allowed_mentions=discord.AllowedMentions.none())
+        await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,BOSSES_STATE,{"channel_id":channel.id,"message_id":message.id})
+
+    @tasks.loop(minutes=3)
+    async def boss_posts(self):
+        for guild in self.bot.guilds:
+            try:
+                await self._publish_bosses(guild)
+            except Exception:
+                log.exception("Aion2 boss board failed guild=%s",guild.id)
+
+    @boss_posts.before_loop
+    async def before_boss_posts(self):
         await self.bot.wait_until_ready()
 
     async def open_hub(self,interaction):
