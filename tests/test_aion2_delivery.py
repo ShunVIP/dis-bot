@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import unittest
+import discord
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from core import aion2_timers, settings_store
 from fun_slesh.aion2 import Aion2, TIMERS_FEATURE
+from core.aion2_presence import is_playing_aion2, has_players
 
 
 class Channel:
@@ -15,6 +17,7 @@ class Channel:
 
     def __init__(self):
         self.messages = []
+        self.members = []
         self.send = AsyncMock(side_effect=self._send)
 
     def permissions_for(self,member):
@@ -22,6 +25,13 @@ class Channel:
 
     async def _send(self,**kwargs):
         message = SimpleNamespace(id=len(self.messages)+1,author=SimpleNamespace(id=42),embeds=[kwargs['embed']],pinned=False,edit=AsyncMock(),delete=AsyncMock())
+        async def edit(**values):
+            message.embeds=[values['embed']]
+        async def delete():
+            if message in self.messages:
+                self.messages.remove(message)
+        message.edit.side_effect=edit
+        message.delete.side_effect=delete
         self.messages.insert(0,message)
         return message
 
@@ -99,3 +109,56 @@ class Aion2DeliveryTests(unittest.TestCase):
     def test_shugo_only_expires_three_minutes_after_start(self):
         starts=datetime(2026,10,16,13,tzinfo=timezone.utc)
         self.assertEqual(aion2_timers.notice_expires_at(starts).isoformat(),'2026-10-16T13:03:00+00:00')
+
+    def test_only_playing_presence_counts_not_custom_status_other_game_or_bot(self):
+        def member(name,kind=discord.ActivityType.playing,bot=False):
+            return SimpleNamespace(bot=bot,activities=[SimpleNamespace(name=name,type=kind)])
+        for name in ['AION 2','Aion2','AION Ⅱ','AION 2 (Global)','아이온2']:
+            self.assertTrue(is_playing_aion2(member(name)))
+        for m in [member('AION'),member('AION 20'),member('AION 2',discord.ActivityType.custom),member('AION 2',bot=True),SimpleNamespace(activities=[])]:
+            self.assertFalse(is_playing_aion2(m))
+        self.assertFalse(has_players(SimpleNamespace(members=[])))
+
+    def test_shugo_suppressed_without_players_then_appears_and_is_removed_on_exit(self):
+        async def check():
+            channel=Channel()
+            guild=SimpleNamespace(id=1,me=object(),get_channel=lambda _:channel)
+            cog=Aion2(SimpleNamespace(user=SimpleNamespace(id=42)))
+            settings_store.set_feature_channel(1,TIMERS_FEATURE,123,'output')
+            now=datetime(2026,10,16,12,55,tzinfo=timezone.utc)
+            with patch('fun_slesh.aion2.discord.TextChannel',Channel):
+                await cog._publish_timers(guild,now)
+                self.assertEqual(channel.send.await_count,1)
+                self.assertFalse(any('шуго' in f.name for f in channel.messages[0].embeds[0].fields))
+                channel.members=[SimpleNamespace(bot=False,activities=[discord.Game('AION 2')])]
+                await cog._publish_timers(guild,now)
+                notice=channel.messages[0]
+                self.assertIn('шуго',notice.embeds[0].description)
+                self.assertEqual(channel.send.await_count,2)
+                channel.members=[]
+                await cog._publish_timers(guild,now)
+                notice.delete.assert_awaited_once()
+                self.assertEqual(settings_store.get_feature_runtime_state(1,TIMERS_FEATURE)['pending_notices'],[])
+        asyncio.run(check())
+
+    def test_combined_rift_stays_without_shugo_and_updates_when_activity_changes(self):
+        async def check():
+            channel=Channel()
+            guild=SimpleNamespace(id=1,me=object(),get_channel=lambda _:channel)
+            cog=Aion2(SimpleNamespace(user=SimpleNamespace(id=42)))
+            settings_store.set_feature_channel(1,TIMERS_FEATURE,123,'output')
+            now=datetime(2026,10,16,11,55,tzinfo=timezone.utc)
+            with patch('fun_slesh.aion2.discord.TextChannel',Channel):
+                await cog._publish_timers(guild,now)
+                notice=channel.messages[0]
+                self.assertIn('Рифт',notice.embeds[0].description)
+                self.assertNotIn('шуго',notice.embeds[0].description)
+                channel.members=[SimpleNamespace(bot=False,activities=[discord.Game('AION 2')])]
+                await cog._publish_timers(guild,now)
+                self.assertIn('шуго',notice.embeds[0].description)
+                channel.members=[]
+                await cog._publish_timers(guild,now)
+                self.assertNotIn('шуго',notice.embeds[0].description)
+                self.assertEqual(channel.send.await_count,2)
+                notice.delete.assert_not_awaited()
+        asyncio.run(check())

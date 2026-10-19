@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 
 from core import aion2_service as service, aion2_store as store
 from core import aion2_timers
+from core.aion2_presence import has_players
 from core import settings_store
 from core import aion2_character_store
 from fun_slesh.aion2_ui.characters import open_character_hub
@@ -24,12 +25,13 @@ def safe(value):
     return discord.utils.escape_mentions(discord.utils.escape_markdown(str(value)))
 
 
-def timer_embed(now=None):
+def timer_embed(now=None, *, show_shugo=True):
     data = aion2_timers.snapshot(now)
     def display(when):
         return f"**{when.astimezone(service.MSK):%d.%m %H:%M} МСК** · <t:{int(when.timestamp())}:R>"
     embed = discord.Embed(title="Aion 2 — таймеры Global / Европа", color=discord.Color.blue())
-    embed.add_field(name="🎪 Фестиваль шуго", value=display(data["shugo"])+"\nКаждый час, в :00. Вход короткий — будь готов заранее.",inline=False)
+    if show_shugo:
+        embed.add_field(name="🎪 Фестиваль шуго", value=display(data["shugo"])+"\nКаждый час, в :00. Вход короткий — будь готов заранее.",inline=False)
     embed.add_field(name="🌀 Ближайший рифт", value=display(data["rifts"][0])+"\nДалее по МСК: "+", ".join(f"{when.astimezone(service.MSK):%d.%m %H:%M}" for when in data["rifts"][1:])+"\nКаждые 3 часа: 00, 03, 06, 09, 12, 15, 18, 21 UTC.",inline=False)
     embed.add_field(name="🌅 Ежедневный сброс",value=display(data["daily"])+"\nКаждый день в 10:00 МСК (07:00 UTC).",inline=False)
     embed.add_field(name="📅 Еженедельный сброс",value=display(data["weekly"])+"\nСреда, 10:00 МСК (07:00 UTC).",inline=False)
@@ -267,7 +269,8 @@ class Aion2(commands.Cog):
         if not policy.enabled or not (perms.send_messages and perms.embed_links):
             return
         data = aion2_timers.snapshot(now)
-        dashboard_key = data["shugo"].isoformat()
+        show_shugo = has_players(channel)
+        dashboard_key = data["shugo"].isoformat()+f":shugo={int(show_shugo)}"
         if state.get("dashboard_key") != dashboard_key:
             message = None
             if state.get("message_id"):
@@ -279,7 +282,7 @@ class Aion2(commands.Cog):
                     pass
             if message is None:
                 message = await self._recent_post(channel,DASHBOARD_MARKER)
-            embed = timer_embed(now)
+            embed = timer_embed(now,show_shugo=show_shugo)
             embed.set_footer(text=embed.footer.text+"\n"+DASHBOARD_MARKER)
             if message:
                 await message.edit(embed=embed)
@@ -293,19 +296,33 @@ class Aion2(commands.Cog):
             state.update(message_id=message.id,dashboard_key=dashboard_key)
             await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,TIMERS_FEATURE,state)
         notice = aion2_timers.due_notice(now)
-        if not notice or state.get("last_notice_key") == notice["key"]:
+        if not notice:
+            return
+        names = [name for name in notice["names"] if show_shugo or name != "🎪 Фестиваль шуго"]
+        if state.get("last_notice_key") == notice["key"] and state.get("last_notice_names") == names:
+            return
+        # Do not query channel history every 15 seconds for a suppressed Shugo-only event.
+        if not names and state.get("last_notice_key") != notice["key"]:
             return
         marker = "AION2-EU notice " + notice["key"]
         previous = await self._recent_post(channel,marker)
-        if previous is None:
-            starts = notice["starts_at"]
-            embed = discord.Embed(title="Aion 2 — скоро начало",description="\n".join(notice["names"])+f"\n\n**{starts.astimezone(service.MSK):%H:%M} МСК** · <t:{int(starts.timestamp())}:R>",color=discord.Color.blue())
-            embed.set_footer(text="Расчётное расписание EU. Техработы могут изменить время.\n"+marker)
-            previous = await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
         pending = {int(item["id"]):item for item in state.get("pending_notices",[])}
-        pending[previous.id] = {"id":previous.id,"expires_at":aion2_timers.notice_expires_at(notice["starts_at"]).isoformat()}
+        if not names:
+            if previous is not None:
+                await previous.delete()
+                pending.pop(previous.id,None)
+        else:
+            starts = notice["starts_at"]
+            embed = discord.Embed(title="Aion 2 — скоро начало",description="\n".join(names)+f"\n\n**{starts.astimezone(service.MSK):%H:%M} МСК** · <t:{int(starts.timestamp())}:R>",color=discord.Color.blue())
+            embed.set_footer(text="Расчётное расписание EU. Техработы могут изменить время.\n"+marker)
+            if previous is None:
+                previous = await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+            else:
+                await previous.edit(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+            pending[previous.id] = {"id":previous.id,"expires_at":aion2_timers.notice_expires_at(notice["starts_at"]).isoformat()}
         state["pending_notices"] = list(pending.values())
         state["last_notice_key"] = notice["key"]
+        state["last_notice_names"] = names
         await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,TIMERS_FEATURE,state)
 
     @tasks.loop(seconds=15)
