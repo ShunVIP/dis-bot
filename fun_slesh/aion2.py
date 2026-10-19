@@ -379,6 +379,11 @@ class Aion2(commands.Cog):
             await message.edit(embed=embed,view=BossBoardView(),allowed_mentions=discord.AllowedMentions.none())
         else:
             message = await channel.send(embed=embed,view=BossBoardView(),allowed_mentions=discord.AllowedMentions.none())
+        if not message.pinned and perms.manage_messages:
+            try:
+                await message.pin(reason="Постоянное расписание мировых боссов Aion 2 по просьбе владельца")
+            except discord.HTTPException:
+                log.warning("Aion2 boss board pin failed guild=%s channel=%s",guild.id,channel.id)
         await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,BOSSES_STATE,{"channel_id":channel.id,"message_id":message.id})
 
     @tasks.loop(minutes=3)

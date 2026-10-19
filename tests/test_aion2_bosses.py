@@ -88,12 +88,25 @@ class BossBoardTests(unittest.TestCase):
         try:
             async def check():
                 channel=delivery.Channel()
+                permissions=channel.permissions_for(None)
+                permissions.manage_messages=True
+                channel.permissions_for=lambda _:permissions
+                original_send=channel._send
+                async def send(**kwargs):
+                    message=await original_send(**kwargs)
+                    async def pin(**kwargs):
+                        message.pinned=True
+                    message.pin=AsyncMock(side_effect=pin)
+                    return message
+                channel.send.side_effect=send
                 guild=SimpleNamespace(id=1,me=object(),get_channel=lambda _:channel)
                 cog=Aion2(SimpleNamespace(user=SimpleNamespace(id=42)))
                 settings_store.set_feature_channel(1,TIMERS_FEATURE,123,'output')
                 with patch('fun_slesh.aion2.discord.TextChannel',delivery.Channel),patch('fun_slesh.aion2.aion2_boss_service.get_snapshot',return_value=service.normalize(PAYLOAD,CATALOG,NOW)):
                     await cog._publish_bosses(guild)
                     await cog._publish_bosses(guild)
+                    channel.messages[0].pin.assert_awaited_once()
+                    self.assertTrue(channel.messages[0].pinned)
                     self.assertEqual(channel.send.await_count,1)
                     self.assertEqual(channel.send.call_args.kwargs['allowed_mentions'].to_dict()['parse'],[])
                     self.assertTrue(settings_store.get_feature_runtime_state(1,BOSSES_STATE)['message_id'])
