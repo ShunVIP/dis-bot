@@ -5,6 +5,19 @@ UTC = timezone.utc
 SOURCE_URL = "https://space4games.com/en/games-en/aion-2-timers-guide/"
 VERIFIED_ON = "16.10.2026"
 DST_RECHECK = datetime(2026, 10, 25, 1, tzinfo=UTC)
+BOARD_REFRESH_DAYS = 7
+
+
+def board_refresh_due(created_at, now):
+    """Age of the post, not its last edit: dashboards are edited continuously."""
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.fromisoformat(created_at)
+        except ValueError:
+            return False
+    if not isinstance(created_at, datetime) or created_at.tzinfo is None:
+        return False
+    return now.astimezone(UTC)-created_at.astimezone(UTC) >= timedelta(days=BOARD_REFRESH_DAYS)
 
 
 def next_hourly(now, *, interval=1, anchor=0):

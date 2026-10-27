@@ -17,6 +17,7 @@ from core import aion2_character_store
 from fun_slesh.aion2_ui.characters import open_character_hub
 from core import aion2_boss_service
 from fun_slesh.aion2_ui.bosses import open_bosses, boss_embed, BossBoardView
+from fun_slesh.aion2_ui.boards import publish_board
 
 log = logging.getLogger(__name__)
 TIMERS_FEATURE = "aion2_timers"
@@ -281,30 +282,15 @@ class Aion2(commands.Cog):
         data = aion2_timers.snapshot(now)
         show_shugo = has_players(channel)
         dashboard_key = data["shugo"].isoformat()+f":shugo={int(show_shugo)}"
-        if state.get("dashboard_key") != dashboard_key:
-            message = None
-            if state.get("message_id"):
-                try:
-                    message = await channel.fetch_message(int(state["message_id"]))
-                    if message.author.id != self.bot.user.id:
-                        message = None
-                except discord.NotFound:
-                    pass
-            if message is None:
-                message = await self._recent_post(channel,DASHBOARD_MARKER)
+        if (state.get("dashboard_key") != dashboard_key or not state.get("board_created_at")
+                or aion2_timers.board_refresh_due(state.get("board_created_at"),now)
+                or state.get("retired_ids") or state.get("pin_pending")):
             embed = timer_embed(now,show_shugo=show_shugo)
             embed.set_footer(text=embed.footer.text+"\n"+DASHBOARD_MARKER)
-            if message:
-                await message.edit(embed=embed)
-            else:
-                message = await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
-            if not message.pinned and perms.manage_messages:
-                try:
-                    await message.pin(reason="Окно таймеров Aion 2 по просьбе владельца сервера")
-                except discord.HTTPException:
-                    log.warning("Aion2 dashboard pin failed guild=%s channel=%s",guild.id,channel.id)
-            state.update(message_id=message.id,dashboard_key=dashboard_key)
-            await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,TIMERS_FEATURE,state)
+            state["dashboard_key"] = dashboard_key
+            async def save_board(value):
+                await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,TIMERS_FEATURE,value)
+            await publish_board(channel,self.bot.user.id,state,embed,DASHBOARD_MARKER,now,save_board,can_pin=perms.manage_messages)
         notice = aion2_timers.due_notice(now)
         if not notice:
             return
@@ -365,26 +351,12 @@ class Aion2(commands.Cog):
             embed = discord.Embed(title="Мировые боссы · Дамину / EU",description="⚠️ Источник A2Tools временно недоступен. Время появления неизвестно. Повторная проверка через 3 минуты.",color=discord.Color.orange())
         embed.set_footer(text=(embed.footer.text or "Данные сообщества A2Tools, не официальный API NC")+"\n"+BOSSES_MARKER)
         state = await asyncio.to_thread(settings_store.get_feature_runtime_state,guild.id,BOSSES_STATE)
-        message = None
-        if state.get("channel_id")==channel.id and state.get("message_id"):
-            try:
-                message = await channel.fetch_message(int(state["message_id"]))
-                if message.author.id!=self.bot.user.id:
-                    message=None
-            except discord.NotFound:
-                pass
-        if message is None:
-            message = await self._recent_post(channel,BOSSES_MARKER)
-        if message:
-            await message.edit(embed=embed,view=BossBoardView(),allowed_mentions=discord.AllowedMentions.none())
-        else:
-            message = await channel.send(embed=embed,view=BossBoardView(),allowed_mentions=discord.AllowedMentions.none())
-        if not message.pinned and perms.manage_messages:
-            try:
-                await message.pin(reason="Постоянное расписание мировых боссов Aion 2 по просьбе владельца")
-            except discord.HTTPException:
-                log.warning("Aion2 boss board pin failed guild=%s channel=%s",guild.id,channel.id)
-        await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,BOSSES_STATE,{"channel_id":channel.id,"message_id":message.id})
+        if state.get("channel_id") != channel.id:
+            state = {"channel_id":channel.id}
+        async def save_board(value):
+            await asyncio.to_thread(settings_store.set_feature_runtime_state,guild.id,BOSSES_STATE,value)
+        await publish_board(channel,self.bot.user.id,state,embed,BOSSES_MARKER,datetime.now(timezone.utc),save_board,
+                            can_pin=perms.manage_messages,view=BossBoardView())
 
     @tasks.loop(minutes=3)
     async def boss_posts(self):
