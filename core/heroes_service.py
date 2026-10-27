@@ -5,7 +5,7 @@ from typing import Iterable
 
 
 UTC = timezone.utc
-EXIT_GRACE_SECONDS = 120
+EXIT_GRACE_SECONDS = 15 * 60  # Long Heroes turns: allow a ten-minute Alt+Tab gap.
 HEROES_PATTERNS = (
     "heroes of might and magic", "heroes of might & magic", "might and magic heroes",
     "might & magic heroes", "homm", "olden era", "heroes iii", "heroes iv",

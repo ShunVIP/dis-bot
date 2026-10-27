@@ -27,7 +27,7 @@ class HeroesPresenceTests(unittest.IsolatedAsyncioTestCase):
         self.cog._save_finished_session = Mock()
         self.gate = asyncio.Event()
         async def wait(seconds):
-            self.assertEqual(seconds,120)
+            self.assertEqual(seconds,900)
             await self.gate.wait()
         self.sleep_patch = patch('fun_slesh.heroes_troll.asyncio.sleep',side_effect=wait)
         self.sleep_patch.start()
