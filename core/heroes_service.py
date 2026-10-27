@@ -5,6 +5,7 @@ from typing import Iterable
 
 
 UTC = timezone.utc
+EXIT_GRACE_SECONDS = 120
 HEROES_PATTERNS = (
     "heroes of might and magic", "heroes of might & magic", "might and magic heroes",
     "might & magic heroes", "homm", "olden era", "heroes iii", "heroes iv",
@@ -49,6 +50,9 @@ def is_olden_era(name: str) -> bool:
 def extract_game_names(activities: Iterable[object]) -> set[str]:
     names = set()
     for activity in activities or ():
+        kind = getattr(activity, "type", None)
+        if getattr(kind, "value", kind) != 0:
+            continue  # Only games, not custom statuses, music, or streaming titles.
         name = getattr(activity, "name", None)
         if isinstance(name, str) and name.strip():
             names.add(name.strip())

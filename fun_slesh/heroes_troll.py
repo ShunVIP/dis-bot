@@ -17,9 +17,9 @@ from discord.ext import commands
 
 from core.heroes_service import (
     build_troll_message,
+    EXIT_GRACE_SECONDS,
     extract_game_names as _extract_game_names,
     find_active_heroes as _find_active_heroes,
-    find_started_heroes as _find_started_heroes,
     format_duration,
 )
 from core.heroes_store import (
@@ -68,6 +68,8 @@ class HeroesTroll(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._active_sessions: dict[tuple[int, int], dict[str, object]] = {}
+        self._pending_exits: dict[tuple[int, int], asyncio.Task] = {}
+        self._reconcile_task: asyncio.Task | None = None
         ensure_heroes_storage()
         self._load_active_sessions()
 
@@ -79,11 +81,49 @@ class HeroesTroll(commands.Cog):
             }
 
     def cog_unload(self):
-        pass
+        for task in self._pending_exits.values():
+            task.cancel()
+        self._pending_exits.clear()
+        if self._reconcile_task:
+            self._reconcile_task.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self):
-        asyncio.create_task(self._reconcile_active_sessions())
+        if self._reconcile_task is None or self._reconcile_task.done():
+            self._reconcile_task = asyncio.create_task(self._reconcile_active_sessions())
+
+    def _cancel_exit(self, key):
+        task = self._pending_exits.pop(key, None)
+        if task:
+            task.cancel()
+
+    def _schedule_exit(self, guild_id, user_id):
+        key = (guild_id, user_id)
+        if key not in self._pending_exits:
+            # Preserve the first empty-presence time; repeated updates do not postpone it.
+            absent_at = datetime.now(UTC)
+            self._pending_exits[key] = asyncio.create_task(self._finish_after_absence(key, absent_at))
+
+    async def _finish_after_absence(self, key, absent_at):
+        try:
+            await asyncio.sleep(EXIT_GRACE_SECONDS)
+            guild_id, user_id = key
+            guild = self.bot.get_guild(guild_id)
+            member = guild.get_member(user_id) if guild else None
+            # Missing cache/member is not proof that a game was closed.
+            if member is None or _extract_game_names(member.activities):
+                return
+            session = self._pop_session(guild_id, user_id)
+            if session is None:
+                return
+            started_at = session["started_at"]
+            game_name = str(session["game_name"])
+            self._save_finished_session(guild_id, user_id, game_name, started_at, absent_at)
+            duration = self._format_duration(max(0, int((absent_at-started_at).total_seconds())))
+            await self._send_troll(guild, user_id, game_name, duration=duration, ended=True)
+        finally:
+            if self._pending_exits.get(key) is asyncio.current_task():
+                self._pending_exits.pop(key, None)
 
     def _remember_session(self, guild_id: int, user_id: int, game_name: str):
         now = datetime.now(UTC)
@@ -130,8 +170,6 @@ class HeroesTroll(commands.Cog):
 
     async def _reconcile_active_sessions(self):
         await self.bot.wait_until_ready()
-        stale: list[tuple[discord.Guild, int, dict[str, object]]] = []
-
         for (guild_id, user_id), session in list(self._active_sessions.items()):
             guild = self.bot.get_guild(guild_id)
             if guild is None:
@@ -139,21 +177,10 @@ class HeroesTroll(commands.Cog):
             member = guild.get_member(user_id)
             if member is None:
                 continue
-            active_now = _find_active_heroes(_extract_game_names(member.activities))
-            if active_now:
+            if _extract_game_names(member.activities):
+                self._cancel_exit((guild_id, user_id))
                 continue
-            stale.append((guild, user_id, session))
-
-        for guild, user_id, session in stale:
-            popped = self._pop_session(guild.id, user_id)
-            if not popped:
-                continue
-            started_at = popped["started_at"]
-            game_name = str(popped["game_name"])
-            ended_at = datetime.now(UTC)
-            self._save_finished_session(guild.id, user_id, game_name, started_at, ended_at)
-            duration = self._format_duration(int((ended_at - started_at).total_seconds()))
-            await self._send_troll(guild, user_id, game_name, duration=duration, ended=True)
+            self._schedule_exit(guild_id, user_id)
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member):
@@ -162,28 +189,26 @@ class HeroesTroll(commands.Cog):
 
         before_names = _extract_game_names(before.activities)
         after_names = _extract_game_names(after.activities)
-        started = _find_started_heroes(before_names, after_names)
         active_before = _find_active_heroes(before_names)
         active_after = _find_active_heroes(after_names)
         key = (after.guild.id, after.id)
 
-        if active_before and not active_after:
-            session = self._pop_session(after.guild.id, after.id)
-            if session:
-                started_at = session["started_at"]
-                game_name = str(session["game_name"])
-                ended_at = datetime.now(UTC)
-                self._save_finished_session(after.guild.id, after.id, game_name, started_at, ended_at)
-                duration = self._format_duration(int((ended_at - started_at).total_seconds()))
-                await self._send_troll(after.guild, after.id, game_name, duration=duration, ended=True)
+        if active_after:
+            self._cancel_exit(key)
+            if key in self._active_sessions:
+                return  # Alt-tab, activity order/name changes, or a temporary presence gap.
+            self._remember_session(after.guild.id, after.id, active_after)
+            if not active_before:
+                await self._send_troll(after.guild, after.id, active_after)
             return
-
-        if not started:
-            if key not in self._active_sessions and active_after:
-                self._remember_session(after.guild.id, after.id, active_after)
+        if key not in self._active_sessions:
             return
-        self._remember_session(after.guild.id, after.id, started)
-        await self._send_troll(after.guild, after.id, started)
+        if after_names:
+            # Discord may advertise only the foreground game. Another game does not
+            # prove that Heroes stopped; keep the existing session without new posts.
+            self._cancel_exit(key)
+            return
+        self._schedule_exit(after.guild.id, after.id)
 
 
 async def setup(bot: commands.Bot):
