@@ -950,6 +950,9 @@ async def _send_shop_hub(bot: commands.Bot, interaction: discord.Interaction):
 
 
 async def _send_lol_game_hub(bot: commands.Bot, interaction: discord.Interaction):
+    async def live(next_interaction: discord.Interaction):
+        await _invoke_cog_action(bot, next_interaction, "LolProfile", "live_hub")
+
     async def my_profile(next_interaction: discord.Interaction):
         await _invoke_cog_action(bot, next_interaction, "LolProfile", "profile")
 
@@ -998,6 +1001,7 @@ async def _send_lol_game_hub(bot: commands.Bot, interaction: discord.Interaction
         placeholder="Выбери действие LoL",
         options=[
             discord.SelectOption(label="Мой LoL профиль", value="my_profile", emoji="👤"),
+            discord.SelectOption(label="Ранги моей игры", value="live", emoji="🎮"),
             discord.SelectOption(label="Профиль участника", value="member_profile", emoji="🧑"),
             discord.SelectOption(label="Обновить статистику", value="refresh", emoji="🔄"),
             discord.SelectOption(label="Привязать Riot ID", value="link", emoji="🔗"),
@@ -1005,6 +1009,7 @@ async def _send_lol_game_hub(bot: commands.Bot, interaction: discord.Interaction
         ],
         callbacks={
             "my_profile": my_profile,
+            "live": live,
             "member_profile": member_profile,
             "refresh": refresh,
             "link": link,

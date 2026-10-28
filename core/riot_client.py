@@ -33,13 +33,16 @@ class RiotRouting:
 
 
 class RiotApiError(RuntimeError):
-    pass
+    def __init__(self,message,status=None,retry_after=None):
+        super().__init__(message)
+        self.status,self.retry_after=status,retry_after
 
 
 class RiotClient:
-    def __init__(self, api_key: str | None = None, routing: RiotRouting | None = None):
+    def __init__(self, api_key: str | None = None, routing: RiotRouting | None = None, *, retry_rate_limit=True):
         self.api_key = (api_key or RIOT_API_KEY or "").strip()
         self.routing = (routing or RiotRouting()).normalized()
+        self.retry_rate_limit = retry_rate_limit
 
     @property
     def configured(self) -> bool:
@@ -53,7 +56,7 @@ class RiotClient:
         timeout = aiohttp.ClientTimeout(total=25)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers, params=params or {}) as resp:
-                if resp.status == 429:
+                if resp.status == 429 and self.retry_rate_limit:
                     retry = int(float(resp.headers.get("Retry-After", "3")))
                     await asyncio.sleep(min(retry, 10))
                     async with session.get(url, headers=headers, params=params or {}) as retry_resp:
@@ -63,8 +66,20 @@ class RiotClient:
     async def _read_response(self, resp: aiohttp.ClientResponse) -> dict[str, Any] | list[Any]:
         if resp.status >= 400:
             text = await resp.text()
-            raise RiotApiError(f"Riot API HTTP {resp.status}: {text[:300]}")
+            try:retry_after=max(1,float(resp.headers.get('Retry-After','120')))
+            except (ValueError,TypeError):retry_after=120
+            raise RiotApiError(f"Riot API HTTP {resp.status}: {text[:300]}",resp.status,retry_after)
         return await resp.json()
+
+    async def active_game(self,puuid: str):
+        try:
+            return await self._get(self.routing.platform,f"/lol/spectator/v5/active-games/by-summoner/{quote(puuid,safe='')}")
+        except RiotApiError as exc:
+            if exc.status==404:return None
+            raise
+
+    async def account_by_puuid(self,puuid: str):
+        return await self._get(self.routing.regional,f"/riot/account/v1/accounts/by-puuid/{quote(puuid,safe='')}")
 
     async def account_by_riot_id(self, game_name: str, tag_line: str) -> dict[str, Any]:
         game_name_q = quote(game_name.strip(), safe="")

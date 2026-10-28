@@ -22,6 +22,7 @@ from core.game_profiles import (
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
 from core.riot_client import RiotApiError, RiotClient, RiotRouting, split_riot_id
 from config import RIOT_API_KEY, RIOT_PLATFORM_REGION, RIOT_REGIONAL_ROUTING
+from fun_slesh.lol_live import LiveRanks
 
 
 def _rank_line(entries: list[dict[str, Any]]) -> str:
@@ -57,6 +58,16 @@ class LolProfile(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.live = LiveRanks(bot, RIOT_API_KEY)
+
+    async def cog_load(self):
+        self.live.loop.start()
+
+    def cog_unload(self):
+        self.live.loop.cancel()
+
+    async def live_hub(self, interaction: discord.Interaction):
+        await self.live.hub(interaction)
 
     def _client(self, platform: str | None = None, regional: str | None = None) -> RiotClient:
         routing = RiotRouting(
