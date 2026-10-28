@@ -9,7 +9,7 @@ import discord
 from core import game_profiles, lol_live_store as store, settings_store
 from core.lol_live_service import LiveService, solo_rank
 from core.riot_client import RiotApiError, RiotClient
-from fun_slesh.lol_live import LiveRanks, game_embed
+from fun_slesh.lol_ui.live import LiveRanks, game_embed
 
 
 class StoreTests(unittest.TestCase):

@@ -22,7 +22,7 @@ from core.game_profiles import (
 from core.lol_player_model import classify_lol_player, extract_lol_match_features
 from core.riot_client import RiotApiError, RiotClient, RiotRouting, split_riot_id
 from config import RIOT_API_KEY, RIOT_PLATFORM_REGION, RIOT_REGIONAL_ROUTING
-from fun_slesh.lol_live import LiveRanks
+from fun_slesh.lol_ui.live import LiveRanks
 
 
 def _rank_line(entries: list[dict[str, Any]]) -> str:

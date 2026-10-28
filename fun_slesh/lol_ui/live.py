@@ -1,4 +1,4 @@
-"""Opt-in Discord UI and active-match delivery; never reads the local game client."""
+"""Opt-in UI helper (not a standalone extension); never reads the local client."""
 import logging
 
 import discord
