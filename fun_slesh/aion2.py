@@ -18,6 +18,8 @@ from fun_slesh.aion2_ui.characters import open_character_hub
 from core import aion2_boss_service
 from fun_slesh.aion2_ui.bosses import open_bosses, boss_embed, BossBoardView
 from fun_slesh.aion2_ui.boards import publish_board
+from fun_slesh.aion2_ui.personal import open_players, open_checklist, open_progress
+from fun_slesh.aion2_ui.dps import open_dps
 
 log = logging.getLogger(__name__)
 TIMERS_FEATURE = "aion2_timers"
@@ -140,6 +142,22 @@ class Aion2View(discord.ui.View):
     @discord.ui.button(label="Новости Global",emoji="📰",row=0)
     async def news_button(self, interaction, button):
         await self.news(interaction)
+
+    @discord.ui.button(label="Кто играет",emoji="🎮",row=0)
+    async def playing_friends(self,interaction,button):
+        await open_players(interaction)
+
+    @discord.ui.button(label="Мой прогресс",emoji="📈",row=1)
+    async def personal_progress(self,interaction,button):
+        await open_progress(interaction)
+
+    @discord.ui.button(label="Мой чеклист",emoji="✅",row=2)
+    async def personal_checklist(self,interaction,button):
+        await open_checklist(interaction)
+
+    @discord.ui.button(label="DPS / LagoFast",row=4)
+    async def personal_dps(self,interaction,button):
+        await open_dps(interaction)
 
     @discord.ui.button(label="Таймеры EU",emoji="⏱️",row=4)
     async def timers(self,interaction,button):
@@ -375,7 +393,7 @@ class Aion2(commands.Cog):
             await interaction.response.send_message("Раздел Aion 2 доступен на сервере.",ephemeral=True)
             return
         await interaction.response.send_message(
-            "**Aion 2**\nОфициальные новости Global, техработы и события; карточки игроков Global/KR/TW; расписание вашей группы по МСК.\nПоиск и характеристики персонажей доступны на официальном сайте. Таймеры публикуются только в специально настроенный администрацией канал.",
+            "**Aion 2**\nНовости, персонажи / API, боссы и таймеры. Для друзей: кто играет, личный чеклист, снимки прогресса и разбор DPS.\nЛичные инструменты открываются только по запросу, без новых рассылок. LagoFast — ручной ввод; автоматический разбор пока только публичных отчётов A2Tools.",
             view=Aion2View(interaction.user.id),ephemeral=True)
 
 
